@@ -73,8 +73,13 @@ pub fn with_runtime_init() -> Unit:
 pub fn with_runtime_shutdown() -> Unit:
     fiber_drain_detached_ready()
     fiber_clear_detached_buffers()
-    with_debug_alloc_report_leaks()
+    // Tear down the runtime (which recycles every remaining fiber and frees the
+    // fiber pool) BEFORE walking the debug-alloc ledger. Otherwise pooled fiber
+    // control blocks are still live during the leak walk and get reported as
+    // leaks even though core shutdown frees them moments later. Reporting last
+    // keeps true leaks visible while excluding runtime structures we do free.
     with_runtime_core_shutdown()
+    with_debug_alloc_report_leaks()
 
 pub fn with_runtime_has_fibers() -> i32:
     with_runtime_core_has_fibers()

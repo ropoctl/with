@@ -538,6 +538,17 @@ Unacceptable resolution:
 call it expected noise without allocation provenance
 ```
 
+**Resolved (resolution 1).** Root-caused with origin tags + lldb: the two `size=512`
+leaks are `origin=fiber` — the pooled fiber control blocks (`FIBER_SIZE` rounded to the
+512 slab class), one per spawned task. They are *not* the channel ring buffer; there
+were zero `origin=channel` leaks, which proves `Sender`/`Receiver` `Drop` already frees
+the handle and buffer. The blocks were not truly leaked: `with_runtime_core_shutdown`
+recycles every fiber and calls `free_fiber_pool`, but `with_runtime_shutdown` ran the
+debug-alloc ledger walk *before* that teardown, so the still-pooled blocks were reported
+as leaks. Fix: report leaks *after* `with_runtime_core_shutdown` (`rt/fiber_runtime.w`).
+`behav_channel_bounded` now reports `leak count=0`, and `test/debug_alloc/da_channel_task_fiber.w`
+pins it as a deterministic oracle.
+
 ---
 
 ## Field Receiver Chains

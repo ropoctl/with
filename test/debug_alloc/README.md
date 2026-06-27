@@ -38,6 +38,11 @@ construction and escape shape: `leak count=0`, never `DOUBLE FREE`.
 - `da_drop_conditional_move_value` covers the first runtime drop-flag path:
   whole `Drop` locals moved in one side of an `if` are dropped exactly once on
   moved and not-moved paths.
+- `da_channel_task_fiber` spawns producer/consumer fibers with channel endpoints
+  moved into each task and awaits both; it expects `leak count=0`. It pins
+  fiber-lifecycle cleanup at shutdown: pooled fiber control blocks
+  (`origin=fiber`) must be freed before the ledger is walked, not reported as
+  leaks.
 - `da_manual_double_free` (`with_free` twice) expects `DOUBLE FREE` — a stable,
   compiler-independent check that the ledger detects a double free.
 - `da_drop_origin_double_free` duplicates a `Vec[Drop]` header and explicitly
