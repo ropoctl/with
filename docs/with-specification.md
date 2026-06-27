@@ -327,6 +327,36 @@ let b = a            // a is moved; b is the new owner
 // a.push(1)         // COMPILE ERROR: use of moved value `a`
 ```
 
+**Conditional moves are flow-sensitive.** A binding moved on some but
+not all control-flow paths reaching a program point is *conditionally
+moved* there. Using it is a compile error unless it has been
+reinitialized on every path that reaches the use. Whether a binding is
+moved at a point is determined by a conservative join over predecessors
+(§21.1 rule 9): it is moved if moved on any reaching path that does not
+diverge.
+
+```
+fn demo(cond: bool):
+    let v = Vec.new()
+    if cond:
+        consume(v)        // moves v on the cond == true path
+    v.push(1)             // COMPILE ERROR: v may have been moved
+```
+
+```
+fn demo(cond: bool):
+    var v = Vec.new()
+    if cond:
+        consume(v)        // moved on this path
+    else:
+        v = Vec.new()     // reinitialized on this path
+    v.push(1)             // COMPILE ERROR: not reinitialized on the
+                          // cond == true path
+```
+
+A conditionally moved binding becomes usable again only when it is
+reinitialized on *every* path reaching the use.
+
 ### 2.3 Copy Types
 
 Types that implement the `Copy` trait are implicitly copied on
@@ -416,6 +446,13 @@ for i in 0..n:
     h = transform(h)
     // old h dropped here — resource released before new value stored
 ```
+
+**Conditional drop:** When a value is conditionally moved (§2.2) —
+moved on some paths and live on others — its destructor runs on exactly
+the paths where it still owns a value, and is skipped on the paths
+where it was moved. The compiler arranges this automatically; the
+programmer writes nothing and adds no annotations. Drop on
+reassignment, above, is the loop case of this rule.
 
 **Drop on expression temporaries:** Temporaries created within an
 expression are dropped at the end of the enclosing statement. This
@@ -10682,6 +10719,30 @@ At every program point, the following must hold:
    does not require reborrowing — the receiver is the caller's place,
    so method chains compose naturally. Each `mut self` call mutates
    that place and leaves it valid for subsequent calls.
+
+9. **Move-state join.** At a control-flow merge, a place is moved if it
+   is moved on any predecessor path that reaches the merge without
+   diverging. Paths that diverge — `return`, `break`, `continue`, or a
+   call that never returns — contribute no move-state to the merge. A
+   place that is moved on some reaching paths and live on others is
+   treated as **moved** for use-checking (§2.2): it may not be used
+   until reinitialized on all paths. Its destructor is elaborated to run
+   only on the paths where it is still live (§2.4, Conditional drop).
+
+   ```
+   // moved in one branch, reinitialized in the other → still a
+   // use-after-move (the first branch does not reinitialize):
+   if cond: consume(v) else: v = T.new()
+   use(v)               // ERROR unless reinitialized on every path
+
+   // an arm that consumes the value and then diverges does NOT mark
+   // the value moved on the fallthrough path:
+   match m:
+       .A => return consume(owner)   // moves owner, but exits
+       _  => ()
+   use(owner)                        // OK: the only arm that moved
+                                     // owner left the function
+   ```
 
 ---
 
