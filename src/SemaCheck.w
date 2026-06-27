@@ -7330,7 +7330,12 @@ fn Sema.check_if_expr(self: Sema, node: i32) -> i32:
     let outer_expected: TypeId = if in_value_context and self.has_expected_type != 0: self.expected_expr_type else: 0 as TypeId
     // Save scope states before then branch so early-return branches don't
     // permanently mark outer variables as MOVED when control continues past the if.
-    let pre_then_states = self.save_scope_states()
+    // Branch move-state join (MaybeUninitialized half — docs/branch-merge-soundness.md):
+    // check each branch from the SAME entry state, then union the two exits so a
+    // value moved on one path is treated as moved after the if (use-after-move
+    // soundness). The old linear flow let an else-branch reinit silently overwrite a
+    // then-branch move, and let the else branch see the then branch's moves.
+    let entry_states = self.save_scope_states()
     var pushed_regex_capture_scope = 0
     if self.ast.kind(cond) == NodeKind.NK_MATCH_OP:
         let rhs = self.ast.get_data1(cond)
@@ -7347,16 +7352,16 @@ fn Sema.check_if_expr(self: Sema, node: i32) -> i32:
     self.drop_control_flow_depth = saved_drop_cf_then
     if pushed_regex_capture_scope != 0:
         self.pop_scope()
-    // If then branch always terminates, restore pre-then states for the continuation.
-    if self.get_type_kind(self.resolve_alias(then_type as TypeId)) == TypeKind.TY_NEVER:
-        self.restore_scope_states(pre_then_states)
+    let then_is_never = if self.get_type_kind(self.resolve_alias(then_type as TypeId)) == TypeKind.TY_NEVER: 1 else: 0
+    let then_exit_states = self.save_scope_states()
+    // Re-analyze the else branch from the entry move-state, not the then residual.
+    self.restore_scope_states(&entry_states)
 
     var result_type: TypeId = self.ty_void
+    var else_is_never = 0
     if else_body != 0:
         // Don't propagate ty_never as else_expected; use outer_expected instead.
-        let then_is_never = self.get_type_kind(self.resolve_alias(then_type as TypeId)) == TypeKind.TY_NEVER
         let else_expected: TypeId = if in_value_context and then_type != 0 and then_type != self.ty_void and then_is_never == 0: then_type else: outer_expected
-        let pre_else_states = self.save_scope_states()
         let saved_drop_cf_else = self.drop_control_flow_depth
         if self.current_drop_type_sym != 0:
             self.drop_control_flow_depth = self.drop_control_flow_depth + 1
@@ -7364,14 +7369,11 @@ fn Sema.check_if_expr(self: Sema, node: i32) -> i32:
         let else_type = if else_expected != 0: self.check_expr_with_expected(else_body, else_expected) else: self.check_expr(else_body)
         self.pop_move_control_flow_context()
         self.drop_control_flow_depth = saved_drop_cf_else
-        // If else branch always terminates, restore pre-else states.
-        let else_is_never = self.get_type_kind(self.resolve_alias(else_type as TypeId)) == TypeKind.TY_NEVER
-        if else_is_never:
-            self.restore_scope_states(pre_else_states)
+        else_is_never = if self.get_type_kind(self.resolve_alias(else_type as TypeId)) == TypeKind.TY_NEVER: 1 else: 0
         // When one branch is Never, the result is the other branch's type.
-        if then_is_never and else_type != 0:
+        if then_is_never != 0 and else_type != 0:
             result_type = else_type
-        else if else_is_never and then_type != 0:
+        else if else_is_never != 0 and then_type != 0:
             result_type = then_type
         else if then_type != 0 and else_type != 0:
             if self.types_compatible(then_type as i32, else_type as i32):
@@ -7383,9 +7385,13 @@ fn Sema.check_if_expr(self: Sema, node: i32) -> i32:
         else:
             result_type = else_type
     else:
-        let then_is_never = self.get_type_kind(self.resolve_alias(then_type as TypeId)) == TypeKind.TY_NEVER
         if in_value_context and self.current_statement_expr_root == 0 and then_is_never == 0:
             self.emit_error("if expression requires an else branch unless the then branch diverges", node)
+    // The else path of an else-less if is the entry state (condition false), which
+    // is the current state here. Union the two exits; divergent branches drop out.
+    let else_exit_states = self.save_scope_states()
+    let merged_states = self.merge_branch_move_states(&entry_states, &then_exit_states, then_is_never, &else_exit_states, else_is_never)
+    self.restore_scope_states(&merged_states)
     // §16.4: a union's last-written field is not known on all paths after a
     // branch — conservatively mark tracked unions unknown.
     self.union_clear_last_written()

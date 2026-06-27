@@ -3769,10 +3769,32 @@ fn Sema.save_scope_states(self: Sema) -> Vec[i32]:
         snapshot.push(self.bind_states.get(i as i64))
     snapshot
 
-fn Sema.restore_scope_states(self: Sema, snapshot: Vec[i32]):
+fn Sema.restore_scope_states(self: Sema, snapshot: &Vec[i32]):
     let count = snapshot.len() as i32
     for i in 0..count:
         self.bind_states.set_i32(i as i64, snapshot.get(i as i64))
+
+// Conservative union of move-state across two control-flow branches, for the
+// MaybeUninitialized use-checking half (see docs/branch-merge-soundness.md). A
+// binding is MOVED after the construct iff it is MOVED on ANY non-diverging
+// branch (so a value moved on one path cannot be used after — use-after-move
+// soundness); divergent branches (TY_NEVER) contribute nothing. If both branches
+// diverge the continuation is unreachable, so fall back to the entry state.
+fn Sema.merge_branch_move_states(self: Sema, entry: &Vec[i32], a: &Vec[i32], a_diverges: i32, b: &Vec[i32], b_diverges: i32) -> Vec[i32]:
+    var out: Vec[i32] = Vec.new()
+    let n = entry.len() as i32
+    if a_diverges != 0 and b_diverges != 0:
+        for i in 0..n:
+            out.push(entry.get(i as i64))
+        return out
+    for i in 0..n:
+        var moved = 0
+        if a_diverges == 0 and i < a.len() as i32 and a.get(i as i64) == VarState.MOVED:
+            moved = 1
+        if b_diverges == 0 and i < b.len() as i32 and b.get(i as i64) == VarState.MOVED:
+            moved = 1
+        out.push(if moved != 0: VarState.MOVED else: VarState.LIVE)
+    out
 
 fn Sema.clear_binding_view_deps(self: Sema, sym: i32):
     let opt = self.scope_name_map.get(sym)
