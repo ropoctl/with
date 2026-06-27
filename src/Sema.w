@@ -3796,6 +3796,19 @@ fn Sema.merge_branch_move_states(self: Sema, entry: &Vec[i32], a: &Vec[i32], a_d
         out.push(if moved != 0: VarState.MOVED else: VarState.LIVE)
     out
 
+// Pointwise union for accumulating a join over N branches/arms (e.g. match): a
+// binding is MOVED in the result iff MOVED in either input. Seed the accumulator
+// with the entry state (the implicit no-match/fallthrough path) and fold each
+// non-diverging arm exit into it; see docs/branch-merge-soundness.md.
+fn Sema.union_move_states(self: Sema, base: &Vec[i32], other: &Vec[i32]) -> Vec[i32]:
+    var out: Vec[i32] = Vec.new()
+    let n = base.len() as i32
+    for i in 0..n:
+        let bv = base.get(i as i64)
+        let ov = if i < other.len() as i32: other.get(i as i64) else: VarState.LIVE
+        out.push(if bv == VarState.MOVED or ov == VarState.MOVED: VarState.MOVED else: VarState.LIVE)
+    out
+
 fn Sema.clear_binding_view_deps(self: Sema, sym: i32):
     let opt = self.scope_name_map.get(sym)
     if opt.is_some():

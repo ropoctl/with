@@ -9351,12 +9351,22 @@ fn Sema.check_match_expr(self: Sema, node: i32) -> i32:
     if comprehension_carrier != 0 and saved_for_comprehension_carrier == 0:
         self.current_for_comprehension_carrier = comprehension_carrier
 
+    // Branch move-state join over the arms (docs/branch-merge-soundness.md): seed
+    // with the entry state (the implicit no-match/fallthrough path) and union each
+    // non-diverging arm's exit. Each arm is analyzed from the entry state, so arms
+    // don't inherit each other's moves and a returning/diverging arm's move does not
+    // leak to the fallthrough (#579).
+    let match_entry_states = self.save_scope_states()
+    var match_merged_states = self.union_move_states(&match_entry_states, &match_entry_states)
+
     for ai in 0..arm_count:
         let arm_node = self.ast.get_extra(extra_start + ai)
         let pat = self.ast.get_data0(arm_node)
         let arm_body = self.ast.get_data1(arm_node)
         let guard = self.ast.get_data2(arm_node)
 
+        // Analyze each arm from the shared entry move-state (no cross-arm leak).
+        self.restore_scope_states(&match_entry_states)
         // supports_drop_flags=1: whole-value Drop moves out of a match arm are
         // allowed and protected by a runtime drop flag in MIR (mirrors `if`).
         // Conditional *field* moves remain rejected via drop_control_flow_depth.
@@ -9384,6 +9394,10 @@ fn Sema.check_match_expr(self: Sema, node: i32) -> i32:
         self.drop_control_flow_depth = saved_drop_cf_arm
         self.pop_scope()
         self.pop_move_control_flow_context()
+        // Union this arm's exit move-state into the merge unless the arm diverges.
+        if self.get_type_kind(self.resolve_alias(arm_type as TypeId)) != TypeKind.TY_NEVER:
+            let arm_exit_states = self.save_scope_states()
+            match_merged_states = self.union_move_states(&match_merged_states, &arm_exit_states)
 
         if result_type == 0:
             result_type = arm_type
@@ -9393,6 +9407,7 @@ fn Sema.check_match_expr(self: Sema, node: i32) -> i32:
         else if arm_type != 0 and self.types_compatible(result_type, arm_type) != 0:
             result_type = self.preferred_compatible_type(result_type, arm_type)
 
+    self.restore_scope_states(&match_merged_states)
     self.current_for_comprehension_carrier = saved_for_comprehension_carrier
 
     // Exhaustiveness checking for enum and bool subjects.
