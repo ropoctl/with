@@ -779,6 +779,7 @@ let POSIX_SIGHUP: i32 = 1
 let POSIX_SIG_BLOCK: i32 = 1
 let POSIX_SIG_SETMASK: i32 = 3
 let POSIX_RLIMIT_STACK: i32 = 3
+let POSIX_RLIMIT_AS: i32 = 9
 let POSIX_RLIM_INFINITY: u64 = 9223372036854775807 as u64
 let POSIX_EINTR: i32 = 4
 let POSIX_SIGACTION_SIZE: i64 = 16
@@ -989,6 +990,23 @@ pub fn rt_compat_raise_stack_limit() -> Unit:
     if want > lim_cur:
         posix_store_i64(lim_base, 0, want as i64)
         let _ = setrlimit(POSIX_RLIMIT_STACK, lim_base as *const u8)
+
+pub fn rt_set_process_memory_limit_bytes(limit: i64) -> i32:
+    if limit <= 0:
+        return 0
+    var lim: [16]u8 = [0 as u8; 16]
+    let lim_base = (&raw mut lim) as *mut [16]u8 as i64
+    if getrlimit(POSIX_RLIMIT_AS, lim_base as *mut u8) != 0:
+        return -1
+    var want = limit as u64
+    let lim_max = posix_load_u64(lim_base, 8)
+    if lim_max != POSIX_RLIM_INFINITY and want > lim_max:
+        want = lim_max
+    let lim_cur = posix_load_u64(lim_base, 0)
+    if lim_cur != POSIX_RLIM_INFINITY and lim_cur <= want:
+        return 0
+    posix_store_i64(lim_base, 0, want as i64)
+    setrlimit(POSIX_RLIMIT_AS, lim_base as *const u8)
 
 pub fn rt_compat_interrupt_requested() -> i32:
     posix_interrupt_flag

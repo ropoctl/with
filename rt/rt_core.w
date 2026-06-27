@@ -28,6 +28,7 @@ extern fn rt_getpid() -> i32
 extern fn rt_raise(sig: i32) -> i32
 extern fn rt_kill(pid: i32, sig: i32) -> i32
 extern fn rt_sysinfo(out: *mut u8) -> i32
+extern fn rt_set_process_memory_limit_bytes(limit: i64) -> i32
 extern fn gethostname(name: *mut u8, len: u64) -> i32
 extern fn rt_thread_spawn(start_routine: *mut u8, arg: *mut u8) -> i64
 extern fn rt_thread_join(handle: i64) -> i32
@@ -397,6 +398,10 @@ var rt_large_range_ends: [8192]i64 = [0 as i64; 8192]
 var rt_large_range_count: i32 = 0
 var rt_large_ranges_complete: i32 = 1
 
+var rt_alloc_committed_bytes: i64 = 0
+var rt_alloc_limit_state: i32 = 0       // 0=unread, 1=disabled, 2=enabled
+var rt_alloc_limit_bytes: i64 = 0
+
 fn rt_record_slab_range(start: i64, size: i64):
     if rt_slab_range_count >= RT_ALLOC_RANGE_CAP:
         rt_slab_ranges_complete = 0
@@ -609,6 +614,82 @@ fn dbg_put_i64(v: i64):
     var buf: [24]u8 = [0 as u8; 24]
     let len = i64_to_buf(v, &buf as *mut u8)
     let _ = rt_write(2, &buf as *const u8, len as u64)
+
+fn rt_parse_limit_cstr(p: *const u8) -> i64:
+    if p as i64 == 0:
+        return 0
+    if unsafe *p == 0:
+        return 0
+    var value: i64 = 0
+    var i: i64 = 0
+    while true:
+        let c = unsafe *((p as i64 + i) as *const u8)
+        if c == 0:
+            return value
+        if c < 48 or c > 57:
+            return -1
+        let digit = (c - 48) as i64
+        if value > (9223372036854775807 - digit) / 10:
+            return -1
+        value = value * 10 + digit
+        i = i + 1
+
+fn rt_alloc_effective_limit_unlocked() -> i64:
+    if rt_alloc_limit_state == 0:
+        let raw = rt_getenv(c"WITH_MEMORY_LIMIT_BYTES".ptr)
+        let parsed = rt_parse_limit_cstr(raw)
+        if parsed < 0:
+            dbg_puts("error: WITH_MEMORY_LIMIT_BYTES must be a non-negative byte count" as *const u8, 64)
+            dbg_puts("\n" as *const u8, 1)
+            rt_exit(125)
+        if parsed > 0:
+            rt_alloc_limit_bytes = parsed
+            rt_alloc_limit_state = 2
+        else:
+            rt_alloc_limit_state = 1
+    if rt_alloc_limit_state == 2:
+        return rt_alloc_limit_bytes
+    0
+
+fn rt_alloc_report_limit_exceeded(requested: i64, limit: i64):
+    dbg_puts("with: memory limit exceeded: committed=" as *const u8, 39)
+    dbg_put_i64(rt_alloc_committed_bytes)
+    dbg_puts(" requested=" as *const u8, 11)
+    dbg_put_i64(requested)
+    dbg_puts(" limit=" as *const u8, 7)
+    dbg_put_i64(limit)
+    dbg_puts(" bytes" as *const u8, 6)
+    dbg_puts("\n" as *const u8, 1)
+    rt_exit(125)
+
+fn rt_alloc_reserve_mmap_bytes(total: i64):
+    if total <= 0:
+        return
+    let limit = rt_alloc_effective_limit_unlocked()
+    if limit > 0:
+        if total > limit or rt_alloc_committed_bytes > limit - total:
+            rt_alloc_report_limit_exceeded(total, limit)
+    rt_alloc_committed_bytes = rt_alloc_committed_bytes + total
+
+fn rt_alloc_release_mmap_bytes(total: i64):
+    if total <= 0:
+        return
+    if total >= rt_alloc_committed_bytes:
+        rt_alloc_committed_bytes = 0
+    else:
+        rt_alloc_committed_bytes = rt_alloc_committed_bytes - total
+
+pub fn with_set_memory_limit_bytes(limit: i64) -> Unit:
+    rt_allocator_lock()
+    if limit > 0:
+        rt_alloc_limit_bytes = limit
+        rt_alloc_limit_state = 2
+    else:
+        rt_alloc_limit_bytes = 0
+        rt_alloc_limit_state = 1
+    if limit > 0:
+        let _ = rt_set_process_memory_limit_bytes(limit)
+    rt_allocator_unlock()
 
 fn dbg_ledger_init():
     if dbg_base != 0:
@@ -869,8 +950,10 @@ fn rt_alloc_unlocked(size_arg: i64) -> *mut u8:
     if size > RT_LARGE_THRESHOLD:
         // Large allocation: direct rt_mmap with 16-byte header storing size
         let total = size + RT_ALLOC_HEADER_SIZE
+        rt_alloc_reserve_mmap_bytes(total)
         let p = rt_mmap(total as u64)
         if p as i64 == 0:
+            rt_alloc_release_mmap_bytes(total)
             rt_exit(99)
         // Store allocation size in header
         unsafe *(p as *mut i64) = size
@@ -894,8 +977,10 @@ fn rt_alloc_unlocked(size_arg: i64) -> *mut u8:
 
     // Carve from slab
     if slab_remaining < block_size:
+        rt_alloc_reserve_mmap_bytes(RT_PAGE_SIZE)
         let new_slab = rt_mmap(RT_PAGE_SIZE as u64)
         if new_slab as i64 == 0:
+            rt_alloc_release_mmap_bytes(RT_PAGE_SIZE)
             rt_exit(99)
         slab_ptr = new_slab as i64
         slab_remaining = RT_PAGE_SIZE
@@ -937,8 +1022,10 @@ fn rt_free_unlocked_with_drop_origin(ptr: *mut u8, drop_origin_ptr: i64, drop_or
     let block = alloc_header_ptr(ptr as *const u8) as i64
     let size = unsafe *(block as *const i64)
     if size > RT_LARGE_THRESHOLD:
+        let total = size + RT_ALLOC_HEADER_SIZE
         rt_forget_large_range(block)
-        rt_munmap(block as *mut u8, (size + RT_ALLOC_HEADER_SIZE) as u64)
+        rt_munmap(block as *mut u8, total as u64)
+        rt_alloc_release_mmap_bytes(total)
         return
     let idx = size_class_index(size)
     free_small_block(block, idx)

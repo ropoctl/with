@@ -249,6 +249,13 @@ type ComptimeEvaluator {
     tool_identity_paths: Vec[str],
     tool_identity_values: Vec[str],
     strict_effects: i32,
+    // Worker mode: when a build target runs in a subprocess worker, build(ctx)
+    // is re-evaluated only to reconstruct the declarative graph. The parent
+    // already performed every comptime ToolFs mutation, so the worker must not
+    // repeat them (re-running non-idempotent ops like extract_tar's symlink
+    // fails with EEXIST). Reads stay live so the graph still observes the
+    // parent's outputs.
+    suppress_toolfs_writes: i32,
     has_pending_diag: i32,
     pending_diag: Diagnostic,
 }
@@ -316,6 +323,7 @@ fn ComptimeEvaluator.init(sema: Sema, ast: AstPool, pool: InternPool, require_su
         tool_identity_paths: Vec.new(),
         tool_identity_values: Vec.new(),
         strict_effects: 0,
+        suppress_toolfs_writes: 0,
         has_pending_diag: 0,
         pending_diag: Diagnostic.err("", Span { file: 0, start: 0, end: 0 }),
     }
@@ -1227,13 +1235,14 @@ unsafe fn comptime_try_eval_expr(sema_ptr: *mut Sema, ast: AstPool, pool: Intern
 unsafe fn comptime_force_eval_expr(sema_ptr: *mut Sema, ast: AstPool, pool: InternPool, node: i32) -> ComptimeValue:
     comptime_force_eval_expr_result(sema_ptr, ast, pool, node).value
 
-unsafe fn comptime_eval_tool_build_result(sema_ptr: *mut Sema, ast: AstPool, pool: InternPool, fn_sym: i32, package_name: str, package_version: str, project_root: str, strict_effects: i32) -> ComptimeEvalResult:
+unsafe fn comptime_eval_tool_build_result(sema_ptr: *mut Sema, ast: AstPool, pool: InternPool, fn_sym: i32, package_name: str, package_version: str, project_root: str, strict_effects: i32, suppress_side_effects: i32) -> ComptimeEvalResult:
     var sema = *sema_ptr
     sema.ast = ast
     sema = sema.prepare_comptime_eval_copy()
     var evaluator = ComptimeEvaluator.init(sema, ast, pool, 1)
     evaluator.allow_runtime_calls = 1
     evaluator.strict_effects = strict_effects
+    evaluator.suppress_toolfs_writes = suppress_side_effects
     evaluator.step_budget = COMPTIME_TOOL_STEP_LIMIT
     evaluator.string_byte_budget = comptime_configured_string_budget(COMPTIME_TOOL_STRING_BYTE_BUDGET)
     let call_node = if ast.decl_count() > 0: ast.get_decl(0) else: 0
@@ -4601,11 +4610,25 @@ fn ComptimeEvaluator.toolfs_extract_tar(self: ComptimeEvaluator, record: &Compti
             return comptime_tar_extract_fail(f"unsupported tar entry type {typeflag} for " ++ raw_name)
         offset = offset + 512 + padded
 
+// ToolFs methods that mutate the filesystem (all return i32, 0 == success).
+// Worker-mode build(ctx) re-evaluation skips these; read/query/path methods
+// (exists, read_text, list_files, join, normalize, ...) are not listed and run
+// normally so the reconstructed graph still observes the parent's outputs.
+fn comptime_toolfs_method_is_mutating(method: str) -> bool:
+    method == "write_text" or method == "write_binary" or method == "copy_file" or method == "chmod" or method == "rename" or method == "copy_tree" or method == "symlink" or method == "write_tar" or method == "write_tar_gz" or method == "extract_tar" or method == "mkdir_all" or method == "remove_file" or method == "remove_tree"
+
 fn ComptimeEvaluator.eval_toolfs_capability_method(self: ComptimeEvaluator, recv_value: ComptimeValue, method: str, extra_start: i32, arg_count: i32, node: i32) -> ComptimeControl:
     let handle = self.validate_capability(recv_value, CapabilityKind.CK_BUILD_TOOL_FS, method, node)
     if handle < 0:
         return comptime_control_error()
     let record = self.capability_records.get(handle as i64)
+
+    // In worker mode the parent already performed every ToolFs mutation during
+    // its own build(ctx) evaluation; the worker re-evaluates build(ctx) only to
+    // rebuild the declarative graph, so mutating ops are skipped and report
+    // success. Reads fall through and observe the parent's outputs on disk.
+    if self.suppress_toolfs_writes != 0 and comptime_toolfs_method_is_mutating(method):
+        return comptime_control_value(comptime_value_int(self.node_type_or(node, self.sema.ty_i32 as i32), 0))
 
     if method == "scratch_dir":
         if not self.capability_expect_arg_count(arg_count, 0, method, node):

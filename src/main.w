@@ -58,6 +58,7 @@ extern fn with_fs_remove_tree(path: str) -> i32
 extern fn with_fs_rename_file(old_path: str, new_path: str) -> i32
 extern fn with_getenv_str(name: str) -> str
 extern fn with_setenv_str(name: str, value: str) -> i32
+extern fn with_set_memory_limit_bytes(limit: i64) -> Unit
 // Used for unique temp paths in one-liners, build.w runner binaries,
 // graph-tool captures, and native test captures.
 extern fn with_clock_nanos() -> i64
@@ -78,6 +79,7 @@ enum PreludeMode: i32:
 
 const CLI_DEFAULT_DEBUG_OPT_LEVEL: i32 = 0
 const CLI_DEFAULT_BUILD_OPT_LEVEL: i32 = 1
+const CLI_DEFAULT_BUILD_MEMORY_LIMIT_BYTES: i64 = 34359738368
 
 type CliOptions {
     command: str,
@@ -734,6 +736,8 @@ fn run_cli(argc: i32) -> i32:
         if cli_has_flag(argc, "--help") or cli_has_flag(argc, "-h"):
             print_build_usage()
             return 0
+        if cli_configure_build_memory_limit() != 0:
+            return 1
         let parsed_build = parse_build_command_options(argc)
         if not parsed_build.ok:
             with_eprint("error: " ++ parsed_build.error_msg)
@@ -1210,13 +1214,17 @@ type BuildGraphLoadResult {
 type BuildActionRunResult {
     rc: i32,
     effects: Vec[str],
+    cache_recorded: bool,
 }
 
 fn build_action_run_result(rc: i32) -> BuildActionRunResult:
-    BuildActionRunResult { rc: rc, effects: Vec.new() }
+    BuildActionRunResult { rc: rc, effects: Vec.new(), cache_recorded: false }
 
 fn build_action_run_result_with_effects(rc: i32, effects: Vec[str]) -> BuildActionRunResult:
-    BuildActionRunResult { rc: rc, effects: effects }
+    BuildActionRunResult { rc: rc, effects: effects, cache_recorded: false }
+
+fn build_action_run_result_cache_recorded(rc: i32) -> BuildActionRunResult:
+    BuildActionRunResult { rc: rc, effects: Vec.new(), cache_recorded: rc == 0 }
 
 fn build_action_safe_label(text: str) -> str:
     var out = ""
@@ -1234,7 +1242,59 @@ fn build_action_safe_label(text: str) -> str:
 fn build_action_scratch_dir(target_name: str) -> str:
     "out/tmp/action-scratch/" ++ build_action_safe_label(target_name)
 
-unsafe fn run_build_action_from_build_w(root: str, cfg: ProjectConfig, target: &BuildGraphTarget, sema_ptr: *mut Sema, strict_effects: bool) -> BuildActionRunResult:
+fn build_action_worker_env_enabled() -> bool:
+    with_getenv_str("WITH_BUILD_ACTION_WORKER").len() > 0
+
+fn build_action_force_env_enabled() -> bool:
+    with_getenv_str("WITH_BUILD_ACTION_FORCE").len() > 0
+
+fn build_target_worker_argv(target: &BuildGraphTarget, options: &BuildCommandOptions) -> str:
+    var argv = ""
+    argv = build_graph_argv_append(argv, with_arg_at(0))
+    argv = build_graph_argv_append(argv, "build")
+    argv = build_graph_argv_append(argv, ":" ++ target.name)
+    argv = build_graph_argv_append(argv, "--no-deps")
+    if options.strict_effects:
+        argv = build_graph_argv_append(argv, "--strict-effects")
+    if options.target_explicit:
+        argv = build_graph_argv_append(argv, "--target=" ++ build_graph_target_name(options.target_kind))
+    argv
+
+fn run_build_action_worker_process(target: &BuildGraphTarget, options: &BuildCommandOptions) -> BuildActionRunResult:
+    let old_worker = with_getenv_str("WITH_BUILD_ACTION_WORKER")
+    let old_force = with_getenv_str("WITH_BUILD_ACTION_FORCE")
+    let _set_worker = with_setenv_str("WITH_BUILD_ACTION_WORKER", target.name)
+    let _set_force = with_setenv_str("WITH_BUILD_ACTION_FORCE", "1")
+    let rc = with_exec_argv(build_target_worker_argv(target, options))
+    let _restore_worker = with_setenv_str("WITH_BUILD_ACTION_WORKER", old_worker)
+    let _restore_force = with_setenv_str("WITH_BUILD_ACTION_FORCE", old_force)
+    build_action_run_result_cache_recorded(rc)
+
+fn build_action_clear_worker_env_for_children():
+    let _clear_worker = with_setenv_str("WITH_BUILD_ACTION_WORKER", "")
+    let _clear_force = with_setenv_str("WITH_BUILD_ACTION_FORCE", "")
+
+fn build_test_worker_env_enabled() -> bool:
+    with_getenv_str("WITH_BUILD_TEST_WORKER").len() > 0
+
+fn run_build_test_worker_process(target: &BuildGraphTarget, options: &BuildCommandOptions) -> i32:
+    let old_worker = with_getenv_str("WITH_BUILD_TEST_WORKER")
+    let old_force = with_getenv_str("WITH_BUILD_ACTION_FORCE")
+    let _set_worker = with_setenv_str("WITH_BUILD_TEST_WORKER", target.name)
+    let _set_force = with_setenv_str("WITH_BUILD_ACTION_FORCE", "1")
+    let rc = with_exec_argv(build_target_worker_argv(target, options))
+    let _restore_worker = with_setenv_str("WITH_BUILD_TEST_WORKER", old_worker)
+    let _restore_force = with_setenv_str("WITH_BUILD_ACTION_FORCE", old_force)
+    rc
+
+fn build_test_clear_worker_env_for_children():
+    let _clear_worker = with_setenv_str("WITH_BUILD_TEST_WORKER", "")
+    let _clear_force = with_setenv_str("WITH_BUILD_ACTION_FORCE", "")
+
+unsafe fn run_build_action_from_build_w(root: str, cfg: ProjectConfig, target: &BuildGraphTarget, sema_ptr: *mut Sema, options: &BuildCommandOptions) -> BuildActionRunResult:
+    if not build_action_worker_env_enabled():
+        return run_build_action_worker_process(target, options)
+    build_action_clear_worker_env_for_children()
     if target.output.len() == 0:
         with_eprint("error: action target '" ++ target.name ++ "' requires a declared output")
         return build_action_run_result(1)
@@ -1260,7 +1320,7 @@ unsafe fn run_build_action_from_build_w(root: str, cfg: ProjectConfig, target: &
     if target.action_fn == 0:
         with_eprint("error: action target '" ++ target.name ++ "' is missing an evaluator action function")
         return build_action_run_result(1)
-    let result = comptime_eval_tool_action_result(sema_ptr, (*sema_ptr).ast, (*sema_ptr).pool, target.action_fn, cfg.package_name, cfg.package_version, root, target.name, target.inputs, target.output, target.extra_outputs, target.args, target.write_scopes, target.timeout_ms, target.cwd, target.env, target.network, if strict_effects: 1 else: 0)
+    let result = comptime_eval_tool_action_result(sema_ptr, (*sema_ptr).ast, (*sema_ptr).pool, target.action_fn, cfg.package_name, cfg.package_version, root, target.name, target.inputs, target.output, target.extra_outputs, target.args, target.write_scopes, target.timeout_ms, target.cwd, target.env, target.network, if options.strict_effects: 1 else: 0)
     if result.runtime_exit_code != 0:
         if result.runtime_stderr.len() > 0:
             with_ewrite(result.runtime_stderr)
@@ -1302,7 +1362,12 @@ fn load_build_graph_from_build_w(root: str, cfg: &ProjectConfig, options: &Build
     if entry_sym == 0:
         graph.error_msg = "build.w evaluation entry was not typechecked"
         return BuildGraphLoadResult { graph, sema }
-    let eval_result = unsafe { comptime_eval_tool_build_result(&raw mut sema as *mut Sema, sema.ast, sema.pool, entry_sym, cfg.package_name, cfg.package_version, root, if options.strict_effects: 1 else: 0) }
+    // When this process is a build target worker, the parent already ran
+    // build(ctx) with live ToolFs effects; re-running them here would repeat
+    // non-idempotent comptime filesystem mutations (e.g. extract_tar's symlink
+    // -> EEXIST). Re-evaluate only to rebuild the declarative graph.
+    let suppress_side_effects = if build_action_worker_env_enabled() or build_test_worker_env_enabled(): 1 else: 0
+    let eval_result = unsafe { comptime_eval_tool_build_result(&raw mut sema as *mut Sema, sema.ast, sema.pool, entry_sym, cfg.package_name, cfg.package_version, root, if options.strict_effects: 1 else: 0, suppress_side_effects) }
     if eval_result.error_msg.len() > 0:
         graph.ok = false
         graph.error_msg = eval_result.error_msg
@@ -1430,6 +1495,7 @@ unsafe fn run_build_graph(root: str, cfg: ProjectConfig, graph: &BuildGraph, act
     if graph.targets.len() == 0:
         with_eprint("error: build.w did not declare any targets")
         return 1
+    let force_action_worker_target = build_action_force_env_enabled()
     let output_rc = build_graph_validate_outputs(root, graph, options.output_path)
     if output_rc != 0:
         return output_rc
@@ -1474,9 +1540,10 @@ unsafe fn run_build_graph(root: str, cfg: ProjectConfig, graph: &BuildGraph, act
             continue
         if build_cache_is_cacheable(target.kind):
             if build_cache_check_fresh(root, target, dep_rebuilt):
-                skipped_targets.push(target.name)
-                completed_targets.push(target.name)
-                continue
+                if not force_action_worker_target:
+                    skipped_targets.push(target.name)
+                    completed_targets.push(target.name)
+                    continue
         let standard_result = build_graph_dispatch_standard_target(root, target, completed_targets)
         if standard_result.handled:
             if standard_result.rc != 0:
@@ -1485,10 +1552,11 @@ unsafe fn run_build_graph(root: str, cfg: ProjectConfig, graph: &BuildGraph, act
             completed_targets.push(target.name)
             continue
         if target.kind == 23:
-            let action_result = run_build_action_from_build_w(root, cfg, target, action_sema, options.strict_effects)
+            let action_result = run_build_action_from_build_w(root, cfg, target, action_sema, options)
             if action_result.rc != 0:
                 return action_result.rc
-            build_cache_record(root, target, Vec.new(), action_result.effects)
+            if not action_result.cache_recorded:
+                build_cache_record(root, target, Vec.new(), action_result.effects)
             completed_targets.push(target.name)
             continue
         let source_path = resolve_join(root, target.entry)
@@ -1508,6 +1576,13 @@ unsafe fn run_build_graph(root: str, cfg: ProjectConfig, graph: &BuildGraph, act
                     with_eprint("error: build.w test target failed: " ++ target.name)
                     return test_rc
             else:
+                if not build_test_worker_env_enabled():
+                    let test_worker_rc = run_build_test_worker_process(&target, options)
+                    if test_worker_rc != 0:
+                        return test_worker_rc
+                    completed_targets.push(target.name)
+                    continue
+                build_test_clear_worker_env_for_children()
                 for fi in 0..test_files.len() as i32:
                     let test_path = test_files.get(fi as i64)
                     let test_rc = run_test_file_with_build_settings(test_path, target_options.opt_level, target_options.no_std, target_options.alloc_mode, target_options.runtime_available, target_options.prelude_mode, target_options.debug_info, false, false, "", target_options.include_paths, target_options.defines, target_options.link_libs)
@@ -1791,8 +1866,8 @@ fn run_build_command(options: BuildCommandOptions, graph_options: BuildGraphComm
                 with_eprint("error: " ++ selected_graph.error_msg)
                 return 1
             if graph_options.no_deps:
-                if selected_graph.targets.len() == 0 or selected_graph.targets.get(0).kind != 23:
-                    with_eprint("error: --no-deps is only supported for build.w action targets")
+                if selected_graph.targets.len() == 0 or (selected_graph.targets.get(0).kind != 23 and selected_graph.targets.get(0).kind != 2):
+                    with_eprint("error: --no-deps is only supported for build.w action and test targets")
                     return 1
             if graph_options.explain_target.len() > 0:
                 return explain_build_target(root, &graph, graph_options.explain_target)
@@ -1819,7 +1894,7 @@ fn run_build_command(options: BuildCommandOptions, graph_options: BuildGraphComm
         if build_command_validate_target(actual_options, cfg) != 0:
             return 1
     if graph_options.no_deps:
-        with_eprint("error: --no-deps is only supported for build.w action targets")
+        with_eprint("error: --no-deps is only supported for build.w action and test targets")
         return 1
     var comp = Compilation.init()
     comp.configure_options(actual_options)
@@ -3520,6 +3595,7 @@ fn print_build_usage:
     with_write("  --explain <name> Explain a build graph target\n")
     with_write("  --strict-effects Reject undeclared build-time effects\n")
     with_write("  :effects         Print recorded build effect ledgers\n")
+    with_write("  WITH_MEMORY_LIMIT_BYTES controls the build memory cap; default 34359738368 (32 GiB), 0 disables\n")
     with_write("  --no-std         Disable standard library support\n")
     with_write("  --no-runtime     Disable the fiber runtime; async constructs are errors\n")
     with_write("  --no-prelude     Disable implicit prelude import\n")
@@ -3754,6 +3830,39 @@ fn cli_parse_small_int(s: str) -> i32:
             result = result * 10 + (ch - 48)
         i = i + 1
     result
+
+fn cli_parse_nonnegative_i64(s: str) -> i64:
+    if s.len() == 0:
+        return -1
+    var result: i64 = 0
+    var i = 0
+    let len = s.len() as i32
+    while i < len:
+        let ch = s.byte_at(i as i64)
+        if ch < 48 or ch > 57:
+            return -1
+        let digit = (ch - 48) as i64
+        if result > (9223372036854775807 - digit) / 10:
+            return -1
+        result = result * 10 + digit
+        i = i + 1
+    result
+
+fn cli_configure_build_memory_limit() -> i32:
+    let raw = with_getenv_str("WITH_MEMORY_LIMIT_BYTES")
+    var limit = CLI_DEFAULT_BUILD_MEMORY_LIMIT_BYTES
+    var limit_text = "34359738368"
+    if raw.len() > 0:
+        let parsed = cli_parse_nonnegative_i64(raw)
+        if parsed < 0:
+            with_eprint("error: WITH_MEMORY_LIMIT_BYTES must be a non-negative byte count")
+            return 1
+        limit = parsed
+        limit_text = raw
+    else:
+        let _ = with_setenv_str("WITH_MEMORY_LIMIT_BYTES", limit_text)
+    with_set_memory_limit_bytes(limit)
+    0
 
 fn cli_trim_line(text: str) -> str:
     var start = 0

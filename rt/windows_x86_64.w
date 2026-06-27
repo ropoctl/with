@@ -898,6 +898,10 @@ pub unsafe fn rt_compat_install_interrupt_handlers() -> Unit:
 pub unsafe fn rt_compat_raise_stack_limit() -> Unit:
     let _ = 0
 
+pub unsafe fn rt_set_process_memory_limit_bytes(limit: i64) -> i32:
+    let _ = limit
+    0
+
 pub unsafe fn rt_compat_interrupt_requested() -> i32:
     0
 
