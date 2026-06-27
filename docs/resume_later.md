@@ -9,11 +9,11 @@ drop/move slices so they can be resumed afterward.
 
 - Slices A, B, C of `drop-move-ownership.md` are **done and committed** (4 commits
   this session, each gated: build + fixpoint + fresh `:test` + test-green).
-- Slice D (loops) is **blocked on a pre-existing soundness bug**: Sema does not
-  merge move-state across `if/else` branches, so a conditional-reinit hides a
-  move (`if d: take(r) else: r=make(); use2(r)` compiles — a use-after-move).
-  Building loop moves on that foundation would regress sound rejection into
-  unsound acceptance. **Fix branch-merge first**, then resume D.
+- The branch-merge soundness bug (#612) that blocked Slice D is now **FIXED** for
+  `if/else` (`2a0da1d1`) and `match` (`ec65024f`, closes #579). See
+  `docs/branch-merge-soundness.md`. Slice D (loops, #613) is **unblocked**.
+- Other conditional constructs (if-let/while-let/`&&`/`||`/`?`) were verified
+  already sound (conservative); extending the union-join to them is precision-only.
 - Slice E (conditional field moves) and Slice F (generator audit + M9 matrix)
   are not started; scope notes below.
 

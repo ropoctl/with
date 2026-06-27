@@ -1,5 +1,17 @@
 # Branch-Merge Soundness: Root Cause and Fix Recommendation (#612, #579)
 
+> **Status (2026-06-27): the soundness bug is fixed.** The union-join landed for
+> `if/else` (commit `2a0da1d1`) and `match` (commit `ec65024f`, also closes #579).
+> Test B and its match form now reject `use of moved value`; the over-rejections
+> (`if d: take(r) else: take(r)`; #579's returning arm) now compile. Full fresh
+> `:test` green, fixpoint green, no self-build cascade. The other conditional
+> constructs (if-let, while-let, `&&`/`||`, `?`) were verified **already sound**
+> (conservative — they mark the value moved and never lose it); extending the
+> union-join to them is *precision* work (reducing over-rejection), not a soundness
+> fix. Remaining flow-sensitivity work: move-site provenance for diagnostics (§6.4b),
+> the place-granular/field arm (§6.4a, with Slice E), and loops (#613, Slice D). Spec
+> additions (§2.2/§2.4/§21.1) pending BDFL review.
+
 Report for the move-checker branch-merge soundness defect. The checker accepts a
 use-after-move when one branch moves a binding and another reinitializes it (#612,
 under-rejection), and rejects valid code when a diverging arm moves a binding
