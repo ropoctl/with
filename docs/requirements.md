@@ -496,6 +496,18 @@ Generated coverage: 3114 normative requirements plus 52 informative Section 30 t
   - Requirement: After a move, the source binding is invalid.
   - Source: `§2.2 L321-L322`
   - Related spec refs: none
+- [x] `2.2.1.3` **Conditional moves are flow-sensitive.**
+  - Requirement: A binding moved on some but not all control-flow paths reaching a program point is conditionally moved there.
+  - Source: `§2.2 L330-L336`
+  - Related spec refs: `§21.1 Rule 9`
+- [x] `2.2.1.4` **Using a conditionally moved binding is a compile error unless reinitialized on every reaching path.**
+  - Requirement: Using a conditionally moved binding is a compile error unless it has been reinitialized on every path that reaches the use.
+  - Source: `§2.2 L330-L357`
+  - Related spec refs: `§21.1 Rule 9`
+- [x] `2.2.1.5` **A conditionally moved binding becomes usable again only when reinitialized on every reaching path.**
+  - Requirement: A conditionally moved binding becomes usable again only when it is reinitialized on every path reaching the use.
+  - Source: `§2.2 L357-L358`
+  - Related spec refs: none
 
 ### §2.3 Copy Types
 
@@ -638,6 +650,10 @@ Generated coverage: 3114 normative requirements plus 52 informative Section 30 t
   - Requirement: On success return, only `defer` blocks run.
   - Source: `§2.4 L498-L500`
   - Related spec refs: none
+- [x] `2.4.1.24` **Conditional drop: a conditionally-moved value's destructor runs only on the paths where it is still live, automatically.**
+  - Requirement: When a value is conditionally moved, its destructor runs on exactly the paths where it still owns a value and is skipped on the paths where it was moved; the compiler arranges this automatically with no programmer annotations.
+  - Source: `§2.4 L450-L456`
+  - Related spec refs: `§2.2`, `§21.1 Rule 9`
 
 ## 3. References and Borrowing
 
@@ -12256,6 +12272,11 @@ Generated coverage: 3114 normative requirements plus 52 informative Section 30 t
   - Requirement: **Mutation composability.** Mutation through `mut self` receivers does not require reborrowing — the receiver is the caller's place, so method chains compose naturally. Each `mut self` call mutates that place and leaves it valid for subsequent calls.
   - Source: `§21.1 L10681-L10684`
   - Related spec refs: none
+- [x] `21.1.1.16` **Move-state join. At a control-flow merge a place is moved if moved on any non-diverging predecessor; diverging paths contribute nothing.**
+  - Requirement: **Move-state join.** At a control-flow merge, a place is moved if it is moved on any predecessor path that reaches the merge without diverging; paths that diverge (return, break, continue, or a call that never returns) contribute no move-state to the merge. A place moved on some reaching paths and live on others is treated as moved for use-checking (§2.2) and may not be used until reinitialized on all paths; its destructor is elaborated to run only on the paths where it is still live (§2.4).
+  - Source: `§21.1 L10723-L10739`
+  - Related spec refs: `§2.2`, `§2.4`
+  - impl: [#612](https://github.com/withlang-dev/with/issues/612)
 
 ## 22. Ephemeral Type Rules
 
