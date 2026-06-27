@@ -1,9 +1,9 @@
 # Resume Later: Drop/Move Ownership (M7+) and the Branch-Merge Blocker
 
 Status snapshot for continuing the `docs/drop-move-ownership.md` effort. Written
-2026-06-27. The active focus has pivoted to **branch-merge soundness** (see the
-companion report once written); this file is the parking record for the
-drop/move slices so they can be resumed afterward.
+2026-06-27. The branch-merge soundness blocker (#612) that this work was parked
+behind is now **fixed** (see `docs/branch-merge-soundness.md`); the active task is
+**Slice D (loops, #613)**, with E/F to follow. This file is the live resume record.
 
 ## TL;DR
 
@@ -73,23 +73,15 @@ Per construct:
   Boundary). Field move-out of a **non-Drop** aggregate where the field needs drop
   IS allowed by spec — that is the only legitimate drop-flag target for Slice E.
 
-## The blocker: branch-merge soundness (now the active task)
+## The (former) blocker: branch-merge soundness — RESOLVED
 
-`VarState` is binary (LIVE/MOVED, `src/Sema.w:52`). `check_if_expr`
-(`src/SemaCheck.w:7333+`) does **not merge** the two branches' move-state — it runs
-them linearly and only `restore_scope_states` when a branch *diverges* (TY_NEVER,
-lines 7351-7352, 7367-7370). So when one branch moves and the other reinitializes,
-the linear pass ends with the *reinit* state and the move is lost:
-
-- Test A (`if d: take(r) else: ()`; then `use2(r)`) → correctly **rejects** (nothing
-  overwrites MOVED).
-- Test B (`if d: take(r) else: r=make()`; then `use2(r)`) → wrongly **compiles**
-  (the `else` reinit overwrites the `then` move → post-`if` says LIVE). This is a
-  use-after-move on the `d`-true path. **Pre-existing soundness bug.**
-
-This is the *under-rejection* face; #579 is the *over-rejection* face (a diverging
-arm makes the owner look moved on the fallthrough). Both need real flow-sensitive
-move-state merging.
+#612 is fixed: `check_if_expr` (`2a0da1d1`) and `check_match_expr` (`ec65024f`,
+closes #579) now snapshot the entry move-state, analyze each branch/arm from it,
+and union the non-diverging exits (`Sema.merge_branch_move_states` /
+`Sema.union_move_states`; `restore_scope_states` now borrows). Test B rejects;
+the over-rejections compile. Other conditional constructs (if-let/while-let/`&&`/
+`||`/`?`) verified already sound. Full design + verification in
+`docs/branch-merge-soundness.md`. The active task is now **Slice D (loops, #613)**.
 
 ## Resume plan for the drop/move slices (AFTER branch-merge is fixed)
 
@@ -102,11 +94,24 @@ move-state merging.
      snapshot; `bind_names[idx]` → sym → `pool_resolve` for the name;
      `move_control_flow_binding_starts` gives the outer/inner boundary.
    - The existing Never-restore already makes move-then-break end LIVE → accepted.
-     reinit ends LIVE → accepted. `err_loop` ends MOVED → rejected. Correct, *iff*
-     the branch-merge gap is fixed (else conditional-reinit is unsoundly accepted).
+     reinit ends LIVE → accepted. `err_loop` ends MOVED → rejected. (Now correct —
+     the branch-merge gap is fixed, so body-end state is trustworthy.)
+   - **Post-loop-state subtlety (must handle for soundness).** The back-edge check
+     covers iteration-2 use-after-move, but it does NOT make the *post-loop* state
+     sound by itself. A `break` can carry a move OUT of the loop:
+     `loop: if c: { take(r); break }` then `use(r)` after the loop — the break path
+     moved `r`, so `r` is moved after the loop, yet body-end (fall-through) is LIVE.
+     Using body-end (or entry) as the post-loop state would unsoundly accept
+     `use(r)`. Fix: capture the move-state at each `break` (a per-loop accumulator,
+     a stack parallel to the label frames, unioned at NK_BREAK ~`SemaCheck.w:2361`/
+     `:4346`), and set the post-loop state = union(body-end / condition-false state,
+     break accumulators). For a `loop` with no reachable non-break exit, post = the
+     break union. This is real infra (Vec[Vec[i32]] stack or flat equiv); do not
+     ship the simpler back-edge-only version — it has this hole.
    - MIR: reinit case is LIVE at loop exit → existing scope-exit drop + M4
      drop-before-overwrite handles it; no new loop drop-flag needed for the
-     reinit/break subset. Add behavior + `da_*` fixtures.
+     reinit/break subset. Add behavior + `da_*` fixtures (incl. a
+     move-then-break-then-use-after-loop compile-error fixture).
    - Convert `test/compile_errors/err_loop_conditional_move_drop_value.w` to the
      correct use-after-move message (keep it a compile-error test — `err_loop`
      stays rejected, just with the right reason).
@@ -141,12 +146,12 @@ pass `:fixpoint` (verified Slice A's intermediate via a worktree with a symlinke
 `.deps`).
 
 ## Relevant GitHub issues
-- **#612 branch-merge move-state soundness** — test B above; the **active task**.
-- **#613 loop maybe-init dataflow** — Slice D; blocked by #612.
-- #579 over-rejection on diverging match arms (same missing infra as the merge gap).
+- **#612 branch-merge move-state soundness** — **FIXED + CLOSED** (`2a0da1d1`, `ec65024f`).
+- **#613 loop maybe-init dataflow** — Slice D; **unblocked**, the active task.
+- #579 diverging-arm over-rejection — **FIXED + CLOSED** by the match merge.
 - #605/#606/#607 the transitive-Drop move/drop substrate this effort continues.
 - #608 POD `Vec[i32]` buffer not freed (sentinel: `da_pod_vec` expects leak count=1).
-- #609 fiber pool reported as leak before shutdown — **FIXED by `aca63335`** (close it).
+- #609 fiber pool reported as leak before shutdown — **FIXED + CLOSED** (`aca63335`).
 
 ## Key files
 - `src/Sema.w` — `VarState` (52), `bind_states`/`bind_names` (572,575),
