@@ -107,8 +107,42 @@ With already has **both halves of Rust's design, split across phases**:
   `emit_conditional_value_drop_entry`) is the *drop elaboration* — and it works.
 
 So **With does not need a second Sema analysis or a full MIR-dataflow rewrite.** The
-binary use-checking state is *sufficient* because, for **use**, maybe-moved is
-treated as moved (reject). The single missing piece is a correct **join**.
+use-checking state is *sufficient* because, for **use**, maybe-moved is treated as
+moved (reject). The single missing piece is a correct **join**.
+
+## 4.5 Ergonomics-first reading (mission alignment)
+
+`mission.md`: "exactly as safe as Rust" *and* "remove the suffering" — keep Rust's
+**good part** (catching use-after-free/double-free/use-after-move) without its
+**bad part** (developer-facing friction: lifetime annotations, fighting the
+checker, gratuitous `.clone()`). Two consequences shape this design, not just
+soundness:
+
+1. **Soundness is not friction.** Rejecting a real use-after-move (Test B) is the
+   good part — it saves the developer from shipping UB. The only way to use a value
+   after a conditional move is to reinitialize it on every path, which correctness
+   requires anyway. So the union-join adds **zero ceremony** beyond what safety
+   demands, and hides all machinery (drop flags, the join) — natural code in, no
+   annotations.
+
+2. **Precision is where the bad part lives — so the join is keyed on canonical
+   PLACES, not bindings.** A binding-granular checker rejects *safe* code like
+   `take(pair.0); use(pair.1)` (move one field, use another) — Rust accepts it via
+   per-field move paths, and a binding-only design would force restructuring. That
+   is exactly Rust's bad part, and we refuse to import it. The join is therefore
+   designed over **canonical places** (binding + projection path), so partial and
+   conditional field moves "just work." Implementation is incremental — whole-
+   binding first (fixes #612/#579 soundness), field-path granularity folded in with
+   the field-move work (Slice E / §2.4 non-Drop aggregates) reusing the existing
+   `moved_field_*` model — but the **data model and join are place-keyed from the
+   start** so no redesign is needed. (Matching Rust where Rust is *also* restrictive
+   is fine: §2.4 forbids partial moves out of `Drop` aggregates, and so does Rust;
+   that is the good part, not friction.)
+
+3. **No auto-rescue.** We do not auto-clone or auto-reinitialize to dodge a
+   rejection — that hides a move behind invisible allocations, a performance
+   footgun against "native by default." Reject-and-guide is both honest and
+   ergonomic; the developer decides.
 
 ## 5. Source map
 
@@ -192,6 +226,31 @@ move now survives the union instead of being overwritten).
 - **Determinism**: the join must iterate bindings in index order (it does) to keep
   fixpoint/diagnostic output deterministic.
 
+### 6.4a Place-keyed from the start
+The join state and merge are keyed on **canonical places** (binding + projection
+path), not bindings, so field-granular precision needs no later redesign (§4.5).
+Concretely: whole-binding moves use `bind_states` (this fix); field moves reuse the
+existing `moved_field_*` model. The join helper snapshots/merges **both** so a field
+moved in one branch and a binding moved in another are each handled. Whole-binding
+is implemented now (the #612/#579 bug is whole-binding); the field arm of the merge
+lands with Slice E when field moves are actually enabled — but the helper signature
+and call sites take *places*, so enabling it is additive, not a rewrite.
+
+### 6.4b Diagnostics are first-class (the ergonomic win on the reject path)
+When the checker *must* reject, mission-first means it must not feel like fighting
+the checker. The use-after-move diagnostic should:
+- name the value and **where it was moved** (the branch/arm and statement), and
+  **where it is used**, à la Rust's "value moved here" / "used here";
+- when the value is moved on *some* but not all paths, say so ("moved on the `if d`
+  path; live on the `else` path") and **suggest the fix**: reinitialize on every
+  path, or `clone()` it;
+- never silently auto-rescue (§4.5.3).
+
+Provenance (which node moved a place) is not available at the use site today; track a
+`bind_idx → move-site node` map updated when a place is marked MOVED, consulted by
+the `use of moved value` sites (`SemaCheck.w:5527`,`:8613`). This is a focused
+follow-up to the soundness fix, but it is part of the design, not optional polish.
+
 ### 6.5 Verification
 - New compile-error fixtures: Test B and variants (then-moves/else-reinit,
   match-arm-moves/other-arm-reinit, nested) → must report `use of moved value`.
@@ -203,15 +262,25 @@ move now survives the union instead of being overwritten).
   `rm -rf out/test-graph && with build :test` (fresh), `:test-green`.
 
 ### 6.6 Why not the full Rust rewrite
-A MIR-level two-analysis dataflow with move paths is the principled maximum, but
-With already has the drop-elaboration half in MIR and only needs the
-MaybeUninitialized *use*-checking join, for which the binary state suffices. The
-union-join primitive is the smallest change that makes the guarantee true
-("exactly as safe as Rust" for use-after-move) without paying for machinery that
-duplicates the working MIR drop-flag pass. If field-path granularity (partial moves
-of `x.a` vs `x.b`) later needs the same flow-sensitivity, generalize `bind_states`
-keys from bindings to canonical places — but that is a separate, larger step
-(related to Slice E / §2.4 non-Drop-aggregate field moves), not required for #612.
+A MIR-level two-analysis dataflow with a move-path tree is the principled maximum,
+but With already has the drop-elaboration half in MIR and only needs the
+MaybeUninitialized *use*-checking join — for which the existing Sema state (binding
+`bind_states` + the `moved_field_*` place model) suffices once it is correctly
+joined. Reusing those keyed on places (§6.4a) gives Rust-grade precision —
+field-granular, conditional, divergence-aware — without duplicating the working MIR
+drop-flag pass or building a parallel MIR move-path tree. We pay *just enough*
+compiler complexity to remove the ceremony (per `mission.md`), and no more.
+
+### 6.7 Implementation order (this work)
+1. Whole-binding union-join helper over `bind_states`, divergence-aware; apply to
+   `check_if_expr` first. Build + `:fixpoint` + fresh `:test`; fix any latent
+   use-after-move the tightening surfaces in-tree (the cascade). Commit.
+2. Apply the same helper to `check_match_expr` (also fixes #579 + cross-arm
+   contamination). Add Test-B and #579 fixtures. Gates. Commit.
+3. Extend to if-let / while-let / let-else / `&&` / `||` / `?` / ternary.
+4. Move-site provenance for the diagnostic (§6.4b).
+5. Fold the `moved_field_*` arm into the join (with Slice E).
+6. Then #613 loops (Slice D) on the sound foundation.
 
 ## 7. Recommended sequence
 1. **#612**: implement the union-join primitive; apply to `if` and `match` first
