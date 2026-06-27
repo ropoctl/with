@@ -4834,12 +4834,11 @@ fn Sema.check_expr(self: Sema, node: i32) -> TypeId:
                 pushed_regex_capture_scope = 1
                 self.regex_bind_capture_scope(rhs)
         let saved_drop_cf = self.drop_control_flow_depth
-        let saved_move_cf = self.move_control_flow_depth
         if self.current_drop_type_sym != 0:
             self.drop_control_flow_depth = self.drop_control_flow_depth + 1
-        self.move_control_flow_depth = self.move_control_flow_depth + 1
+        self.push_move_control_flow_context(0)
         self.check_expr_statement_context(body)
-        self.move_control_flow_depth = saved_move_cf
+        self.pop_move_control_flow_context()
         self.drop_control_flow_depth = saved_drop_cf
         if pushed_regex_capture_scope != 0:
             self.pop_scope()
@@ -4854,12 +4853,11 @@ fn Sema.check_expr(self: Sema, node: i32) -> TypeId:
         self.loop_depth = self.loop_depth + 1
         self.push_label_frame(label, LabelFrameKind.LFK_WHILE, node)
         let saved_drop_cf_dw = self.drop_control_flow_depth
-        let saved_move_cf_dw = self.move_control_flow_depth
         if self.current_drop_type_sym != 0:
             self.drop_control_flow_depth = self.drop_control_flow_depth + 1
-        self.move_control_flow_depth = self.move_control_flow_depth + 1
+        self.push_move_control_flow_context(0)
         self.check_expr_statement_context(body)
-        self.move_control_flow_depth = saved_move_cf_dw
+        self.pop_move_control_flow_context()
         self.drop_control_flow_depth = saved_drop_cf_dw
         self.pop_label_frame()
         self.loop_depth = self.loop_depth - 1
@@ -4873,12 +4871,11 @@ fn Sema.check_expr(self: Sema, node: i32) -> TypeId:
         self.push_label_frame(self.ast.get_data1(node), LabelFrameKind.LFK_LOOP, node)
         let loop_frame_idx = self.label_syms.len() as i32 - 1
         let saved_drop_cf_loop = self.drop_control_flow_depth
-        let saved_move_cf_loop = self.move_control_flow_depth
         if self.current_drop_type_sym != 0:
             self.drop_control_flow_depth = self.drop_control_flow_depth + 1
-        self.move_control_flow_depth = self.move_control_flow_depth + 1
+        self.push_move_control_flow_context(0)
         self.check_expr_statement_context(self.ast.get_data0(node))
-        self.move_control_flow_depth = saved_move_cf_loop
+        self.pop_move_control_flow_context()
         self.drop_control_flow_depth = saved_drop_cf_loop
         let result_ty = if loop_frame_idx >= 0: self.label_break_value_types.get(loop_frame_idx as i64) else: 0
         self.pop_label_frame()
@@ -5237,17 +5234,13 @@ fn Sema.check_expr(self: Sema, node: i32) -> TypeId:
             self.emit_error("'move' must be applied to a binding identifier", node)
             return self.check_expr(inner)
         let ty = self.check_expr(inner)
-        // An explicit `move` inside a conditional has the same drop-state
-        // problem as an implicit conditional consume: MirLower cancels the
-        // scheduled drop path-insensitively, so the not-taken path would
-        // leak. Same rule as mark_moved_if_consumed's NK_IDENT arm.
-        if self.move_control_flow_depth != 0:
-            let move_owner = self.method_owner_symbol_for_type(self.resolve_alias(ty as TypeId) as i32)
-            if move_owner != 0 and self.has_drop_method(move_owner) != 0:
-                self.emit_error("conditional move of Drop value requires drop-state tracking", node)
         // Explicitly mark the inner binding as moved, even for Copy types.
         let sym = self.ast.get_data0(inner)
         if self.scope_has(sym) != 0:
+            if self.type_needs_drop(ty as i32) != 0 and self.outer_binding_has_unsupported_move_context(sym) != 0:
+                self.emit_error("conditional move of Drop value requires drop-state tracking", node)
+                self.typed_expr_types.insert(node, ty as i32)
+                return ty
             self.scope_set_state(sym, VarState.MOVED)
         // If the moved binding is a parameter, record EFF_CONSUME
         self.note_param_effect(sym, EFF_CONSUME)
@@ -7346,12 +7339,11 @@ fn Sema.check_if_expr(self: Sema, node: i32) -> i32:
             pushed_regex_capture_scope = 1
             self.regex_bind_capture_scope(rhs)
     let saved_drop_cf_then = self.drop_control_flow_depth
-    let saved_move_cf_then = self.move_control_flow_depth
     if self.current_drop_type_sym != 0:
         self.drop_control_flow_depth = self.drop_control_flow_depth + 1
-    self.move_control_flow_depth = self.move_control_flow_depth + 1
+    self.push_move_control_flow_context(1)
     let then_type = if outer_expected != 0: self.check_expr_with_expected(then_body, outer_expected) else: self.check_expr(then_body)
-    self.move_control_flow_depth = saved_move_cf_then
+    self.pop_move_control_flow_context()
     self.drop_control_flow_depth = saved_drop_cf_then
     if pushed_regex_capture_scope != 0:
         self.pop_scope()
@@ -7366,12 +7358,11 @@ fn Sema.check_if_expr(self: Sema, node: i32) -> i32:
         let else_expected: TypeId = if in_value_context and then_type != 0 and then_type != self.ty_void and then_is_never == 0: then_type else: outer_expected
         let pre_else_states = self.save_scope_states()
         let saved_drop_cf_else = self.drop_control_flow_depth
-        let saved_move_cf_else = self.move_control_flow_depth
         if self.current_drop_type_sym != 0:
             self.drop_control_flow_depth = self.drop_control_flow_depth + 1
-        self.move_control_flow_depth = self.move_control_flow_depth + 1
+        self.push_move_control_flow_context(1)
         let else_type = if else_expected != 0: self.check_expr_with_expected(else_body, else_expected) else: self.check_expr(else_body)
-        self.move_control_flow_depth = saved_move_cf_else
+        self.pop_move_control_flow_context()
         self.drop_control_flow_depth = saved_drop_cf_else
         // If else branch always terminates, restore pre-else states.
         let else_is_never = self.get_type_kind(self.resolve_alias(else_type as TypeId)) == TypeKind.TY_NEVER
@@ -7859,6 +7850,7 @@ fn Sema.check_return(self: Sema, node: i32) -> i32:
     let value = self.ast.get_data0(node)
     if value != 0:
         let val_type = if self.current_return_type != 0: self.check_expr_with_expected(value, self.current_return_type) else: self.check_expr(value)
+        self.reject_returned_drop_field_move(value)
         // If returned value originates from a parameter, record effects:
         // - EFF_ESCAPE_VALUE: a non-Copy owned value escaping via return
         //   (returning a Copy field is a read, not a consumption)
@@ -8150,6 +8142,7 @@ fn Sema.check_for(self: Sema, node: i32) -> i32:
     // §15.17 when mutation through it is attempted.
     let yields_views = self.for_iterable_yields_views(iterable)
 
+    self.push_move_control_flow_context(0)
     self.push_scope()
     if self.ast.for_binding_is_pattern(node):
         self.check_pattern(binding, elem_type)
@@ -8174,6 +8167,7 @@ fn Sema.check_for(self: Sema, node: i32) -> i32:
     self.pop_label_frame()
     self.loop_depth = self.loop_depth - 1
     self.pop_scope()
+    self.pop_move_control_flow_context()
     self.ty_void as i32
 
 fn Sema.struct_field_info_by_index(self: Sema, struct_type: i32, index: i32) -> i64:
@@ -9357,6 +9351,7 @@ fn Sema.check_match_expr(self: Sema, node: i32) -> i32:
         let arm_body = self.ast.get_data1(arm_node)
         let guard = self.ast.get_data2(arm_node)
 
+        self.push_move_control_flow_context(0)
         self.push_scope()
         self.check_pattern(pat, subject_type as i32)
         if self.ast.kind(pat) == NodeKind.NK_PAT_REGEX:
@@ -9379,6 +9374,7 @@ fn Sema.check_match_expr(self: Sema, node: i32) -> i32:
             self.check_expr(arm_body)
         self.drop_control_flow_depth = saved_drop_cf_arm
         self.pop_scope()
+        self.pop_move_control_flow_context()
 
         if result_type == 0:
             result_type = arm_type
@@ -18634,11 +18630,9 @@ fn Sema.mark_moved_if_consumed(self: Sema, node: i32):
         if self.scope_has(sym) != 0:
             let tid = self.scope_lookup(sym)
             if not self.is_copy(tid as TypeId):
-                if self.move_control_flow_depth != 0:
-                    let owner_sym = self.method_owner_symbol_for_type(self.resolve_alias(tid as TypeId) as i32)
-                    if owner_sym != 0 and self.has_drop_method(owner_sym) != 0:
-                        self.emit_error("conditional move of Drop value requires drop-state tracking", node)
-                        return
+                if self.type_needs_drop(tid) != 0 and self.outer_binding_has_unsupported_move_context(sym) != 0:
+                    self.emit_error("conditional move of Drop value requires drop-state tracking", node)
+                    return
                 if sema_debug_move_enabled() != 0:
                     let resolved = self.resolve_alias(tid as TypeId)
                     let name = self.pool_resolve(sym)

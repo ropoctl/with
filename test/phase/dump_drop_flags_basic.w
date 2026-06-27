@@ -1,4 +1,4 @@
-//! args: --dump-drop-flags
+//! args: --dump-drop-flags --no-prelude
 //! expect-check-stdout: drop-flags module
 //! expect-check-stdout: <no drop flags>
 

@@ -775,6 +775,26 @@ Gate:
 with build :debug-alloc-tests
 ```
 
+Status: implemented and covered by debug-alloc fixtures. Existing MIR/codegen
+drop dispatch carries/reconstructs sema types for projected places, then emits
+struct, tuple, array, enum, and `Vec[T]` drop glue from those sema types. The
+debug-alloc corpus now includes allocation-owning `Drop` elements in:
+
+```text
+test/debug_alloc/da_vecdrop_struct_field_owned_elements.w
+test/debug_alloc/da_vecdrop_tuple_field.w
+test/debug_alloc/da_drop_array_field.w
+test/debug_alloc/da_vecdrop_nested_struct_field.w
+test/debug_alloc/da_vecdrop_enum_payload.w
+test/debug_alloc/da_vecdrop_option_payload.w
+```
+
+These cover struct fields, tuple elements, fixed-array fields, nested struct
+fields, nominal enum payloads, and generic `Option` payloads. Because each
+element owns a native allocation freed only from `Drop`, the lane proves both
+container-buffer cleanup and nested element-drop traversal. Verified with
+`with build :debug-alloc-tests`.
+
 ### Milestone 4: MIR drop obligation ledger, straight-line only
 
 Implement per-place ownership state for straight-line code first.
@@ -820,6 +840,26 @@ with check src/main.w
 with build
 focused debug-alloc fixtures
 ```
+
+Status: implemented for the straight-line subset and covered by behavior plus
+debug-alloc fixtures. MIR lowering currently tracks moved locals and moved field
+paths, clears those facts on reinitialization, emits drop-before-overwrite for
+needs-drop assignment targets, and recursively emits partial drops for still-live
+aggregate fields at cleanup.
+
+Additional debug-alloc coverage added:
+
+```text
+test/debug_alloc/da_vecdrop_field_reassign_owned_elements.w
+test/debug_alloc/da_drop_tuple_field_reassign_owned_elements.w
+test/debug_alloc/da_vecdrop_moved_var_reassign.w
+```
+
+These force straight-line reassignment to free old contents and later drop the
+replacement contents exactly once. The `:debug-alloc-tests` build target now
+declares `tools/debug_drop.w` and `test/debug_alloc` as inputs, so adding or
+editing fixtures invalidates the cached lane. Verified with
+`with build :debug-alloc-tests`.
 
 ### Milestone 5: Path-sensitive cleanup correctness
 
@@ -882,6 +922,30 @@ debug-alloc channel fixture if deterministic
 with build :test behavior-tests
 ```
 
+Status: covered for the current static partial-move cleanup paths. Cleanup
+emission no longer clears moved-field facts after one partial cleanup, and
+early-return/fallthrough paths through a tuple partial move have allocator
+coverage:
+
+```text
+test/debug_alloc/da_drop_tuple_field_extract_early_return.w
+test/debug_alloc/da_drop_tuple_field_extract_defer_return.w
+```
+
+These run both the early-return path, where only `pair.0` has moved, and the
+fallthrough path, where both tuple fields have moved. The second fixture keeps an
+active `defer` in the cleanup path. Existing channel tuple coverage remains in:
+
+```text
+test/behavior/behav_channel_bounded.w
+test/behavior/behav_channel_close.w
+test/behavior/behav_channel_basic.w
+```
+
+Verified with `with build :debug-alloc-tests` and focused channel behavior runs.
+This does not implement runtime drop flags for conditional ownership joins; that
+remains Milestone 7.
+
 ### Milestone 6: Preserve language rejection for user-visible field moves
 
 If current policy remains rejection, restore and strengthen Sema guards.
@@ -909,6 +973,7 @@ Tests:
 ```text
 err_move_out_vec_field_let.w
 err_move_out_vec_field_return.w
+err_move_out_vec_field_explicit_return.w
 err_move_out_vec_field_moveself.w
 err_use_after_move_struct_field.w
 err_use_after_move_vec_into_struct_field.w
@@ -921,6 +986,12 @@ with build :test native-compile-error-tests
 ```
 
 If the policy changes to allow partial moves, this milestone becomes a language-change milestone instead, with an explicit spec update.
+
+Status: implemented and covered. Explicit `return h.a` now goes through the
+same returned-drop-field guard as tail-position `h.a`, so user-visible
+move-out of a transitive-drop `Vec[W]` field is rejected in let-binding,
+tail-return, explicit-return, and `move self` forms. Verified with focused
+compile-error checks and `with build :native-compile-error-tests`.
 
 ### Milestone 7: Runtime drop flags for conditional ownership
 
@@ -964,6 +1035,19 @@ with build
 with build :debug-alloc-tests
 focused conditional debug-alloc fixtures
 ```
+
+Status: partially implemented for whole-local conditional moves through `if`.
+MIR lowering now introduces boolean drop-flag locals for active whole-value drop
+obligations at an `if` split, clears the flag when that value is moved in a
+branch, restores branch move state at the join, and emits conditional value
+drops at cleanup. `--dump-drop-flags` reports each guarded value/flag pair.
+
+The first covered cases are implicit and explicit whole-value moves from one
+side of an `if`, including native allocation/free coverage in
+`da_drop_conditional_move_value`. Conditional field moves remain rejected, and
+loop-carried or match-arm outer `Drop` moves still fail loudly with
+`conditional move of Drop value requires drop-state tracking` until equivalent
+runtime flag joins exist for those control-flow shapes.
 
 ### Milestone 8: Generated async/generator state ownership
 

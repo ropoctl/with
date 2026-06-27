@@ -461,6 +461,11 @@ type MirBody {
     call_intrinsic_kinds: Vec[MirIntrinsic],
     // AST call node for generic calls (parallel to call_arg_starts, 0 if N/A)
     call_ast_nodes: Vec[i32],
+
+    // Runtime drop flags introduced by MIR lowering. Each pair means
+    // drop_flag_locals[i] guards the cleanup of drop_flag_value_locals[i].
+    drop_flag_value_locals: Vec[i32],
+    drop_flag_locals: Vec[i32],
 }
 
 type MirModule {
@@ -636,6 +641,8 @@ fn MirBody.init_for_fn(fn_sym: i32) -> MirBody:
         call_arg_operands: Vec.new(),
         call_intrinsic_kinds: Vec.new(),
         call_ast_nodes: Vec.new(),
+        drop_flag_value_locals: Vec.new(),
+        drop_flag_locals: Vec.new(),
     }
 
     // Local 0 is always the return place.
@@ -2019,9 +2026,22 @@ fn trace_cleanup_edge_module(mir_mod: &MirModule, pool: &InternPool, sema: &Sema
     out
 
 fn dump_drop_flags_module(mir_mod: &MirModule, pool: &InternPool, sema: &Sema) -> str:
-    let _ = pool
     let _ = sema
-    f"drop-flags module functions={mir_mod.bodies.len() as i32}\n<no drop flags>\n"
+    var out = f"drop-flags module functions={mir_mod.bodies.len() as i32}\n"
+    var emitted = 0
+    for bi in 0..mir_mod.bodies.len() as i32:
+        let body = mir_mod.bodies.get(bi as i64)
+        if body.drop_flag_value_locals.len() as i32 == 0:
+            continue
+        out = out ++ "fn " ++ mir_debug_body_label(&body, pool) ++ "\n"
+        for i in 0..body.drop_flag_value_locals.len() as i32:
+            let value_local = body.drop_flag_value_locals.get(i as i64)
+            let flag_local = body.drop_flag_locals.get(i as i64)
+            out = out ++ f"  _{flag_local} guards _{value_local}\n"
+            emitted = emitted + 1
+    if emitted == 0:
+        out = out ++ "<no drop flags>\n"
+    out
 
 fn validate_ownership_body(mir_mod: &MirModule, body: &MirBody) -> str:
     let blocks = mir_drop_state_blocks_new(body.block_count())

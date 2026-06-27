@@ -17,9 +17,27 @@ work. Inline-drop fields must be freed exactly once in every covered
 construction and escape shape: `leak count=0`, never `DOUBLE FREE`.
 
 - The `da_vecdrop_*` fixtures cover inline `Vec[Drop]` fields across in-place
-  construction, local move-in, rvalue move-in, nested structs, tail/trailing
-  positions, field-receiver push tails, and field chaining. They all expect
+  construction, local move-in, rvalue move-in, tuple elements, nominal enum and
+  generic `Option` payloads, nested structs, tail/trailing positions,
+  field-receiver push tails, and field chaining. They all expect
   `leak count=0`.
+- `da_vecdrop_struct_field_owned_elements`, `da_vecdrop_tuple_field`,
+  `da_vecdrop_nested_struct_field`, `da_vecdrop_enum_payload`,
+  `da_vecdrop_option_payload`, and `da_drop_array_field` use `Drop` elements
+  that own native allocations. A missed element drop leaks; a duplicate element
+  drop double-frees.
+- `da_vecdrop_field_reassign_owned_elements`,
+  `da_drop_tuple_field_reassign_owned_elements`, and
+  `da_vecdrop_moved_var_reassign` cover straight-line drop-obligation updates:
+  field assignment drops the old contents before overwrite, moved locals can be
+  reinitialized, and replacement contents drop at scope exit.
+- `da_drop_tuple_field_extract_early_return` and
+  `da_drop_tuple_field_extract_defer_return` cover path-sensitive cleanup for
+  tuple field moves across early-return/fallthrough cleanup paths, including an
+  active `defer`.
+- `da_drop_conditional_move_value` covers the first runtime drop-flag path:
+  whole `Drop` locals moved in one side of an `if` are dropped exactly once on
+  moved and not-moved paths.
 - `da_manual_double_free` (`with_free` twice) expects `DOUBLE FREE` — a stable,
   compiler-independent check that the ledger detects a double free.
 - `da_drop_origin_double_free` duplicates a `Vec[Drop]` header and explicitly

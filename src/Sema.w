@@ -563,6 +563,8 @@ type Sema {
     current_drop_type_sym: i32,
     drop_control_flow_depth: i32,
     move_control_flow_depth: i32,
+    move_control_flow_binding_starts: Vec[i32],
+    move_control_flow_supports_drop_flags: Vec[i32],
     drop_consumed_field_owner_syms: Vec[i32],
     drop_consumed_field_syms: Vec[i32],
 
@@ -1553,6 +1555,8 @@ fn sema_empty_state(pool: InternPool, diags: DiagnosticList, ast: AstPool) -> Se
         current_drop_type_sym: 0,
         drop_control_flow_depth: 0,
         move_control_flow_depth: 0,
+        move_control_flow_binding_starts: Vec.new(),
+        move_control_flow_supports_drop_flags: Vec.new(),
         drop_consumed_field_owner_syms: Vec.new(),
         drop_consumed_field_syms: Vec.new(),
         bind_names: Vec.new(),
@@ -3722,6 +3726,38 @@ fn Sema.scope_set_state(self: Sema, sym: i32, state: i32):
 
 fn Sema.scope_has(self: Sema, sym: i32) -> i32:
     if self.scope_name_map.contains(sym): return 1
+    0
+
+fn Sema.scope_binding_index(self: Sema, sym: i32) -> i32:
+    let opt = self.scope_name_map.get(sym)
+    if opt.is_some():
+        return opt.unwrap()
+    -1
+
+fn Sema.push_move_control_flow_context(self: Sema, supports_drop_flags: i32):
+    self.move_control_flow_depth = self.move_control_flow_depth + 1
+    self.move_control_flow_binding_starts.push(self.bind_names.len() as i32)
+    self.move_control_flow_supports_drop_flags.push(supports_drop_flags)
+
+fn Sema.pop_move_control_flow_context(self: Sema):
+    if self.move_control_flow_depth > 0:
+        self.move_control_flow_depth = self.move_control_flow_depth - 1
+    if self.move_control_flow_binding_starts.len() as i32 > 0:
+        self.move_control_flow_binding_starts.pop()
+    if self.move_control_flow_supports_drop_flags.len() as i32 > 0:
+        self.move_control_flow_supports_drop_flags.pop()
+
+fn Sema.outer_binding_has_unsupported_move_context(self: Sema, sym: i32) -> i32:
+    let bind_idx = self.scope_binding_index(sym)
+    if bind_idx < 0:
+        return 0
+    let ctx_count = self.move_control_flow_binding_starts.len() as i32
+    var ci = 0
+    while ci < ctx_count:
+        let start = self.move_control_flow_binding_starts.get(ci as i64)
+        if bind_idx < start and self.move_control_flow_supports_drop_flags.get(ci as i64) == 0:
+            return 1
+        ci = ci + 1
     0
 
 // Snapshot current bind_states so early-returning if/else branches don't

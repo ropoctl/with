@@ -75,9 +75,11 @@ edges, and future runtime drop-flag work:
 - `--trace-cleanup-edge <fn:from->to>` prints ownership state across one CFG
   edge. Both `0->1` and `bb0->bb1` are accepted. Quote this argument in shell
   commands because `>` is a redirection operator.
-- `--dump-drop-flags` reports runtime drop-flag state. The current compiler has
-  no runtime drop flags, so this explicitly reports `<no drop flags>` until that
-  substrate is implemented.
+- `--dump-drop-flags` reports MIR-generated runtime drop flags. It prints
+  `<no drop flags>` when a module does not need them; otherwise each line names
+  the value local guarded by its flag local. Use this to confirm conditional
+  whole-local moves are protected by a runtime flag before trusting cleanup
+  behavior.
 
 Do not infer the root cause from these reports alone. They show what MIR
 believes; use `lldb` on the lowering or codegen branch to prove why it believes

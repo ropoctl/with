@@ -1336,6 +1336,8 @@ pub fn build(ctx: BuildCtx) -> Build:
     var debug_alloc_tests = target_new(.Action, "debug-alloc-tests", "").output("out/debug-alloc-tests")
     debug_alloc_tests.action = run_debug_alloc_tests_action
     debug_alloc_tests = debug_alloc_tests.input(release_compiler_bin("with"))
+    debug_alloc_tests = debug_alloc_tests.input("tools/debug_drop.w")
+    debug_alloc_tests = debug_alloc_tests.input("test/debug_alloc")
     debug_alloc_tests = debug_alloc_tests.dep("build")
     debug_alloc_tests = debug_alloc_tests.write_scope("out/debug-alloc-tests")
     out = out.add_target(debug_alloc_tests)
