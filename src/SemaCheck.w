@@ -9351,7 +9351,10 @@ fn Sema.check_match_expr(self: Sema, node: i32) -> i32:
         let arm_body = self.ast.get_data1(arm_node)
         let guard = self.ast.get_data2(arm_node)
 
-        self.push_move_control_flow_context(0)
+        // supports_drop_flags=1: whole-value Drop moves out of a match arm are
+        // allowed and protected by a runtime drop flag in MIR (mirrors `if`).
+        // Conditional *field* moves remain rejected via drop_control_flow_depth.
+        self.push_move_control_flow_context(1)
         self.push_scope()
         self.check_pattern(pat, subject_type as i32)
         if self.ast.kind(pat) == NodeKind.NK_PAT_REGEX:

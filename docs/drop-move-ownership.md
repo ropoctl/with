@@ -1047,18 +1047,21 @@ with build :debug-alloc-tests
 focused conditional debug-alloc fixtures
 ```
 
-Status: partially implemented for whole-local conditional moves through `if`.
-MIR lowering now introduces boolean drop-flag locals for active whole-value drop
-obligations at an `if` split, clears the flag when that value is moved in a
-branch, restores branch move state at the join, and emits conditional value
-drops at cleanup. `--dump-drop-flags` reports each guarded value/flag pair.
+Status: implemented for whole-value conditional moves through `if` and `match`.
+MIR lowering introduces boolean drop-flag locals for active whole-value drop
+obligations at the `if`/`match` entry, clears the flag when that value is moved
+in a branch or arm, restores branch/arm move state so each path is analyzed from
+the entry state, and emits conditional value drops at cleanup guarded by the
+flag. The runtime flag carries the actual taken-path state to the join.
+`--dump-drop-flags` reports each guarded value/flag pair.
 
-The first covered cases are implicit and explicit whole-value moves from one
-side of an `if`, including native allocation/free coverage in
-`da_drop_conditional_move_value`. Conditional field moves remain rejected, and
-loop-carried or match-arm outer `Drop` moves still fail loudly with
-`conditional move of Drop value requires drop-state tracking` until equivalent
-runtime flag joins exist for those control-flow shapes.
+Covered cases are implicit and explicit whole-value moves from one side of an
+`if` and from a `match` arm, including native allocation/free coverage in
+`da_drop_conditional_move_value` and `da_match_conditional_move_value`.
+Conditional field moves remain rejected, and loop-carried outer `Drop` moves
+still fail loudly with `conditional move of Drop value requires drop-state
+tracking` until equivalent runtime flag joins exist for those control-flow
+shapes.
 
 ### Milestone 8: Generated async/generator state ownership
 

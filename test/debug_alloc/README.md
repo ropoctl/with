@@ -35,9 +35,10 @@ construction and escape shape: `leak count=0`, never `DOUBLE FREE`.
   `da_drop_tuple_field_extract_defer_return` cover path-sensitive cleanup for
   tuple field moves across early-return/fallthrough cleanup paths, including an
   active `defer`.
-- `da_drop_conditional_move_value` covers the first runtime drop-flag path:
-  whole `Drop` locals moved in one side of an `if` are dropped exactly once on
-  moved and not-moved paths.
+- `da_drop_conditional_move_value` and `da_match_conditional_move_value` cover
+  the runtime drop-flag path: whole `Drop` locals moved in one side of an `if`
+  or one arm of a `match` are dropped exactly once on both moved and not-moved
+  paths.
 - `da_channel_task_fiber` spawns producer/consumer fibers with channel endpoints
   moved into each task and awaits both; it expects `leak count=0`. It pins
   fiber-lifecycle cleanup at shutdown: pooled fiber control blocks

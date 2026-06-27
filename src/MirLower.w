@@ -7437,6 +7437,23 @@ fn MirBuilder.lower_match(self: MirBuilder, scrutinee_expr: i32, arms_start: i32
         result_place = self.place_for_local(result_local)
     let join_bb = self.new_block()
 
+    // Runtime drop flags for whole-value Drop moves out of match arms (mirrors
+    // lower_if). Create a flag per active whole-value drop obligation at the
+    // match entry; an arm that moves the value clears its flag, and the value's
+    // scope-exit cleanup drops it only when the flag is still set. Each arm is
+    // analyzed from the entry move-state, restored after each arm below.
+    let match_entry_bb = self.cur_bb as i32
+    let branch_drop_depth = self.drop_local_ids.len() as i32
+    let branch_moved_value_len = self.moved_value_local_ids.len() as i32
+    let branch_moved_field_len = self.moved_field_base_locals.len() as i32
+    let branch_moved_field_path_len = self.moved_field_path_kinds.len() as i32
+    self.push_conditional_move_context(match_entry_bb, branch_drop_depth)
+    for drop_i in 0..branch_drop_depth:
+        if self.drop_kinds.get(drop_i as i64) == DropKind.DK_VALUE:
+            let drop_local = self.drop_local_ids.get(drop_i as i64)
+            if self.local_value_moved(drop_local) == 0 and self.local_has_moved_fields(drop_local) == 0:
+                let _ = self.ensure_maybe_moved_flag_for_local(drop_local, self.ast.get_start(node))
+
     var dispatch_bb = self.cur_bb
     for ai in 0..arms_count:
         let arm_node = self.ast.get_extra(arms_start + ai)
@@ -7489,8 +7506,12 @@ fn MirBuilder.lower_match(self: MirBuilder, scrutinee_expr: i32, arms_start: i32
             self.expected_type = saved_arm_expected
             self.assign_operand_to_place(result_place, arm_value, self.ast.get_start(body_node))
         self.pop_scope_with_goto(join_bb)
+        self.restore_moved_value_len(branch_moved_value_len)
+        self.restore_moved_field_lengths(branch_moved_field_len, branch_moved_field_path_len)
 
         dispatch_bb = fail_bb
+
+    self.pop_conditional_move_context()
 
     // #605/#606: the match takes ownership of its subject; arms move payloads out
     // of the materialized scrutinee. Consume the scrutinee copy and a named source
