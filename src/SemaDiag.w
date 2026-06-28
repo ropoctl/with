@@ -124,6 +124,16 @@ fn Sema.emit_error_code(self: Sema, msg: str, node: i32, code: str):
     diag.set_code(code)
     self.diags.emit(diag)
 
+fn Sema.emit_error_with_help(self: Sema, msg: str, node: i32, help: str):
+    if self.suppress_errors != 0:
+        return
+    let start = self.ast.get_start(node)
+    let end = self.ast.get_end(node)
+    var diag = Diagnostic.err(msg, Span { file: self.local_file_id, start: start, end: end })
+    if help.len() > 0:
+        diag.add_help(help)
+    self.diags.emit(diag)
+
 fn Sema.emit_warning(self: Sema, msg: str, node: i32):
     let start = self.ast.get_start(node)
     let end = self.ast.get_end(node)

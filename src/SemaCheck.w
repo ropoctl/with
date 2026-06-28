@@ -5530,7 +5530,7 @@ fn Sema.check_ident(self: Sema, sym: i32, node: i32) -> i32:
                 with_eprint(
                     f"[moved-use] sym={name} tid={tid} node_kind={self.ast.kind(node)}"
                 )
-            self.emit_error("use of moved value", node)
+            self.emit_error_with_help("use of moved value", node, "a moved value cannot be used again; if it is moved on only some control-flow paths, reinitialize it on every path before this use, or clone it before the move")
         if sym != self.assign_target_revive_sym:
             self.note_param_effect(sym, EFF_READ)
         var final_tid = tid
@@ -8616,7 +8616,7 @@ fn Sema.check_field_access(self: Sema, node: i32) -> i32:
 
     var obj_type = self.check_expr(expr)
     if self.union_in_assign_target == 0 and self.field_is_moved(node) != 0:
-        self.emit_error("use of moved value", node)
+        self.emit_error_with_help("use of moved value", node, "a moved value cannot be used again; if it is moved on only some control-flow paths, reinitialize it on every path before this use, or clone it before the move")
     // §16.4: reading a union field other than the last-written one requires
     // unsafe. Only tracked local union variables (literal-initialized or
     // directly assigned) are checked; untracked unions are never flagged.
