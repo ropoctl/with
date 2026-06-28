@@ -1854,6 +1854,11 @@ fn Sema.push_label_boundary(self: Sema) -> Unit:
     self.label_kinds.push(LabelFrameKind.LFK_BOUNDARY)
     self.label_nodes.push(0)
     self.label_break_value_types.push(0)
+    // Keep the loop move-state arrays aligned with label_syms (a boundary is never
+    // a loop target, so no break region).
+    self.label_loop_entry_binds.push(self.bind_names.len() as i32)
+    self.label_break_off.push(-1)
+    self.label_break_seen.push(0)
 
 fn Sema.push_label_frame(self: Sema, sym: i32, kind: i32, node: i32) -> Unit:
     if sym != 0:
@@ -1870,6 +1875,9 @@ fn Sema.push_label_frame(self: Sema, sym: i32, kind: i32, node: i32) -> Unit:
     self.label_kinds.push(kind)
     self.label_nodes.push(node)
     self.label_break_value_types.push(0)
+    self.label_loop_entry_binds.push(self.bind_names.len() as i32)
+    self.label_break_off.push(-1)
+    self.label_break_seen.push(0)
 
 fn Sema.pop_label_frame(self: Sema):
     if self.label_syms.len() as i32 == 0:
@@ -1878,6 +1886,9 @@ fn Sema.pop_label_frame(self: Sema):
     self.label_kinds.pop()
     self.label_nodes.pop()
     self.label_break_value_types.pop()
+    self.label_loop_entry_binds.pop()
+    self.label_break_off.pop()
+    self.label_break_seen.pop()
 
 fn Sema.resolve_labeled_control(self: Sema, label: i32, node: i32) -> i32:
     var crossed_boundary = 0
@@ -4826,6 +4837,9 @@ fn Sema.check_expr(self: Sema, node: i32) -> TypeId:
         self.check_expr(cond)
         self.loop_depth = self.loop_depth + 1
         self.push_label_frame(label, LabelFrameKind.LFK_WHILE, node)
+        let while_frame_idx = self.label_syms.len() as i32 - 1
+        self.alloc_loop_break_region(while_frame_idx)
+        let while_entry_states = self.save_scope_states()
         var pushed_regex_capture_scope = 0
         if self.ast.kind(cond) == NodeKind.NK_MATCH_OP:
             let rhs = self.ast.get_data1(cond)
@@ -4836,12 +4850,17 @@ fn Sema.check_expr(self: Sema, node: i32) -> TypeId:
         let saved_drop_cf = self.drop_control_flow_depth
         if self.current_drop_type_sym != 0:
             self.drop_control_flow_depth = self.drop_control_flow_depth + 1
-        self.push_move_control_flow_context(0)
-        self.check_expr_statement_context(body)
+        // Whole-value Drop moves out of an outer binding are allowed inside the
+        // loop; finalize_loop_move_state runs the back-edge use-after-move check
+        // and computes the post-loop state (#613).
+        self.push_move_control_flow_context(1)
+        let while_body_type = self.check_expr_statement_context(body)
         self.pop_move_control_flow_context()
         self.drop_control_flow_depth = saved_drop_cf
         if pushed_regex_capture_scope != 0:
             self.pop_scope()
+        let while_body_diverges = if self.get_type_kind(self.resolve_alias(while_body_type as TypeId)) == TypeKind.TY_NEVER: 1 else: 0
+        self.finalize_loop_move_state(&while_entry_states, while_frame_idx, while_body_diverges, 1, node)
         self.pop_label_frame()
         self.loop_depth = self.loop_depth - 1
         return self.ty_void
@@ -4852,13 +4871,18 @@ fn Sema.check_expr(self: Sema, node: i32) -> TypeId:
         let label = self.ast.get_data2(node)
         self.loop_depth = self.loop_depth + 1
         self.push_label_frame(label, LabelFrameKind.LFK_WHILE, node)
+        let dw_frame_idx = self.label_syms.len() as i32 - 1
+        self.alloc_loop_break_region(dw_frame_idx)
+        let dw_entry_states = self.save_scope_states()
         let saved_drop_cf_dw = self.drop_control_flow_depth
         if self.current_drop_type_sym != 0:
             self.drop_control_flow_depth = self.drop_control_flow_depth + 1
-        self.push_move_control_flow_context(0)
-        self.check_expr_statement_context(body)
+        self.push_move_control_flow_context(1)
+        let dw_body_type = self.check_expr_statement_context(body)
         self.pop_move_control_flow_context()
         self.drop_control_flow_depth = saved_drop_cf_dw
+        let dw_body_diverges = if self.get_type_kind(self.resolve_alias(dw_body_type as TypeId)) == TypeKind.TY_NEVER: 1 else: 0
+        self.finalize_loop_move_state(&dw_entry_states, dw_frame_idx, dw_body_diverges, 1, node)
         self.pop_label_frame()
         self.loop_depth = self.loop_depth - 1
         self.check_expr(cond)
@@ -4870,13 +4894,19 @@ fn Sema.check_expr(self: Sema, node: i32) -> TypeId:
         self.push_scope()
         self.push_label_frame(self.ast.get_data1(node), LabelFrameKind.LFK_LOOP, node)
         let loop_frame_idx = self.label_syms.len() as i32 - 1
+        self.alloc_loop_break_region(loop_frame_idx)
+        let loop_entry_states = self.save_scope_states()
         let saved_drop_cf_loop = self.drop_control_flow_depth
         if self.current_drop_type_sym != 0:
             self.drop_control_flow_depth = self.drop_control_flow_depth + 1
-        self.push_move_control_flow_context(0)
-        self.check_expr_statement_context(self.ast.get_data0(node))
+        self.push_move_control_flow_context(1)
+        let loop_body_type = self.check_expr_statement_context(self.ast.get_data0(node))
         self.pop_move_control_flow_context()
         self.drop_control_flow_depth = saved_drop_cf_loop
+        // `loop` exits only via break (has_condition_exit = 0): the fall-through is
+        // the back-edge, not an exit.
+        let loop_body_diverges = if self.get_type_kind(self.resolve_alias(loop_body_type as TypeId)) == TypeKind.TY_NEVER: 1 else: 0
+        self.finalize_loop_move_state(&loop_entry_states, loop_frame_idx, loop_body_diverges, 0, node)
         let result_ty = if loop_frame_idx >= 0: self.label_break_value_types.get(loop_frame_idx as i64) else: 0
         self.pop_label_frame()
         self.pop_scope()
@@ -4896,9 +4926,11 @@ fn Sema.check_expr(self: Sema, node: i32) -> TypeId:
         if label != 0:
             let target = self.resolve_labeled_control(label, node)
             self.mark_function_label_used(label)
+            self.capture_loop_break_move_state(target)
             self.check_break_value_for_target(target, val, node)
         else:
             let target = self.resolve_innermost_loop_control(node, "break")
+            self.capture_loop_break_move_state(target)
             self.check_break_value_for_target(target, val, node)
         return self.ty_never
 
@@ -4911,8 +4943,10 @@ fn Sema.check_expr(self: Sema, node: i32) -> TypeId:
             if target >= 0 and self.label_kinds.get(target as i64) == LabelFrameKind.LFK_BLOCK:
                 self.emit_error("cannot continue a labeled block; only loops support continue", node)
             self.mark_function_label_used(label)
+            self.check_loop_continue_carried_move(target, node)
         else:
-            let _ = self.resolve_innermost_loop_control(node, "continue")
+            let target = self.resolve_innermost_loop_control(node, "continue")
+            self.check_loop_continue_carried_move(target, node)
         return self.ty_never
 
     if kind == NodeKind.NK_FIELD_ACCESS:
@@ -8148,7 +8182,11 @@ fn Sema.check_for(self: Sema, node: i32) -> i32:
     // §15.17 when mutation through it is attempted.
     let yields_views = self.for_iterable_yields_views(iterable)
 
-    self.push_move_control_flow_context(0)
+    self.push_move_control_flow_context(1)
+    // Snapshot the outer move-state BEFORE binding the loop variable, so the
+    // back-edge check covers only outer bindings — moving the fresh per-iteration
+    // loop variable is sound (#613).
+    let for_entry_states = self.save_scope_states()
     self.push_scope()
     if self.ast.for_binding_is_pattern(node):
         self.check_pattern(binding, elem_type)
@@ -8165,11 +8203,16 @@ fn Sema.check_for(self: Sema, node: i32) -> i32:
             self.scope_put(index_binding, self.ty_i64 as i32, 0)
     self.loop_depth = self.loop_depth + 1
     self.push_label_frame(label, LabelFrameKind.LFK_FOR, node)
+    let for_frame_idx = self.label_syms.len() as i32 - 1
+    self.alloc_loop_break_region(for_frame_idx)
     let saved_drop_cf_for = self.drop_control_flow_depth
     if self.current_drop_type_sym != 0:
         self.drop_control_flow_depth = self.drop_control_flow_depth + 1
-    self.check_expr_statement_context(body)
+    let for_body_type = self.check_expr_statement_context(body)
     self.drop_control_flow_depth = saved_drop_cf_for
+    // `for` exits when the iterable is exhausted (like a condition) → has_condition_exit = 1.
+    let for_body_diverges = if self.get_type_kind(self.resolve_alias(for_body_type as TypeId)) == TypeKind.TY_NEVER: 1 else: 0
+    self.finalize_loop_move_state(&for_entry_states, for_frame_idx, for_body_diverges, 1, node)
     self.pop_label_frame()
     self.loop_depth = self.loop_depth - 1
     self.pop_scope()

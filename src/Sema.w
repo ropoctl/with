@@ -595,6 +595,16 @@ type Sema {
     label_kinds: Vec[i32],
     label_nodes: Vec[i32],
     label_break_value_types: Vec[i32],
+    // Loop move-state tracking (docs/branch-merge-soundness.md §6.7 / #613):
+    // per label frame: entry bind-count (outer/inner boundary), the offset of this
+    // loop's break-flag region in loop_break_flat (-1 = none), and whether any
+    // break to this frame was captured. loop_break_flat is a flat stack of
+    // per-binding break-moved flags (VarState), one region per active loop — kept
+    // as Vec[i32] (not Vec[Vec[i32]]) for seed compatibility.
+    label_loop_entry_binds: Vec[i32],
+    label_break_off: Vec[i32],
+    label_break_seen: Vec[i32],
+    loop_break_flat: Vec[i32],
     fn_label_syms: Vec[i32],
     fn_label_nodes: Vec[i32],
     fn_label_paths: Vec[str],
@@ -1585,6 +1595,10 @@ fn sema_empty_state(pool: InternPool, diags: DiagnosticList, ast: AstPool) -> Se
         label_kinds: Vec.new(),
         label_nodes: Vec.new(),
         label_break_value_types: Vec.new(),
+        label_loop_entry_binds: Vec.new(),
+        label_break_off: Vec.new(),
+        label_break_seen: Vec.new(),
+        loop_break_flat: Vec.new(),
         fn_label_syms: Vec.new(),
         fn_label_nodes: Vec.new(),
         fn_label_paths: sema_new_vec_str(),
@@ -3808,6 +3822,97 @@ fn Sema.union_move_states(self: Sema, base: &Vec[i32], other: &Vec[i32]) -> Vec[
         let ov = if i < other.len() as i32: other.get(i as i64) else: VarState.LIVE
         out.push(if bv == VarState.MOVED or ov == VarState.MOVED: VarState.MOVED else: VarState.LIVE)
     out
+
+// ── Loop move-state (#613, docs/branch-merge-soundness.md §6.7) ──────────────
+
+fn Sema.emit_loop_carried_move_error(self: Sema, bind_idx: i32, loop_node: i32):
+    let sym = self.bind_names.get(bind_idx as i64)
+    let name = self.pool_resolve(sym)
+    self.emit_error_with_help("use of moved value: `" ++ name ++ "` is moved inside a loop and not reinitialized before the loop repeats", loop_node, "reinitialize `" ++ name ++ "` on every path before the loop repeats, or move it only on a path that exits the loop")
+
+// Allocate this loop's break-flag region in loop_break_flat (called by each loop
+// construct after push_label_frame). One VarState slot per outer binding, init
+// LIVE; freed in finalize_loop_move_state.
+fn Sema.alloc_loop_break_region(self: Sema, frame_idx: i32):
+    if frame_idx < 0 or frame_idx >= self.label_break_off.len() as i32:
+        return
+    let count = self.label_loop_entry_binds.get(frame_idx as i64)
+    self.label_break_off.set_i32(frame_idx as i64, self.loop_break_flat.len() as i32)
+    var i = 0
+    while i < count:
+        self.loop_break_flat.push(VarState.LIVE)
+        i = i + 1
+
+// At a `break`, union the current move-state of the target loop's outer bindings
+// into that loop's break-flag region (the union of move-states over all breaks to
+// that loop), used to compute the post-loop state.
+fn Sema.capture_loop_break_move_state(self: Sema, frame_idx: i32):
+    if frame_idx < 0 or frame_idx >= self.label_break_off.len() as i32:
+        return
+    let off = self.label_break_off.get(frame_idx as i64)
+    if off < 0:
+        return
+    let boundary = self.label_loop_entry_binds.get(frame_idx as i64)
+    var i = 0
+    while i < boundary:
+        if i < self.bind_states.len() as i32 and self.bind_states.get(i as i64) == VarState.MOVED and self.type_needs_drop(self.bind_types.get(i as i64)) != 0:
+            self.loop_break_flat.set_i32((off + i) as i64, VarState.MOVED)
+        i = i + 1
+    self.label_break_seen.set_i32(frame_idx as i64, 1)
+
+// A `continue` jumps to the loop's back-edge: any outer binding moved (and not
+// reinitialized) at the continue would be used moved on the next iteration.
+fn Sema.check_loop_continue_carried_move(self: Sema, frame_idx: i32, node: i32):
+    if frame_idx < 0 or frame_idx >= self.label_loop_entry_binds.len() as i32:
+        return
+    let boundary = self.label_loop_entry_binds.get(frame_idx as i64)
+    var i = 0
+    while i < boundary:
+        if i < self.bind_states.len() as i32 and self.bind_states.get(i as i64) == VarState.MOVED and self.type_needs_drop(self.bind_types.get(i as i64)) != 0:
+            self.emit_loop_carried_move_error(i, node)
+        i = i + 1
+
+// After a loop body: (1) the back-edge use-after-move check — an outer binding
+// LIVE at entry but MOVED at body-end is moved across the back-edge without
+// reinit (skipped when the body diverges, so there is no fall-through back-edge);
+// (2) compute the post-loop move-state. `has_condition_exit` is 1 for while/for
+// (the loop may exit via its condition with the entry or body-end state) and 0
+// for `loop` (exits only via break). The break accumulator carries moves that a
+// break propagated out of the loop.
+fn Sema.finalize_loop_move_state(self: Sema, entry: &Vec[i32], frame_idx: i32, body_diverges: i32, has_condition_exit: i32, loop_node: i32):
+    let entry_count = entry.len() as i32
+    if body_diverges == 0:
+        var i = 0
+        while i < entry_count:
+            // Scoped to needs-drop values (like the conditional-move feature): a
+            // moved-out POD Vec is a non-destructive copy today (#607), and the
+            // codebase relies on that, so only Drop/transitive-Drop loop-carried
+            // moves are use-after-move errors here.
+            if entry.get(i as i64) == VarState.LIVE and i < self.bind_states.len() as i32 and self.bind_states.get(i as i64) == VarState.MOVED and self.type_needs_drop(self.bind_types.get(i as i64)) != 0:
+                self.emit_loop_carried_move_error(i, loop_node)
+            i = i + 1
+    var post: Vec[i32] = if has_condition_exit != 0:
+        let body_end = self.save_scope_states()
+        self.union_move_states(entry, &body_end)
+    else:
+        self.union_move_states(entry, entry)
+    if frame_idx >= 0 and frame_idx < self.label_break_seen.len() as i32 and self.label_break_seen.get(frame_idx as i64) != 0:
+        let off = self.label_break_off.get(frame_idx as i64)
+        if off >= 0:
+            var brk: Vec[i32] = Vec.new()
+            var i = 0
+            while i < entry_count:
+                let v = if (off + i) < self.loop_break_flat.len() as i32: self.loop_break_flat.get((off + i) as i64) else: VarState.LIVE
+                brk.push(v)
+                i = i + 1
+            post = self.union_move_states(&post, &brk)
+    // Free this loop's break-flag region (it is the top of the flat stack).
+    if frame_idx >= 0 and frame_idx < self.label_break_off.len() as i32:
+        let off = self.label_break_off.get(frame_idx as i64)
+        if off >= 0:
+            while self.loop_break_flat.len() as i32 > off:
+                self.loop_break_flat.pop()
+    self.restore_scope_states(&post)
 
 fn Sema.clear_binding_view_deps(self: Sema, sym: i32):
     let opt = self.scope_name_map.get(sym)

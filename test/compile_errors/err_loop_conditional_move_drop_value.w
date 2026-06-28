@@ -1,4 +1,9 @@
-//! expect-check-fail: conditional move of Drop value requires drop-state tracking
+//! expect-check-fail: use of moved value
+
+// `r` is moved inside the loop body and not reinitialized before the back-edge,
+// so the next iteration would use a moved value (#613). The compiler cannot prove
+// the loop runs once, so it conservatively rejects — like Rust's "value moved in
+// previous iteration of loop".
 
 type Resource { id: i32 }
 impl Drop for Resource:

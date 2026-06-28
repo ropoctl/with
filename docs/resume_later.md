@@ -1,9 +1,12 @@
 # Resume Later: Drop/Move Ownership (M7+) and the Branch-Merge Blocker
 
 Status snapshot for continuing the `docs/drop-move-ownership.md` effort. Written
-2026-06-27. The branch-merge soundness blocker (#612) that this work was parked
-behind is now **fixed** (see `docs/branch-merge-soundness.md`); the active task is
-**Slice D (loops, #613)**, with E/F to follow. This file is the live resume record.
+2026-06-27. The branch-merge soundness blocker (#612) is **fixed** (see
+`docs/branch-merge-soundness.md`) and **Slice D (loops, #613) is now done** for all
+four loop constructs. The active tasks are **Slice E (conditional field moves)** and
+**Slice F (M8 audit + M9 matrix)**; **#614** (pre-existing reassign-after-move
+double-drop) blocks tightening the loop reinit drop-count assertions. This file is
+the live resume record.
 
 ## TL;DR
 
@@ -85,36 +88,46 @@ the over-rejections compile. Other conditional constructs (if-let/while-let/`&&`
 
 ## Resume plan for the drop/move slices (AFTER branch-merge is fixed)
 
-1. **Slice D (loops)** — with a sound merge, implement the back-edge check:
-   - Change loop `push_move_control_flow_context(0)` → `(1)` in `check_expr`
-     (`src/SemaCheck.w` ~4839 while, ~4858 do-while, ~4876 loop; `check_for`).
-   - After the loop body, snapshot-compare: a binding that was LIVE at loop entry
-     and is MOVED at body-end → emit **use of moved value** (use-after-move; moved
-     across the back-edge without reinit). Use `save_scope_states()` for the
-     snapshot; `bind_names[idx]` → sym → `pool_resolve` for the name;
-     `move_control_flow_binding_starts` gives the outer/inner boundary.
-   - The existing Never-restore already makes move-then-break end LIVE → accepted.
-     reinit ends LIVE → accepted. `err_loop` ends MOVED → rejected. (Now correct —
-     the branch-merge gap is fixed, so body-end state is trustworthy.)
-   - **Post-loop-state subtlety (must handle for soundness).** The back-edge check
-     covers iteration-2 use-after-move, but it does NOT make the *post-loop* state
-     sound by itself. A `break` can carry a move OUT of the loop:
-     `loop: if c: { take(r); break }` then `use(r)` after the loop — the break path
-     moved `r`, so `r` is moved after the loop, yet body-end (fall-through) is LIVE.
-     Using body-end (or entry) as the post-loop state would unsoundly accept
-     `use(r)`. Fix: capture the move-state at each `break` (a per-loop accumulator,
-     a stack parallel to the label frames, unioned at NK_BREAK ~`SemaCheck.w:2361`/
-     `:4346`), and set the post-loop state = union(body-end / condition-false state,
-     break accumulators). For a `loop` with no reachable non-break exit, post = the
-     break union. This is real infra (Vec[Vec[i32]] stack or flat equiv); do not
-     ship the simpler back-edge-only version — it has this hole.
-   - MIR: reinit case is LIVE at loop exit → existing scope-exit drop + M4
-     drop-before-overwrite handles it; no new loop drop-flag needed for the
-     reinit/break subset. Add behavior + `da_*` fixtures (incl. a
-     move-then-break-then-use-after-loop compile-error fixture).
-   - Convert `test/compile_errors/err_loop_conditional_move_drop_value.w` to the
-     correct use-after-move message (keep it a compile-error test — `err_loop`
-     stays rejected, just with the right reason).
+1. **Slice D (loops)** — **DONE** (all four constructs: `while`, do-while, `loop`,
+   `for`). All loop move-contexts now `push_move_control_flow_context(1)`; the sound
+   analysis is three checks plus a post-loop merge in `Sema.finalize_loop_move_state`:
+   - **Back-edge use-after-move** (in finalize, skipped when the body diverges): an
+     outer binding LIVE at loop entry and MOVED at body-end is moved across the
+     back-edge without reinit → **use of moved value** (Rust's "moved in previous
+     iteration"). Reinit ends LIVE → accepted; `err_loop` ends MOVED → rejected.
+   - **Continue-carried move** (`Sema.check_loop_continue_carried_move`, at NK_CONTINUE):
+     a `continue` jumps to the back-edge, so an outer binding MOVED at the continue
+     would be used moved next iteration → rejected (no accumulator needed).
+   - **Break accumulator → post-loop state** (`Sema.capture_loop_break_move_state` at
+     NK_BREAK; merged in finalize). A `break` can carry a move OUT of the loop, so the
+     post-loop state = union(entry, body-end if `has_condition_exit`, break flags).
+     `has_condition_exit` = 1 for while/do-while/for (condition/exhaustion exit), 0 for
+     `loop` (break-only). So move-then-break compiles, but using the value *after* the
+     loop is a use-after-move.
+   - **Storage** (seed-compatible — no `Vec[Vec[i32]]`): per label-frame `Vec[i32]`
+     arrays `label_loop_entry_binds` / `label_break_off` / `label_break_seen`, plus a
+     flat `loop_break_flat: Vec[i32]` stack of per-binding break-flag regions
+     (`alloc_loop_break_region` on loop entry, freed in finalize). **GOTCHA fixed:**
+     `push_label_boundary` (function-entry frame) must push these arrays too, or the
+     frame index overshoots them (symptom: `seen=-1`, post-loop never marks moved).
+   - **Scoped to needs-drop** (like the conditional-move feature): POD `Vec[i32]` move
+     is a non-destructive copy today (#607) and the compiler relies on it, so only
+     Drop/transitive-Drop loop-carried moves are use-after-move errors. Without this
+     gate the self-build cascades (e.g. `step_tys: mut Vec[i32]` in `autoderef`).
+   - **`for` wrinkle:** snapshot entry BEFORE binding the loop variable, so the
+     back-edge check covers only outer bindings (moving the fresh per-iteration loop
+     var is sound). `restore_scope_states` overwrites only the prefix, so a shorter
+     outer-only snapshot is safe.
+   - **Fixtures:** `behav_while_reinit_move`, `behav_for_reinit_move` (compile+run —
+     drop count NOT asserted, blocked by #614); `err_loop_conditional_move_drop_value`
+     (while, reworded to use-of-moved), `err_while_move_then_break_use`,
+     `err_loop_move_then_break_use`, `err_for_loop_carried_move`,
+     `err_while_continue_carried_move`.
+   - **Blocked dependency:** the §2.4 reinit pattern over-counts drops by one per
+     iteration because of **#614** (pre-existing reassign-after-move double-drop, also
+     reproducible straight-line). Tighten the reinit behavior fixtures to assert exact
+     drop counts once #614 lands. No new loop drop-flag is needed for the reinit/break
+     subset.
 2. **Slice E (conditional field moves)** — only for **non-Drop** aggregates (spec
    §2.4). Drop-aggregate field move-out stays rejected ("partial move from Drop
    type", already correctly worded at `SemaCheck.w:18621`). The diagnostic at
@@ -147,7 +160,9 @@ pass `:fixpoint` (verified Slice A's intermediate via a worktree with a symlinke
 
 ## Relevant GitHub issues
 - **#612 branch-merge move-state soundness** — **FIXED + CLOSED** (`2a0da1d1`, `ec65024f`).
-- **#613 loop maybe-init dataflow** — Slice D; **unblocked**, the active task.
+- **#613 loop maybe-init dataflow** — Slice D; **DONE** for while/do-while/loop/for.
+- **#614 reassign-after-move double-drop** — pre-existing (not loop-specific); blocks
+  asserting exact drop counts on the loop reinit fixtures.
 - #579 diverging-arm over-rejection — **FIXED + CLOSED** by the match merge.
 - #605/#606/#607 the transitive-Drop move/drop substrate this effort continues.
 - #608 POD `Vec[i32]` buffer not freed (sentinel: `da_pod_vec` expects leak count=1).
