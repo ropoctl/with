@@ -111,21 +111,27 @@ So Vale spends its generations on the one problem we don't have. Which left a de
 
 Vale: **check the borrows, trust the static checker for the owner.**
 
-With: **the borrows are structurally safe, so spend the generation on the owner's drop.**
+With: **the borrows are structurally safe, so put the runtime truth on the owner's drop instead.**
 
-That single inversion is the whole design. We take Vale's runtime-truth idea — a generation in the allocation header, bumped on free — and point it precisely at the thing that bit me: the owner's drop.
+That single inversion is the whole design. Vale's real lesson isn't "generations" — it's *correctness should be a runtime fact, not a static proof.* Generations are just how Vale spends that idea on borrows. With's borrows don't need it, so I asked the sharper question: what is the **cheapest runtime fact** that makes the *owner's drop* safe?
 
-- A drop asks the allocator: *is this still the allocation I owned, with my generation?* Match → run the destructor, free, bump. Stale → a prior owner already freed it → **no-op.**
-- Double-free becomes impossible *by construction*: only the holder of the matching generation ever frees, and the bump invalidates every stale copy. Reassign-after-move is correct because the moved-out `r` finds its generation stale and quietly does nothing.
+It isn't a generation. A generation is a header read plus a compare — the right tool for a stored reference that has to ask "is the thing I point at still alive?", but overkill for a drop, which is already holding the value. The cheapest fact for a drop is simpler, and it's the one I kept refusing to see while I chased drop flags and dead-drop analysis:
+
+> **A move blanks the value it moves out of. Dropping a blank frees nothing.**
+
+Call it the *niche*: the all-zero / null state of an owned value *is* the signal "I've been moved; I own nothing." A move copies the bits to the new binding and resets the source to that state. A drop checks for it and, if it sees it, does nothing.
+
+- Double-free becomes impossible *by construction*: the live bits exist in exactly one binding at a time, every move hands them off and blanks the source, and dropping a blanked source frees nothing. Reassign-after-move is correct because the moved-out `r` is already blank, so its drop-before-overwrite is a no-op.
+- And Vale's generation doesn't vanish — we *do* spend a runtime truth, just not on the owner. We keep the generation for the one place a With value is named past its own scope: the `Handle` of §6, where a stored index asks the allocator "is the slot you name still mine?" Owners get reset-on-move; long-lived references get generations. Each lifetime, the cheapest check it needs.
 
 And here's the move that pays off the lesson from the bug. The static move analysis — the very pass that betrayed me — **doesn't go away. It gets demoted.** It is no longer the safety mechanism. It is now two things, neither load-bearing:
 
 1. A **diagnostic**: using a moved-from variable is almost always a mistake, so we still flag it as a compile error — as a courtesy, not a guarantee.
-2. A **zero-cost optimizer**: where it *proves* a value has a single owner that's never moved (the overwhelming common case), the generation check is provably redundant and we **elide it entirely** — the drop compiles to an unconditional free, byte-for-byte what a static-only model would emit.
+2. A **zero-cost optimizer**: where it *proves* a value has a single owner that's never moved (the overwhelming common case), the source-reset and the null check at its drop are provably redundant and we **elide them entirely** — the drop compiles to an unconditional free, byte-for-byte what a static-only model would emit.
 
 The consequence is the thing I was chasing:
 
-> A bug in the move analysis can now only cost a redundant compare — a wasted CPU cycle. It can never be a double-free or a leak, because correctness lives in the runtime generation, not in the proof.
+> A bug in the move analysis can now only cost a redundant null store and a redundant null check — a wasted CPU cycle. It can never be a double-free or a leak, because correctness lives in the unconditional reset-on-move, not in the proof.
 
 That is the exact inverse of `elaborate_drops`, where the analysis *is* the safety and a bug is UB. We kept the smart pass for its speed and its nice error messages, and we took away its ability to hurt you.
 
@@ -133,52 +139,54 @@ That is the exact inverse of `elaborate_drops`, where the analysis *is* the safe
 
 The mechanism, in full:
 
-**The generation lives in the allocation header.** The allocator stamps a generation on every allocation and bumps it on free — and on reuse it writes a *random* generation, not just `+1`, so a recycled slot can't accidentally match a stale snapshot. This is the same counter the language already exposes in `Handle` and `SlotMap` (§6): one concept, used everywhere.
+**A move blanks its source.** A move copies the value's bits to the new binding and **resets the source** — its owning pointer is cleared to null, a container is left empty (null pointer, zero length). The source binding still *type-checks* as the value; it just no longer owns anything. The reset is one store, and it is unconditional: every move blanks its source.
 
-**An owned value carries the generation it acquired.** A move is a plain `memcpy` that copies that snapshot to the new binding. The source keeps its now-stale snapshot. No source-zeroing, no bookkeeping, no "is this moved?" proof required for safety.
-
-**Drop is generation-checked:**
+**Drop is guarded by the blank.** A drop first checks whether the value is the reset sentinel — its owning storage zeroed:
 
 ```
-if value.gen == header(value.ptr).gen:   // still the live owner?
+if value is blank (owning pointer null / empty container):
+    do nothing                            // moved-from, or never-owned → frees nothing
+else:
     <run the destructor body>
-    free(value.ptr)                       // freeing bumps the header generation
-// else: stale — a prior owner already freed it → no-op
+    free(value.ptr)
 ```
+
+Built-in containers are inherently null-safe — freeing a null pointer is a no-op, recursing over an empty container touches nothing — so for them the check folds into the ordinary drop at no extra cost. A user `Drop` whose body touches the value is wrapped in the same guard, so its destructor never runs against a moved-from value.
 
 **Reassign-after-move, traced:**
 
 ```with
-var r = make()    // r owns allocation A, generation g
-take(r)           // take owns r, drops it → frees A, bumps A to g+1
-r = make()        // drop-before-overwrite: r's snapshot g ≠ A's g+1 → no-op
-                  // r now owns a fresh allocation B, generation h
+var r = make()    // r owns allocation A
+take(r)           // r moved into take; take drops it → frees A; r is reset to null
+r = make()        // drop-before-overwrite: r is null → no-op; r now owns fresh B
 use(r)
-// scope end: r's snapshot h == B's h → destructor + free. Exactly one free. No leak.
+// scope end: r is non-null → destructor + free. Exactly one free. No leak.
 ```
 
-No drop flags. No conditional-drop elaboration. No per-path bookkeeping. The generation settles it.
+No drop flags. No conditional-drop elaboration. No per-path bookkeeping. The blank settles it.
 
-And one quiet advantage over Vale falls out of an existing piece of our runtime. Vale can never return freed memory to the OS, because it needs the generation field to stay readable forever. With already has a slab-range oracle (`rt_payload_start_is_owned`) that knows whether an address is inside a live allocation region. So our check is two cheap levels: *is this address in a live region?* (handles memory returned to the OS — stale → no-op) and *does the generation match?* (handles in-region reuse). **We get to free memory back to the OS. Vale doesn't.**
+**The generation lives in the allocation header — for the *handle* path.** The allocator stamps a generation on every allocation and bumps it on free (writing a *random* value on reuse, so a recycled slot can't accidentally match a stale snapshot). That counter is what `Handle` and `SlotMap` (§6) check to catch a use-after-free on a *stored, non-owning* reference — turning it into a recoverable `None` instead of UB. Owners never read or compare it; reset-on-move is the owner's whole story, and it's *cheaper* than a generation check — the drop consults only the pointer it already holds, with no header read at all.
+
+And one quiet advantage falls out of exactly that. Because an owner's drop never reads the allocation header, With carries no "the generation field must stay readable forever" constraint on owned memory — so we can hand freed pages **back to the OS**. Vale can't; its owning model still needs the header live. (The handle path stays sound across returned memory via an existing slab-range oracle, `rt_payload_start_is_owned`, that knows whether an address is still inside a live region.)
 
 The cost, honestly stated:
 
 | Situation | Cost |
 |---|---|
-| A single, never-moved owner (the common case) | **Zero** — check and bump elided; identical codegen to a static model |
-| Genuinely dynamic ownership (conditional moves, reassignment of a maybe-moved binding, ownership moved through a data structure) | One generation compare + one bump — a single, well-predicted branch |
+| A single, never-moved owner (the common case) | **Zero** — reset and null guard elided by the optimizer; identical codegen to a static-only model |
+| Genuinely dynamic ownership (conditional moves, reassignment of a maybe-moved binding, ownership moved through a data structure) | One null store per move, one null check per drop — a single, well-predicted branch, and *no* allocator round-trip |
 
-We pay a branch exactly where ownership is actually dynamic, and nowhere else. And we explicitly **do not** build Vale's regions or HGM — ephemeral borrows make the thing that drove Vale's complexity unnecessary. Our entire "optimizer" is the move analysis deciding whether one drop needs one check. That's it.
+We pay a predictable, optimizer-elidable null store and null check exactly where ownership is actually dynamic, and nowhere else. And we explicitly **do not** build Vale's regions or HGM — ephemeral borrows make the thing that drove Vale's complexity unnecessary. Our entire "optimizer" is the move analysis deciding whether one drop needs its one check. That's it.
 
 ## The part that makes it the best of both worlds
 
 **Versus Rust.** Same safety guarantees — no use-after-free, no double-free, no data races — with *none* of the lifetime ceremony, and a robustness Rust's drop elaboration doesn't have: in Rust a bug in `elaborate_drops` is undefined behavior; in With a bug in the equivalent pass is a wasted cycle. We're not just as safe as Rust. On the drop path, we're harder to *break*.
 
-**Versus Vale.** Same beautiful runtime-truth idea — a generation that catches what static proofs miss — but we spend it where it actually earns its keep for us (the owner's drop), and we skip the entire regions/HGM apparatus that Vale needed to make borrow-checking fast, because ephemeral borrows already made borrows free. We even get to release memory to the OS, which Vale's design can't.
+**Versus Vale.** Same beautiful runtime-truth idea — correctness from a fact you check, not a proof you trust — but we realize it with the *cheapest* fact each lifetime needs: reset-on-move for owners (no header read at all), and Vale's generation kept for the stored `Handle` references that genuinely need it. We skip the entire regions/HGM apparatus Vale built to make borrow-checking fast, because ephemeral borrows already made borrows free. And because an owner's drop never reads the header, we get to release memory to the OS — which Vale's owning model can't.
 
 **Versus C.** Safe. **Versus GC.** No pauses, no runtime, no tracing.
 
-We took Vale's correctness-from-runtime and Rust's zero-cost-where-provable and let each cover the other's weakness: the generation makes the optimizer non-load-bearing, and the optimizer makes the generation free on the hot path. That's not a compromise between the two. It's both, at once.
+We took Vale's correctness-from-runtime and Rust's zero-cost-where-provable and let each cover the other's weakness: the reset-on-move makes the optimizer non-load-bearing, and the optimizer makes the reset free on the hot path. That's not a compromise between the two. It's both, at once.
 
 ## Why it's *fun*
 
@@ -203,7 +211,7 @@ No `'a`. No `where T: 'a`. No `PhantomData`. No `Rc<RefCell<T>>` because two thi
 
 The borrow checker, when you do hit it, is checking *aliasing* — "don't mutate this while something else is reading it" — which is a real bug and a fair fight. It is not checking whether you've satisfied a lifetime calculus, because there isn't one.
 
-That's the difference I want people to feel. In Rust, the compiler is a brilliant adversary you learn to negotiate with. In With, the compiler did the hard part — put a generation in a header — so that you get to just write the program. Safety stops being a thing you argue about and becomes a thing that's already true.
+That's the difference I want people to feel. In Rust, the compiler is a brilliant adversary you learn to negotiate with. In With, the compiler did the hard part — blank a value when you move it, and skip its drop when it's blank — so that you get to just write the program. Safety stops being a thing you argue about and becomes a thing that's already true.
 
 ## The philosophy: correctness is a fact, speed is an optimization
 
@@ -211,14 +219,14 @@ If there's one idea I'd carve over the door, it's this.
 
 Most safe languages couple correctness to a clever analysis: the analysis succeeds, therefore the program is safe. When the analysis is wrong — and analyses over real control flow are wrong in the corners — your safety is wrong too, silently.
 
-With decouples them. **Correctness is a runtime fact** — a generation either matches or it doesn't, and no compiler bug can make a stale generation match a live one. **Speed is an optional optimization** — a static pass that removes checks it can prove redundant. If the optimizer is perfect, you pay nothing. If the optimizer has a bug, you pay a cycle. Either way, your memory is safe.
+With decouples them. **Correctness is a runtime fact** — the live bits exist in exactly one binding, a moved-from binding is blank, and dropping a blank frees nothing; no compiler bug can make a blanked owner free a second time. (Stored references lean on the same idea one level up: a generation that either matches or it doesn't.) **Speed is an optional optimization** — a static pass that removes checks it can prove redundant. If the optimizer is perfect, you pay nothing. If the optimizer has a bug, you pay a cycle. Either way, your memory is safe.
 
-That's the bargain that lets With be opinionated *and* trustworthy at the same time: we can be aggressive about ergonomics, aggressive about eliminating ceremony, aggressive about "the compiler should just figure it out" — because the floor underneath all of it is a runtime invariant that doesn't depend on us being clever, only on us being correct *once*, in one counter, in one allocator.
+That's the bargain that lets With be opinionated *and* trustworthy at the same time: we can be aggressive about ergonomics, aggressive about eliminating ceremony, aggressive about "the compiler should just figure it out" — because the floor underneath all of it is a runtime invariant that doesn't depend on us being clever, only on us being correct *once* — in the move that blanks its source, and the drop that honors the blank.
 
 Rust taught the world that you don't need a GC to be safe. Vale taught me that you don't need a borrow checker to be safe. With's job is to take both lessons and hand you a language where safety is the default, zero-cost is the common case, and writing the obvious code is — finally — fun.
 
 ## Where this goes
 
-The model is in the spec now (§2.5, Generational Ownership) and the implementation notes (§2.6). The runtime substrate is already partly there — the allocator that knows what it owns. The work ahead is the generation field, the bump on free, the generation-checked drop, and re-pointing the old move analysis from "safety" to "optimizer." The two failed half-measures — runtime drop flags and static dead-drop elaboration — are retired, on purpose, in writing, so no future version of me rebuilds the trap.
+The model is in the spec now (§2.5, Generational Ownership) and the implementation notes (§2.6). The runtime substrate is already partly there — the allocator that knows what it owns. The work ahead is reset-on-move, the null-guarded drop, the generation field with its bump-on-free for the handle path, and re-pointing the old move analysis from "safety" to "optimizer." The two failed half-measures — runtime drop flags and static dead-drop elaboration — are retired, on purpose, in writing, so no future version of me rebuilds the trap.
 
 If you've ever loved what Rust protects you from but resented how much it makes you say to get there — this is the language I'm building for you.
