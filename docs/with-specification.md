@@ -186,8 +186,18 @@ Relationships are handles.  — Long-lived references use typed indices.
 
 This is the fundamental invariant. It removes 90% of Rust's cognitive
 load (no `'a`, no `where` clauses full of lifetime bounds, no
-`PhantomData<&'a T>`) while preserving compile-time guarantees against
+`PhantomData<&'a T>`) while preserving Rust-level guarantees against
 use-after-free, double-free, and data races.
+
+Those guarantees are enforced by **generations** (§2.5) — the same counter
+that makes handles (§6) safe against use-after-remove — not by lifetime
+tracking. A value's owner holds the live generation; a stale generation makes
+a double-free or use-after-free a caught no-op rather than undefined behavior.
+The compiler's static move analysis is an *optimizer and a diagnostic* over
+this runtime guarantee, never the guarantee itself (§2.5.2) — so a bug in the
+analysis can cost performance but never safety. All three rows above share the
+one mechanism: ownership is the live generation, borrowing is ephemeral (so it
+needs none), and handles are the generation made explicit and long-lived.
 
 The trade-off is explicit: you cannot store references in structs. You
 cannot write `struct Lexer { source: &str }`. You cannot return a lazy
@@ -357,6 +367,12 @@ fn demo(cond: bool):
 A conditionally moved binding becomes usable again only when it is
 reinitialized on *every* path reaching the use.
 
+This flow-sensitive check is a *diagnostic*, not the safety mechanism: it
+rejects almost-certainly-wrong code at compile time. Memory safety itself —
+the soundness of the move and the impossibility of a double-free if the check
+were ever wrong — comes from the runtime generation (§2.5), not from this
+analysis.
+
 ### 2.3 Copy Types
 
 Types that implement the `Copy` trait are implicitly copied on
@@ -422,9 +438,12 @@ impl Drop for Database:
 
 Because `drop` consumes `self`, there is no need to defensively
 null out fields to prevent double-free — the value ceases to exist
-after `drop` returns. The compiler handles the details: fields you
-use in your drop body are consumed, remaining fields are dropped
-automatically. No recursion, no leaks, no ceremony:
+after `drop` returns, and running `drop` bumps the allocation's
+generation (§2.5), so any other reference to that storage — a
+moved-from source, a reassigned binding — finds it stale and drops
+to a no-op. The compiler handles the details: fields you use in your
+drop body are consumed, remaining fields are dropped automatically.
+No recursion, no leaks, no ceremony:
 
 ```
 impl Drop for Database:
@@ -535,6 +554,124 @@ fn connect(url: str) -> Result[Connection, Error]:
 `errdefer` and `defer` execute in LIFO order relative to each other. On error
 return, both `errdefer` and `defer` blocks run. On success return, only `defer`
 blocks run.
+
+### 2.5 Generational Ownership
+
+Ownership in With is enforced by **generations**, not by a static proof of
+single ownership. This is the one mechanism behind every ownership guarantee
+in the language: the destructors of §2.4, the handles of §6, and the soundness
+of move semantics (§2.2) are the same idea at different scales. It is what lets
+§1.4 promise Rust-level safety without lifetime annotations.
+
+#### 2.5.1 Reset-on-move and the null drop
+
+An owned value's safety rests on two cheap, complementary runtime facts —
+neither of which depends on the compiler's static analysis being correct:
+
+- **Reset-on-move.** A move (§2.2) copies the value's bits to the new binding
+  and **resets the source**: its owning pointer is cleared to null (a container
+  is left empty — null pointer, zero length). The source binding still
+  type-checks as the value, but it no longer owns anything.
+
+- **The guarded drop.** A drop first checks whether the value is the **reset
+  sentinel** (its storage zeroed); if so the drop is **skipped entirely** — no
+  free, and no user destructor code runs. Built-in containers are inherently
+  null-safe (freeing null does nothing, an empty container recurses over
+  nothing), so the check folds into their ordinary drop; a user `Drop` whose
+  body touches the value is guarded so it never runs against a moved-from
+  value. A moved-out value's drop does nothing.
+
+Together these make **double-free impossible by construction**: the live bits
+exist in exactly one binding at a time, every move hands them off and blanks
+the source, and dropping a blanked source frees nothing. This makes §2.2's
+reassign-after-move correct with no special handling:
+
+```
+var r = make()    // r owns allocation A
+take(r)           // r moved into take; take drops it → frees A; r is reset to null
+r = make()        // drop-before-overwrite: r is null → no-op; r now owns fresh B
+take(r)           // moves r into take; take drops B normally
+```
+
+No drop flags, no flow-sensitive drop elaboration, no per-path bookkeeping —
+the reset settles it. The reset is **unconditional** (every move blanks its
+source) and the null guard is part of the destructor itself, so neither relies
+on the move analysis (§2.5.2) being correct.
+
+The **generation** that §6 surfaces in `Handle` is the *same philosophy*
+applied to long-lived **non-owning** references: the allocator stamps a
+generation per allocation and bumps it on free, so a stored handle can detect
+that the slot it names was reclaimed (use-after-free → a checked `None`,
+§2.5.5). Owning values do not carry or compare a generation for their own
+drop — reset-on-move is their mechanism; the generation is the handle story.
+
+#### 2.5.2 Static analysis is an optimization, never the guarantee
+
+The compiler still performs the flow-sensitive move analysis of §2.2, for two
+reasons — **neither load-bearing for memory safety**:
+
+1. **Ergonomic diagnostic.** Using a moved-from binding is almost always a
+   mistake, so the compiler reports it as a *compile error* (§2.2) rather than
+   letting it become a silent runtime no-op. This is a courtesy to the
+   programmer, not a safety mechanism.
+
+2. **Zero-cost optimizer.** Where the analysis *proves* a value has a single
+   owner that is never moved (the overwhelmingly common case), the source-reset
+   on move and the null guard at its drop are provably redundant and are
+   **elided** — the move skips the reset, the drop becomes an unconditional
+   free, byte-for-byte the codegen a static-only model would emit. The reset
+   and the guard are paid for only where ownership is genuinely dynamic.
+
+The consequence is a property a static-only model cannot have: **a bug in the
+move analysis can only cost performance, never safety.** A missed elision is a
+redundant null store and null check; it can never become a double-free or a
+leak, because correctness lives in the unconditional reset-on-move, not in the
+proof. This is the deliberate inverse of designs (e.g. Rust's `elaborate_drops`)
+where the static analysis *is* the safety and an analysis bug is undefined
+behavior.
+
+#### 2.5.3 Cost
+
+| Situation | Cost |
+|-----------|------|
+| Value with a single, never-moved owner (the common case) | **Zero** — reset and null guard elided by the optimizer; identical codegen to a static-only model |
+| Ownership transferred dynamically (conditional move, reassignment of a possibly-moved binding, ownership moved through a data structure) | One null store per move, one null check per drop — a single predicted branch, no allocator round-trip |
+
+With trades a predictable, optimizer-elidable null store and null check on the
+dynamic paths for the elimination of an entire class of compiler bugs *and* the
+lifetime-annotation ceremony of a static borrow checker. The owner-drop path is
+cheaper than the §6 handle path — it needs no generation compare, only the
+pointer it already holds — yet rests on the same principle: *validity is a
+runtime fact, not a static proof.*
+
+#### 2.5.4 Interaction with C
+
+Reset-on-move and the null drop apply to **With-owned values** — those that
+carry a `Drop` (an allocation buffer, a wrapped foreign resource). Raw pointers
+(`*mut T`, `*const T`) and `c_import`ed C structs have no `Drop`, so they are
+never reset and never drop-checked — copying one is a plain bit copy, exactly
+as fast and exactly as unsafe as C. Ownership, and therefore the reset, begins
+only when a value enters With's care: an allocation, or a `Drop` type wrapping
+a foreign handle. `with migrate`'s modeled-C `Drop` types get reset-on-move for
+free; raw migrated pointers pay nothing for it. (The **generation** of §2.5.1
+likewise lives only on With-owned allocations, for the handle path of §6.)
+
+#### 2.5.5 Relationship to handles (§6)
+
+The three rows of §1.4 share one principle — **validity is a runtime fact, not
+a static proof** — realized by the cheapest mechanism each lifetime needs:
+
+- **Owned values** (persistent): reset-on-move plus the null drop (§2.5.1). No
+  generation and no per-access check — the owner holds either live bits or
+  null.
+- **Handles** `Handle[T]` (relationships, §6): a generation paired with a
+  `SlotMap` index, checked on every access — the explicit, long-lived form for
+  references that must outlive the scope that made them.
+- **Borrows** (ephemeral, §3): nothing at all — they cannot outlive the scope
+  that produced them, so they cannot dangle.
+
+None of the three leans on lifetime annotations, and none leans on the move
+analysis for safety; each pays only for what its lifetime actually requires.
 
 ---
 
@@ -10142,7 +10279,7 @@ that doesn't need a heap allocator or OS:
 | Pointers | `*T`, `*mut T`, safe raw address arithmetic/comparison, unsafe raw memory access/conversion (§16.11) |
 | Comptime | All compile-time evaluation (§17) |
 | `c_import` | Full C interop — this is how you talk to hardware |
-| Ownership | Full borrow checker, move semantics, drop — all compile-time, zero cost |
+| Ownership | Generational ownership, move semantics, drop (§2.5) — statically optimized to zero cost on single-owner paths, one predicted branch where ownership is dynamic; no GC, no runtime |
 | `@[panic_handler]` | Custom panic behavior (see below) |
 | `Never` type | For diverging functions |
 | `unsafe` blocks | Full unsafe capabilities |
@@ -10726,8 +10863,13 @@ At every program point, the following must hold:
    call that never returns — contribute no move-state to the merge. A
    place that is moved on some reaching paths and live on others is
    treated as **moved** for use-checking (§2.2): it may not be used
-   until reinitialized on all paths. Its destructor is elaborated to run
-   only on the paths where it is still live (§2.4, Conditional drop).
+   until reinitialized on all paths. This move-state drives the
+   *diagnostic* (use-after-move) and the *optimizer* (it elides the
+   generation check wherever ownership is statically settled, §2.5.2); it
+   is not what makes the destructor safe. The runtime generation (§2.5)
+   is: where the analysis cannot settle ownership, the generation check
+   stands and the destructor frees on exactly the live path and no-ops on
+   the others, with no static drop-flag elaboration required.
 
    ```
    // moved in one branch, reinitialized in the other → still a

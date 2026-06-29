@@ -3838,6 +3838,41 @@ fn Codegen.mir_emit_with_free_ptr(self: Codegen, ptr: i64):
     args2.push(ptr)
     let _ = wl_build_call(self.builder, wl_global_get_value_type(free_fn), free_fn, vec_data_i64(&args2), 1)
 
+// Reset-on-move niche guard (spec §2.5.1). A moved-out value is zeroed; a user
+// `Drop` body may deref fields the reset nulled (e.g. `*self.slot`), so running
+// it on the all-zero reset sentinel would fault or double-run side effects.
+// Emit `if not all-zero(value): <user drop>`. An over-skip is at worst a leak,
+// never a fault or double-free (all-zero ⇒ owns nothing ⇒ nothing to drop), so
+// a move-analysis bug can never become memory unsafety.
+fn Codegen.mir_emit_guarded_user_drop(self: Codegen, ptr: i64, ty: i64, drop_fn_val: i64, drop_fn_ty: i64) -> Unit:
+    let i64_ty = wl_i64_type(self.context)
+    let i32_ty = wl_i32_type(self.context)
+    let ptr_ty = wl_ptr_type(self.context)
+    let sz = wl_abi_size_of(wl_get_module_data_layout(self.llmod), ty)
+    let zparams: Vec[i64] = Vec.new()
+    zparams.push(ptr_ty)
+    zparams.push(i64_ty)
+    let zargs: Vec[i64] = Vec.new()
+    zargs.push(ptr)
+    zargs.push(wl_const_int(i64_ty, sz, 0))
+    let isz = self.call_internal_runtime_fn("rt_value_is_zero", zparams, zargs, 2, i32_ty)
+    // rt_value_is_zero returns 1 when the value is the reset sentinel; run the
+    // drop only when it is non-zero (isz == 0).
+    let run_cond = wl_build_icmp(self.builder, wl_int_eq(), isz, wl_const_int(i32_ty, 0, 0))
+    let run_bb = wl_append_bb(self.context, self.current_function, "drop.live")
+    let after_bb = wl_append_bb(self.context, self.current_function, "drop.skip")
+    wl_build_cond_br(self.builder, run_cond, run_bb, after_bb)
+    wl_position_at_end(self.builder, run_bb)
+    let args: Vec[i64] = Vec.new()
+    if wl_get_type_kind(ty) == wl_struct_type_kind():
+        args.push(ptr)
+    else:
+        let value = wl_build_load(self.builder, ty, ptr)
+        args.push(value)
+    let _ = wl_build_call(self.builder, drop_fn_ty, drop_fn_val, vec_data_i64(&args), 1)
+    wl_build_br(self.builder, after_bb)
+    wl_position_at_end(self.builder, after_bb)
+
 fn Codegen.mir_emit_drop_ptr(self: Codegen, ptr: i64, ty: i64) -> Unit:
     if ptr == 0 or ty == 0:
         return
@@ -3856,14 +3891,7 @@ fn Codegen.mir_emit_drop_ptr(self: Codegen, ptr: i64, ty: i64) -> Unit:
     // Drop methods take self by value in the spec, but the compiler lowers
     // struct self params as pointers. Pass pointer for struct types.
     if dfv.is_some() and dft.is_some():
-        let drop_fn_ty = dft.unwrap() as i64
-        let args: Vec[i64] = Vec.new()
-        if wl_get_type_kind(ty) == wl_struct_type_kind():
-            args.push(ptr)
-        else:
-            let value = wl_build_load(self.builder, ty, ptr)
-            args.push(value)
-        let _ = wl_build_call(self.builder, drop_fn_ty, dfv.unwrap() as i64, vec_data_i64(&args), 1)
+        self.mir_emit_guarded_user_drop(ptr, ty, dfv.unwrap() as i64, dft.unwrap() as i64)
     self.mir_emit_drop_fields_ptr(ptr, ty, type_sym, 0)
 
 fn Codegen.mir_emit_generic_inst_drop_method(self: Codegen, ptr: i64, ty: i64, sema_ty: i32) -> bool:
@@ -4164,14 +4192,7 @@ fn Codegen.mir_emit_drop_ptr_for_sema_type(self: Codegen, ptr: i64, ty: i64, sem
     let dfv = self.drop_fn_values.get(type_sym)
     let dft = self.drop_fn_types.get(type_sym)
     if dfv.is_some() and dft.is_some():
-        let drop_fn_ty = dft.unwrap() as i64
-        let args: Vec[i64] = Vec.new()
-        if wl_get_type_kind(ty) == wl_struct_type_kind():
-            args.push(ptr)
-        else:
-            let value = wl_build_load(self.builder, ty, ptr)
-            args.push(value)
-        let _ = wl_build_call(self.builder, drop_fn_ty, dfv.unwrap() as i64, vec_data_i64(&args), 1)
+        self.mir_emit_guarded_user_drop(ptr, ty, dfv.unwrap() as i64, dft.unwrap() as i64)
     self.mir_emit_drop_fields_ptr(ptr, ty, type_sym, resolved)
     // #606: an enum (or generic enum like Option/Result) with no explicit Drop
     // impl drops the active variant's payloads. Skipped when an explicit drop
@@ -4403,6 +4424,51 @@ fn Codegen.mir_emit_drop_place_current_origin(self: Codegen, body: &MirBody, pla
                 self.mir_emit_drop_ptr(ptr, drop_ty)
     true
 
+// §2.5.1: zero `size_bytes` at `ptr` via llvm.memset — zeroes ALL bytes,
+// including inter-field struct padding, unlike an aggregate zeroinitializer
+// store. Used so a reset-on-move sentinel is reliably all-zero for the guarded
+// drop's rt_value_is_zero check regardless of struct layout.
+fn Codegen.emit_memset_zero(self: Codegen, ptr: i64, size_bytes: i64) -> Unit:
+    let ms_sym = self.intern.intern("llvm.memset.p0.i64")
+    var ms_func = 0 as i64
+    let ms_cached = self.fn_values.get(ms_sym)
+    if ms_cached.is_some():
+        ms_func = ms_cached.unwrap() as i64
+    else:
+        let ms_params: Vec[i64] = Vec.new()
+        ms_params.push(wl_ptr_type(self.context))
+        ms_params.push(wl_i8_type(self.context))
+        ms_params.push(wl_i64_type(self.context))
+        ms_params.push(wl_i1_type(self.context))
+        let ms_ft = wl_function_type(wl_void_type(self.context), vec_data_i64(&ms_params), 4, 0)
+        ms_func = wl_add_function(self.llmod, "llvm.memset.p0.i64", ms_ft)
+        self.fn_values.insert(ms_sym, ms_func)
+        self.fn_fn_types.insert(ms_sym, ms_ft)
+    let ms_ft = self.fn_fn_types.get(ms_sym).unwrap() as i64
+    let ms_args: Vec[i64] = Vec.new()
+    ms_args.push(ptr)
+    ms_args.push(wl_const_int(wl_i8_type(self.context), 0, 0))
+    ms_args.push(wl_const_int(wl_i64_type(self.context), size_bytes, 0))
+    ms_args.push(wl_const_int(wl_i1_type(self.context), 0, 0))
+    let _ = wl_build_call(self.builder, ms_ft, ms_func, vec_data_i64(&ms_args), 4)
+
+// True if rvalue `rval_id` is `RK_USE` of a `CK_ZERO_SIZED` constant (the
+// reset-on-move / default zero value).
+fn Codegen.mir_rvalue_is_zero_const(self: Codegen, body: &MirBody, rval_id: i32) -> bool:
+    if rval_id < 0 or rval_id >= body.rval_kinds.len() as i32:
+        return false
+    if body.rval_kinds.get(rval_id as i64) != RvalueKind.RK_USE:
+        return false
+    let op = body.rval_d0.get(rval_id as i64)
+    if op < 0 or op >= body.operand_kinds.len() as i32:
+        return false
+    if body.operand_kinds.get(op as i64) != OperandKind.OK_CONSTANT:
+        return false
+    let cid = body.operand_d0.get(op as i64)
+    if cid < 0 or cid >= body.const_kinds.len() as i32:
+        return false
+    body.const_kinds.get(cid as i64) == ConstKind.CK_ZERO_SIZED
+
 fn Codegen.mir_emit_stmt(self: Codegen, body: &MirBody, stmt_id: i32) -> bool:
     if stmt_id < 0 or stmt_id >= body.stmt_kinds.len() as i32:
         return false
@@ -4429,6 +4495,13 @@ fn Codegen.mir_emit_stmt(self: Codegen, body: &MirBody, stmt_id: i32) -> bool:
             let dst_ty_opt = self.mir_local_types.get(dst_local)
             if dst_ptr != 0 and dst_ty_opt.is_some():
                 dst_ty = dst_ty_opt.unwrap() as i64
+        // §2.5.1: a zero-const store into a struct (reset-on-move sentinel, or any
+        // struct zero-init) must zero ALL bytes including padding so the guarded
+        // drop's all-zero check recognizes the reset. memset instead of an
+        // aggregate zeroinitializer store, which leaves inter-field padding unwritten.
+        if not has_projections and dst_ptr != 0 and dst_ty != 0 and wl_get_type_kind(dst_ty) == wl_struct_type_kind() and self.mir_rvalue_is_zero_const(body, d1):
+            self.emit_memset_zero(dst_ptr, wl_abi_size_of(wl_get_module_data_layout(self.llmod), dst_ty))
+            return true
         if d1 >= 0 and d1 < body.rval_kinds.len() as i32 and body.rval_kinds.get(d1 as i64) == RvalueKind.RK_ARRAY_FILL:
             let af_operand = body.rval_d0.get(d1 as i64)
             let af_count = body.rval_d1.get(d1 as i64)

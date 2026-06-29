@@ -388,6 +388,13 @@ var freelists_8: i64 = 0
 var slab_ptr: i64 = 0
 var slab_remaining: i64 = 0
 
+// Generational ownership (spec §2.5). Monotonic counter; each (re)allocation
+// stamps a fresh generation into the allocation header, and each free bumps it.
+// A stale owner's snapshot can never match a later generation, so a double-free
+// or a use-after-free of a recycled small block is a caught no-op. Accessed only
+// under the allocator lock (rt_alloc_unlocked / rt_free_unlocked hold it).
+var rt_next_gen: i64 = 1
+
 var rt_slab_range_starts: [8192]i64 = [0 as i64; 8192]
 var rt_slab_range_ends: [8192]i64 = [0 as i64; 8192]
 var rt_slab_range_count: i32 = 0
@@ -406,8 +413,16 @@ fn rt_record_slab_range(start: i64, size: i64):
     if rt_slab_range_count >= RT_ALLOC_RANGE_CAP:
         rt_slab_ranges_complete = 0
         return
-    rt_slab_range_starts[rt_slab_range_count as i64] = start
-    rt_slab_range_ends[rt_slab_range_count as i64] = start + size
+    // Insert sorted by start (slab ranges are append-only and read only by
+    // rt_payload_start_is_owned, which binary-searches them — O(log n) per free
+    // instead of an O(n) linear scan). Inserts are rare (one per mmap region).
+    var i = rt_slab_range_count
+    while i > 0 and rt_slab_range_starts[(i - 1) as i64] > start:
+        rt_slab_range_starts[i as i64] = rt_slab_range_starts[(i - 1) as i64]
+        rt_slab_range_ends[i as i64] = rt_slab_range_ends[(i - 1) as i64]
+        i = i - 1
+    rt_slab_range_starts[i as i64] = start
+    rt_slab_range_ends[i as i64] = start + size
     rt_slab_range_count = rt_slab_range_count + 1
 
 fn rt_record_large_range(start: i64, size: i64):
@@ -492,6 +507,35 @@ fn alloc_payload_size(ptr: *const u8) -> i64:
 fn alloc_store_small_header(block: i64, size: i64):
     unsafe *(block as *mut i64) = size
 
+// Generational ownership (spec §2.5). The generation lives at header offset 8.
+// Offset 0 holds the payload size — and is reused by the freelist as its
+// next-pointer on free — but offset 8 is never touched by the freelist, so the
+// generation survives the free/realloc cycle and lets a stale owner's drop tell
+// it is no longer the live owner of a recycled small block.
+fn rt_take_gen() -> i64:
+    let g = rt_next_gen
+    rt_next_gen = rt_next_gen + 1
+    g
+
+fn alloc_store_generation(block: i64, generation: i64):
+    unsafe *((block + 8) as *mut i64) = generation
+
+fn alloc_generation(ptr: *const u8) -> i64:
+    unsafe *((ptr as i64 - RT_ALLOC_HEADER_SIZE + 8) as *const i64)
+
+// Reset-on-move drop guard (spec §2.5.1). Returns 1 if all `size` bytes at `ptr`
+// are zero (the reset sentinel), else 0. The compiler emits a call to this in
+// front of a user `Drop` so the destructor never runs on a moved-from value
+// (all-zero ⇒ the value owns nothing ⇒ skipping its drop is correct).
+fn rt_value_is_zero(ptr: *const u8, size: i64) -> i32:
+    var i: i64 = 0
+    while i < size:
+        let b = unsafe *((ptr as i64 + i) as *const u8)
+        if b != 0:
+            return 0
+        i = i + 1
+    1
+
 fn small_block_ptr(block: i64) -> *mut u8:
     (block + RT_ALLOC_HEADER_SIZE) as *mut u8
 
@@ -500,9 +544,21 @@ fn rt_payload_start_is_owned(ptr: *const u8) -> i32:
         return 0
     let payload = ptr as i64
     let header = payload - RT_ALLOC_HEADER_SIZE
-    for i in 0..rt_slab_range_count:
-        let start = rt_slab_range_starts[i as i64]
-        let end = rt_slab_range_ends[i as i64]
+    // Binary-search the sorted slab ranges for the one with the largest start <=
+    // header (ranges are non-overlapping, so at most one can contain header).
+    var lo = 0
+    var hi = rt_slab_range_count - 1
+    var found = -1
+    while lo <= hi:
+        let mid = (lo + hi) / 2
+        if rt_slab_range_starts[mid as i64] <= header:
+            found = mid
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    if found >= 0:
+        let start = rt_slab_range_starts[found as i64]
+        let end = rt_slab_range_ends[found as i64]
         if header >= start and header + RT_ALLOC_HEADER_SIZE <= end:
             let size = unsafe *(header as *const i64)
             if size <= 0 or size > RT_LARGE_THRESHOLD:
@@ -957,6 +1013,7 @@ fn rt_alloc_unlocked(size_arg: i64) -> *mut u8:
             rt_exit(99)
         // Store allocation size in header
         unsafe *(p as *mut i64) = size
+        alloc_store_generation(p as i64, rt_take_gen())
         rt_record_large_range(p as i64, total)
         return (p as i64 + RT_ALLOC_HEADER_SIZE) as *mut u8
 
@@ -971,6 +1028,7 @@ fn rt_alloc_unlocked(size_arg: i64) -> *mut u8:
         let next = unsafe *(head as *const i64)
         set_freelist(idx, next)
         alloc_store_small_header(head, cls_size)
+        alloc_store_generation(head, rt_take_gen())
         let ptr = small_block_ptr(head)
         rt_memset(ptr, 0, size)
         return ptr
@@ -990,6 +1048,7 @@ fn rt_alloc_unlocked(size_arg: i64) -> *mut u8:
     slab_ptr = slab_ptr + block_size
     slab_remaining = slab_remaining - block_size
     alloc_store_small_header(block, cls_size)
+    alloc_store_generation(block, rt_take_gen())
     small_block_ptr(block)
 
 fn rt_alloc_with_origin(size_arg: i64, origin: i64) -> *mut u8:
@@ -1028,6 +1087,7 @@ fn rt_free_unlocked_with_drop_origin(ptr: *mut u8, drop_origin_ptr: i64, drop_or
         rt_alloc_release_mmap_bytes(total)
         return
     let idx = size_class_index(size)
+    alloc_store_generation(block, rt_take_gen())
     free_small_block(block, idx)
 
 fn rt_free_unlocked(ptr: *mut u8):

@@ -1100,9 +1100,15 @@ fn mir_place_text(body: &MirBody, place_id: i32) -> str:
     if place_id < 0 or place_id >= body.place_locals.len() as i32:
         return "_?"
 
-    var out = f"_{body.place_locals.get(place_id as i64)}"
     let p_start = body.place_proj_starts.get(place_id as i64)
     let p_count = body.place_proj_counts.get(place_id as i64)
+
+    // Whole-local place (the common case): reuse the memoized local key instead of
+    // building a fresh "_{local}" string on every call (#614 drop-state hot path).
+    if p_count == 0:
+        return mir_drop_state_local_key(body.place_locals.get(place_id as i64) as i32)
+
+    var out = mir_drop_state_local_key(body.place_locals.get(place_id as i64) as i32)
 
     for i in 0..p_count:
         let pk = body.proj_kinds.get((p_start + i) as i64)
@@ -1327,6 +1333,21 @@ enum MirDropState: i32:
 type MirDropStateMapState {
     keys: Vec[str],
     states: Vec[i32],
+    // Parallel int hash of each key (#614 perf): map_find compares this cheap int
+    // before the expensive string equality, so the linear scan does O(P) int
+    // comparisons instead of O(P) string comparisons (which dominated huge-function
+    // drop-state at ~67% via rt str-equality).
+    key_hashes: Vec[i32],
+    // 1 once any projection key ("_N.fM", "_N[_K]", …) has been inserted. While 0,
+    // a local has no descendants, so mark_local can skip its O(P) descendant scan
+    // — the dominant cost on large drop-free-of-projections bodies (#614 perf).
+    has_projections: i32,
+    // Chained hash index over the keys (#614 perf): bucket_heads[hash % BUCKETS] is
+    // the head entry index of a bucket; bucket_next[i] chains entries in the same
+    // bucket. Turns map_find from an O(P) linear scan into ~O(P/BUCKETS) — the now-
+    // dominant drop-state cost on large bodies. bucket_next is parallel to keys.
+    bucket_heads: Vec[i32],
+    bucket_next: Vec[i32],
 }
 
 type MirDropStateMap {
@@ -1334,10 +1355,27 @@ type MirDropStateMap {
 }
 impl Copy for MirDropStateMap
 
+const MIR_DROP_STATE_BUCKETS: i32 = 64
+
 fn mir_drop_state_map_new() -> MirDropStateMap:
-    let ptr = with_alloc(128) as *mut MirDropStateMapState
-    unsafe *ptr = MirDropStateMapState { keys: Vec.new(), states: Vec.new() }
+    let ptr = with_alloc(256) as *mut MirDropStateMapState
+    unsafe *ptr = MirDropStateMapState { keys: Vec.new(), states: Vec.new(), key_hashes: Vec.new(), has_projections: 0, bucket_heads: Vec.new(), bucket_next: Vec.new() }
+    var b = 0
+    while b < MIR_DROP_STATE_BUCKETS:
+        unsafe { ptr.bucket_heads.push(-1) }
+        b = b + 1
     MirDropStateMap { state: ptr }
+
+// Overflow-safe rolling hash (compiler builds with overflow checking, so no
+// wrapping FNV). h stays < 1e9, h*31 < 3.1e10 < i64 max, result fits i32.
+fn mir_drop_state_key_hash(key: str) -> i32:
+    var h: i64 = 0
+    var i = 0
+    let n = key.len() as i32
+    while i < n:
+        h = (h * 31 + (key.byte_at(i as i64) as i64)) % 1000000007
+        i = i + 1
+    h as i32
 
 fn mir_drop_state_map_len(map: MirDropStateMap) -> i32:
     let st = map.state
@@ -1352,10 +1390,15 @@ fn mir_drop_state_map_state(map: MirDropStateMap, idx: i32) -> i32:
     unsafe { st.states.get(idx as i64) }
 
 fn mir_drop_state_map_find(map: MirDropStateMap, key: str) -> i32:
-    let count = mir_drop_state_map_len(map)
-    for i in 0..count:
-        if mir_drop_state_map_key(map, i) == key:
-            return i
+    let h = mir_drop_state_key_hash(key)
+    let st = map.state
+    let b = h % MIR_DROP_STATE_BUCKETS
+    var idx = unsafe { st.bucket_heads.get(b as i64) }
+    while idx >= 0:
+        if unsafe { st.key_hashes.get(idx as i64) } == h:
+            if mir_drop_state_map_key(map, idx) == key:
+                return idx
+        idx = unsafe { st.bucket_next.get(idx as i64) }
     -1
 
 fn mir_drop_state_map_set(map: MirDropStateMap, key: str, state: i32):
@@ -1364,14 +1407,34 @@ fn mir_drop_state_map_set(map: MirDropStateMap, key: str, state: i32):
     if idx >= 0:
         unsafe { st.states.set_i32(idx as i64, state) }
         return
+    let h = mir_drop_state_key_hash(key)
+    let new_idx = mir_drop_state_map_len(map)
     unsafe { st.keys.push(key) }
     unsafe { st.states.push(state) }
+    unsafe { st.key_hashes.push(h) }
+    let b = h % MIR_DROP_STATE_BUCKETS
+    unsafe { st.bucket_next.push(st.bucket_heads.get(b as i64)) }
+    unsafe { st.bucket_heads.set_i32(b as i64, new_idx) }
 
 fn mir_drop_state_map_clone(map: MirDropStateMap) -> MirDropStateMap:
+    // Source keys are already unique, so copy the parallel arrays directly — O(P) —
+    // instead of per-entry map_set, which re-runs the O(P) find on every insert
+    // (O(P^2) per clone, the dominant drop-state dataflow cost on large bodies).
     let out = mir_drop_state_map_new()
+    let src = map.state
+    let dst = out.state
     let count = mir_drop_state_map_len(map)
     for i in 0..count:
-        mir_drop_state_map_set(out, mir_drop_state_map_key(map, i), mir_drop_state_map_state(map, i))
+        unsafe:
+            dst.keys.push(src.keys.get(i as i64))
+            dst.states.push(src.states.get(i as i64))
+            dst.key_hashes.push(src.key_hashes.get(i as i64))
+            dst.bucket_next.push(src.bucket_next.get(i as i64))
+    var bk = 0
+    while bk < MIR_DROP_STATE_BUCKETS:
+        unsafe { dst.bucket_heads.set_i32(bk as i64, src.bucket_heads.get(bk as i64)) }
+        bk = bk + 1
+    unsafe { dst.has_projections = src.has_projections }
     out
 
 fn mir_drop_state_join(a: i32, b: i32) -> i32:
@@ -1399,8 +1462,20 @@ fn mir_drop_state_name(state: i32) -> str:
         return "Maybe"
     "Uninit"
 
+// Memoized: "_{local_id}" is a pure function of local_id (body-independent), so
+// cache it globally to avoid reconstructing the same key string — and re-running
+// the owned-buffer ownership check inside string construction — on every drop-state
+// transfer. This is the #614 perf hot path (rt_payload_start_is_owned ~67%). Pure
+// memo of a deterministic function → no effect on compiler output/fixpoint.
+var mir_local_key_cache: Vec[str] = Vec.new()
+
 fn mir_drop_state_local_key(local_id: i32) -> str:
-    f"_{local_id}"
+    if local_id < 0:
+        return f"_{local_id}"
+    while mir_local_key_cache.len() as i32 <= local_id:
+        let n = mir_local_key_cache.len() as i32
+        mir_local_key_cache.push(f"_{n}")
+    mir_local_key_cache.get(local_id as i64)
 
 fn mir_drop_state_key_is_descendant(key: str, local_key: str) -> bool:
     if key == local_key:
@@ -1415,6 +1490,10 @@ fn mir_drop_state_key_is_descendant(key: str, local_key: str) -> bool:
 fn mir_drop_state_mark_local(map: MirDropStateMap, local_id: i32, state: i32):
     let key = mir_drop_state_local_key(local_id)
     mir_drop_state_map_set(map, key, state)
+    // No projection keys exist yet → this local has no descendants → skip the O(P)
+    // descendant scan (the dominant per-statement cost on large bodies, #614 perf).
+    if unsafe { map.state.has_projections } == 0:
+        return
     let count = mir_drop_state_map_len(map)
     for i in 0..count:
         let child = mir_drop_state_map_key(map, i)
@@ -1438,6 +1517,7 @@ fn mir_drop_state_mark_place(map: MirDropStateMap, body: &MirBody, place_id: i32
     if proj_count == 0:
         mir_drop_state_mark_local(map, base_local, state)
     else:
+        unsafe { map.state.has_projections = 1 }
         let base_key = mir_drop_state_local_key(base_local)
         let old_idx = mir_drop_state_map_find(map, base_key)
         let old_state = if old_idx >= 0: mir_drop_state_map_state(map, old_idx) else: MirDropState.Uninit
@@ -1896,6 +1976,50 @@ fn dump_drop_plan_module(mir_mod: &MirModule, pool: &InternPool, sema: &Sema) ->
         let body: MirBody = mir_mod.bodies.get(i as i64)
         out = out ++ dump_drop_plan_body(&body, pool, sema)
     out
+
+// Drop elaboration — the "Dead" arm (#614, docs/drop-elaboration-soundness.md).
+// A `StmtKind.Drop` whose place is statically `Moved` at that point is provably
+// dead: the value was moved out, so emitting the drop double-drops it. Rewrite it
+// to `StmtKind.Nop` (codegen already treats Nop as a no-op). This is the analogue
+// of rustc's `DropStyle::Dead` in `elaborate_drops`.
+//
+// `Init` drops are left unchanged (always drop — correct). `Maybe` (conditional)
+// drops are left unchanged: their runtime drop-flag / branch structure (the M7
+// conditional-move feature) already gates them, and Nopping them would leak.
+//
+// The decision is computed read-only first — using the exact dataflow walk the
+// `--dump-drop-plan` diagnostic rides on — so the transfer functions observe the
+// original drops; the Nops are applied afterward.
+pub fn mir_elaborate_dead_drops(mut body: MirBody) -> MirBody:
+    // Cheap pre-scan: a body with no Drop statements has nothing to elaborate, so
+    // skip the dataflow entirely (#614 perf — avoids the per-body walk for the
+    // overwhelming majority of functions, which have no drops).
+    var has_drop = false
+    var pre = 0
+    while pre < body.stmt_kinds.len() as i32:
+        if body.stmt_kinds.get(pre as i64) == StmtKind.Drop:
+            has_drop = true
+            break
+        pre = pre + 1
+    if not has_drop:
+        return body
+    var to_nop: Vec[i32] = Vec.new()
+    let blocks = mir_drop_state_blocks_new(body.block_count())
+    for bb in 0..body.block_count():
+        let state = mir_drop_state_block_input(&body, blocks, bb)
+        let stmt_start = body.bb_stmt_starts.get(bb as i64)
+        let stmt_count = body.bb_stmt_counts.get(bb as i64)
+        for si in 0..stmt_count:
+            let stmt_id = stmt_start + si
+            if body.stmt_kind(stmt_id) == StmtKind.Drop:
+                if mir_drop_state_get_place(state, &body, body.stmt_data0(stmt_id)) == MirDropState.Moved:
+                    to_nop.push(stmt_id)
+            mir_drop_state_transfer_stmt(state, &body, stmt_id)
+        mir_drop_state_transfer_term(state, &body, bb)
+        mir_drop_state_store_block(blocks, bb, state)
+    for i in 0..to_nop.len() as i32:
+        body.stmt_kinds.set_i32(to_nop.get(i as i64) as i64, StmtKind.Nop)
+    body
 
 fn mir_projection_debug_name(mir_mod: &MirModule, current_ty: i32, proj_kind: i32, proj_data: i32) -> str:
     if proj_kind == ProjKind.PK_TUPLE_INDEX:

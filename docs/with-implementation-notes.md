@@ -66,6 +66,13 @@ The borrow checker is dramatically simpler than Rust's because:
 2. References cannot escape except as ephemeral returns
 3. All analysis is intra-procedural
 
+This chapter is the **aliasing** checker (exclusive vs. shared borrows,
+ephemeral lifetimes). It does *not* enforce ownership or drop safety: no
+use-after-free or double-free of an *owned* value is the borrow checker's
+responsibility — those are enforced at runtime by **generations** (§2.6, spec
+§2.5). The move-conflict check below, and the use-after-move check, are
+diagnostics layered on that generational guarantee, not the guarantee itself.
+
 ### 2.1 Data Structures
 
 ```
@@ -163,6 +170,92 @@ For user code, the conservative default applies. The precision loss
 is small in practice. It occasionally forces a programmer to
 restructure code (e.g., take one reference parameter instead of two),
 but this is rare and the error messages are clear.
+
+### 2.6 Generational Ownership Implementation
+
+The borrow checker above is the *aliasing* checker. **Ownership and drop
+safety — no double-free, no use-after-free of an owned value — are enforced at
+runtime by reset-on-move and the null drop** (spec §2.5), not by the borrow
+checker and not by static drop-flag elaboration. The move analysis (below) is a
+diagnostic and an optimizer, never the safety mechanism. (The allocator
+*generation* is the runtime mechanism for the long-lived **handle** path —
+spec §6 / §2.5.5 — not what makes the owner's drop safe.)
+
+**Reset-on-move (the owner-drop mechanism).** Lowering a move of an owned value
+copies its bits to the destination and then **zeroes the source storage**: the
+source's owning pointer becomes null, its length/capacity become zero. This is
+unconditional — every move blanks its source — so it does not depend on the
+move analysis being correct.
+
+**The guarded drop.** For built-in containers the destructor bottoms out in
+`rt_free(ptr)` (no-op on null) and element loops bounded by the (now-zero)
+length, so a reset value's drop frees nothing and recurses over nothing — no
+extra guard needed. A **user `Drop`** body, however, may touch fields the reset
+zeroed (e.g. `*self.slot`), so *running* it against a reset value would fault or
+double-run side effects. The compiler therefore **guards a user `Drop`'s drop on
+the value not being the reset sentinel** — `if <value not all-zero>: <run user
+drop>`. The reset sets the sentinel; the guard skips the whole user body.
+Conceptually:
+
+```
+// built-in container, reset to { ptr: null, len: 0, cap: 0 }:
+drop(v):
+    for i in 0..v.len: drop(v[i])   // len == 0 → no iterations
+    rt_free(v.ptr)                   // ptr == null → no-op
+
+// user Drop type T, reset to all-zero:
+drop_T(v):
+    if not all_zero(v):              // skip the moved-out value entirely
+        user_drop_T(v)
+```
+
+This is a **niche-encoded drop flag**: the value's own zero-state is the "moved"
+bit, with no extra field. It is memory-safe by construction — a move-analysis
+bug can only cause an over-skip (a leak), never a fault or double-free
+(`all-zero ⇒ owning pointer null ⇒ nothing to free ⇒ skipping is correct`).
+
+This makes reassign-after-move (spec §2.5.1), conditional moves, and
+loop-carried reinit correct with no per-site bookkeeping: the live bits sit in
+exactly one binding, every move blanks the previous holder, and a blanked
+holder's drop is inert.
+
+**Allocator side (the handle generation, Stage 1).** Each owning allocation
+carries a **generation** counter at header offset 8 (`rt/rt_core.w`):
+`rt_take_gen` stamps a fresh generation on every alloc path and `free` bumps it.
+This backs `Handle`/`SlotMap` use-after-free detection (spec §6); the owner's
+drop does **not** consult it. (`rt_payload_start_is_owned` locates the header;
+the generation rides at offset 8, which the small-block freelist never touches.)
+
+**The move analysis is an optimizer + diagnostic, never the guarantee
+(spec §2.5.2).** The flow-sensitive move dataflow still runs, for two
+non-safety reasons:
+
+1. **Diagnostic.** Use of a moved-from binding is reported as a compile error
+   (spec §2.2) as a courtesy — not because the runtime would be unsafe.
+2. **Zero-cost optimizer.** Where the dataflow *proves* a value has a single
+   owner that is never moved (the common case), the source-reset on move and
+   the null path at the drop are provably redundant and are **elided** — the
+   move skips the zeroing and the drop becomes an unconditional
+   `<run destructor>; free`, identical to a static-only model's codegen. The
+   reset is emitted only where ownership is genuinely dynamic.
+
+A bug in this dataflow can therefore only emit a redundant null store and null
+check (a perf regression); it can never produce a double-free or a leak,
+because correctness lives in the unconditional reset-on-move.
+
+> **Superseded.** The runtime drop-flag scheme (per-local `Maybe(flag)` drops)
+> and the static dead-drop elaboration that rewrote provably-moved `Drop`
+> statements to `Nop` are both **obsolete** under spec §2.5 — they were two
+> halves of a static *safety* mechanism. Reset-on-move + the null drop (for
+> owners) and the allocator generation (for §6 handles) are the runtime safety
+> mechanisms; the move dataflow is demoted to the optimizer that elides the
+> reset and the null check. New code must not reintroduce drop flags or
+> safety-bearing drop elaboration.
+
+**C interop.** Generations exist only on With-owned allocations. Raw `*mut T` /
+`*const T` and `c_import`ed structs are ungenerationed and unchecked (spec
+§2.5.4); the snapshot and header generation are established only when a value
+enters With ownership.
 
 ---
 
@@ -957,8 +1050,8 @@ re-analyzing each specialization.
 | Closure (escaping) | Struct (captured vars) + function pointer |
 | Generic | Separate C function per monomorphization |
 | `dyn Trait` | Fat pointer (data ptr + vtable ptr) |
-| Move | memcpy + null source (debug) |
-| Drop | Call destructor function before scope exit |
+| Move | memcpy to the dest, then **zero the source** (reset-on-move, §2.6); the blanked source owns nothing |
+| Drop | Run destructor + `rt_free`, which **no-ops on the null pointer** a reset source carries, and whose element loops are bounded by the (zeroed) length (§2.6). On provably-single-owner paths the optimizer elides the source-zeroing → unconditional destructor + free |
 | `defer` | Emitted as cleanup code before every scope exit path |
 | Borrow check | Erased (compile-time only) |
 | Ephemeral check | Erased (compile-time only) |

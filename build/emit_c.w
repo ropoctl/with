@@ -618,7 +618,7 @@ fn emitc_build_with_compiler(ctx: &ActionCtx, compiler_path: str, source_w: str,
     argv |> push(emitc_abs(root, compiler_path))
     argv |> push("build")
     argv |> push(emitc_abs(root, source_w))
-    argv |> push("-O0")
+    argv |> push("-O1")
     argv |> push("-o")
     argv |> push(emitc_abs(root, output_path))
     emitc_run_capture(ctx, label, argv, 900000)

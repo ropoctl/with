@@ -57,6 +57,7 @@ type MirBuilder = ephemeral {
     moved_field_path_syms: Vec[i32],
     stmt_temp_locals: Vec[i32],
     stmt_temp_starts: Vec[i32],
+    pending_reset_locals: Vec[i32],
     with_cleanup_guard_locals: Vec[i32],
     with_cleanup_payload_locals: Vec[i32],
     with_cleanup_method_syms: Vec[i32],
@@ -141,6 +142,7 @@ fn MirBuilder.init(sema: &Sema, ast: AstPool, pool: InternPool, fn_sym: i32) -> 
         moved_field_path_syms: Vec.new(),
         stmt_temp_locals: Vec.new(),
         stmt_temp_starts: Vec.new(),
+        pending_reset_locals: Vec.new(),
         with_cleanup_guard_locals: Vec.new(),
         with_cleanup_payload_locals: Vec.new(),
         with_cleanup_method_syms: Vec.new(),
@@ -665,6 +667,12 @@ fn MirBuilder.consume_moved_operand(self: MirBuilder, operand_id: i32) -> Unit:
     let place = self.body.operand_d0.get(operand_id as i64)
     let local_id = mir_place_plain_local(&self.body, place)
     if local_id >= 0:
+        // Reset-on-move (spec §2.5.1): record the moved owned local; the
+        // statement boundary (flush_stmt_temp_frame) zeroes it so its later
+        // drops — drop-before-overwrite, scope-exit — free nothing. The reset
+        // is unconditional, so it does not depend on the move analysis below.
+        if self.sema.type_needs_drop(self.local_type(local_id)) != 0:
+            self.pending_reset_locals.push(local_id)
         if self.branch_move_should_use_drop_flag(local_id) != 0:
             let flag_local = self.ensure_maybe_moved_flag_for_local(local_id, 0)
             self.emit_drop_flag_store(flag_local, 0, 0)
@@ -673,7 +681,13 @@ fn MirBuilder.consume_moved_operand(self: MirBuilder, operand_id: i32) -> Unit:
             self.clear_moved_fields_for_local(local_id)
             return
         self.mark_local_value_moved(local_id)
-        self.cancel_scheduled_value_drop_for_local(local_id)
+        // §2.5.2: do NOT cancel the scope-exit drop here. emit_drop_entry's
+        // dynamic moved-skip already elides the drop while the local is moved;
+        // a later reassignment clears the moved mark and restores the value
+        // drop, so a moved-then-reassigned local's new value is still dropped.
+        // The old permanent downgrade to DK_STORAGE was load-bearing and leaked
+        // the reassigned value. Reset-on-move + the guarded drop prevent any
+        // double-free if the moved-skip and an analysis bug ever disagree.
         self.cancel_stmt_temp_for_local(local_id)
         self.clear_moved_fields_for_local(local_id)
         return
@@ -694,6 +708,28 @@ fn MirBuilder.flush_stmt_temp_frame(self: MirBuilder) -> Unit:
     while self.stmt_temp_locals.len() as i32 > start:
         self.stmt_temp_locals.pop()
     self.stmt_temp_starts.pop()
+    self.flush_pending_resets()
+
+fn MirBuilder.flush_pending_resets(self: MirBuilder) -> Unit:
+    self.flush_pending_resets_since(0)
+
+// Reset-on-move (spec §2.5.1): emit `local = <zero>` for each owned local moved
+// since `start`, AFTER the move read it, then truncate the pending list back to
+// `start`. The store is raw (not assign_operand_to_place) so it does not clear
+// the moved-from diagnostic state; it only blanks the runtime storage so the
+// local's later drops (drop-before-overwrite, scope-exit) free nothing.
+// `start` scopes the flush to a branch/statement so an outer-scope move's reset
+// is not emitted inside (and made conditional by) an inner branch.
+fn MirBuilder.flush_pending_resets_since(self: MirBuilder, start: i32) -> Unit:
+    var ri = start
+    while ri < self.pending_reset_locals.len() as i32:
+        let rl = self.pending_reset_locals.get(ri as i64)
+        let zop = self.body.gen_zero_operand(self.local_type(rl))
+        let rval = self.body.new_rvalue(RvalueKind.RK_USE, zop, 0, 0)
+        self.body.push_stmt(self.cur_bb, StmtKind.Assign, self.place_for_local(rl), rval, 0)
+        ri = ri + 1
+    while self.pending_reset_locals.len() as i32 > start:
+        self.pending_reset_locals.pop()
 
 fn MirBuilder.finish_stmt_temp_frame(self: MirBuilder, frame_depth: i32) -> Unit:
     while self.stmt_temp_starts.len() as i32 > frame_depth:
@@ -5214,6 +5250,10 @@ fn MirBuilder.lower_if(self: MirBuilder, cond_expr: i32, then_expr: i32, else_ex
     let branch_moved_value_len = self.moved_value_local_ids.len() as i32
     let branch_moved_field_len = self.moved_field_base_locals.len() as i32
     let branch_moved_field_path_len = self.moved_field_path_kinds.len() as i32
+    // Reset-on-move (spec §2.5.1): only flush resets recorded WITHIN a branch,
+    // so an outer-scope move's reset is not pulled inside (and made conditional
+    // by) this if.
+    let pending_reset_start = self.pending_reset_locals.len() as i32
 
     self.push_conditional_move_context(if_entry_bb, branch_drop_depth)
     for drop_i in 0..branch_drop_depth:
@@ -5249,6 +5289,11 @@ fn MirBuilder.lower_if(self: MirBuilder, cond_expr: i32, then_expr: i32, else_ex
     let then_op = if want_result != 0: self.lower_expr(then_expr) else: self.lower_expr_discard(then_expr)
     if want_result != 0:
         self.assign_operand_to_place(result_place, then_op, self.ast.get_start(then_expr))
+    // Reset-on-move (spec §2.5.1): flush this branch's pending source-resets
+    // INSIDE the branch, before merging. A move in the branch's tail expression
+    // has no per-statement flush; left pending it would be emitted after the if
+    // on BOTH paths and blank a still-live value on the not-taken path.
+    self.flush_pending_resets_since(pending_reset_start)
     self.terminate(TermKind.TK_GOTO, join_bb, 0, 0, 0)
 
     self.restore_moved_value_len(branch_moved_value_len)
@@ -5261,6 +5306,7 @@ fn MirBuilder.lower_if(self: MirBuilder, cond_expr: i32, then_expr: i32, else_ex
         self.unit_operand()
     if want_result != 0:
         self.assign_operand_to_place(result_place, else_op, self.ast.get_start(node))
+    self.flush_pending_resets_since(pending_reset_start)
     self.terminate(TermKind.TK_GOTO, join_bb, 0, 0, 0)
 
     self.restore_moved_value_len(branch_moved_value_len)
@@ -5343,7 +5389,11 @@ fn MirBuilder.lower_loop(self: MirBuilder, body_expr: i32, node: i32) -> i32:
     self.push_control_target(self.ast.get_data1(node), ControlTargetKind.CT_LOOP, header_bb, break_bb, result_place)
 
     self.switch_to(body_bb)
+    let pending_reset_start = self.pending_reset_locals.len() as i32
     let _ = self.lower_expr_discard(body_expr)
+    // Reset-on-move (spec §2.5.1): flush body-local resets before the back-edge,
+    // so a move in the loop body's tail is reset inside the body (same as lower_if).
+    self.flush_pending_resets_since(pending_reset_start)
     // Back-edge when body does not diverge.
     self.terminate(TermKind.TK_GOTO, header_bb, 0, 0, 0)
 
@@ -5394,7 +5444,9 @@ fn MirBuilder.lower_while(self: MirBuilder, cond_expr: i32, body_expr: i32, node
     self.switch_to(body_bb)
     if regex_capture_node != 0:
         self.lower_regex_capture_bindings_from_option(regex_capture_node, regex_captures_opt_place)
+    let pending_reset_start = self.pending_reset_locals.len() as i32
     let _ = self.lower_expr_discard(body_expr)
+    self.flush_pending_resets_since(pending_reset_start)
     self.terminate(TermKind.TK_GOTO, cond_bb, 0, 0, 0)
 
     self.pop_control_target()
@@ -7447,6 +7499,7 @@ fn MirBuilder.lower_match(self: MirBuilder, scrutinee_expr: i32, arms_start: i32
     let branch_moved_value_len = self.moved_value_local_ids.len() as i32
     let branch_moved_field_len = self.moved_field_base_locals.len() as i32
     let branch_moved_field_path_len = self.moved_field_path_kinds.len() as i32
+    let pending_reset_start = self.pending_reset_locals.len() as i32
     self.push_conditional_move_context(match_entry_bb, branch_drop_depth)
     for drop_i in 0..branch_drop_depth:
         if self.drop_kinds.get(drop_i as i64) == DropKind.DK_VALUE:
@@ -7505,6 +7558,9 @@ fn MirBuilder.lower_match(self: MirBuilder, scrutinee_expr: i32, arms_start: i32
             let arm_value = self.lower_expr(body_node)
             self.expected_type = saved_arm_expected
             self.assign_operand_to_place(result_place, arm_value, self.ast.get_start(body_node))
+        // Reset-on-move (spec §2.5.1): flush this arm's pending source-resets
+        // inside the arm, before it merges to the join (same reason as lower_if).
+        self.flush_pending_resets_since(pending_reset_start)
         self.pop_scope_with_goto(join_bb)
         self.restore_moved_value_len(branch_moved_value_len)
         self.restore_moved_field_lengths(branch_moved_field_len, branch_moved_field_path_len)

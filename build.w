@@ -11,7 +11,6 @@ use build.retention
 use build.release_uat
 use build.package
 use build.sdk
-use build.requirements
 use std.sysinfo
 
 fn build_project_dirname(path: str) -> str:
@@ -959,21 +958,11 @@ pub fn build(ctx: BuildCtx) -> Build:
     requirements_informative = requirements_informative.input("docs/requirements.md")
     out = out.add_target(requirements_informative)
 
-    var requirements_generate = target_new(.Action, "requirements", "").output("docs/requirements.md")
-    requirements_generate.action = run_requirements_generate_action
-    requirements_generate = requirements_generate.input("docs/with-specification.md")
-    requirements_generate = requirements_generate.input("docs/requirements.md")
-    requirements_generate = requirements_generate.input("build/requirements.w")
-    requirements_generate = requirements_generate.write_scope("docs")
-    out = out.add_target(requirements_generate)
-
-    var requirements_check = target_new(.Action, "requirements-check", "").output("out/.build-state/requirements-check.txt")
-    requirements_check.action = run_requirements_check_action
-    requirements_check = requirements_check.input("docs/with-specification.md")
-    requirements_check = requirements_check.input("docs/requirements.md")
-    requirements_check = requirements_check.input("build/requirements.w")
-    requirements_check = requirements_check.write_scope("out/.build-state")
-    out = out.add_target(requirements_check)
+    // docs/requirements.md is hand-maintained, NOT build-generated. The former
+    // `requirements` (generate) and `requirements-check` targets — which rewrote
+    // docs/requirements.md from the spec and failed the build if it differed —
+    // have been removed (build/requirements.w deleted). The build must never
+    // auto-generate or auto-modify docs/requirements.md.
 
     var spec_inventory = target_new(.Action, "spec-inventory-check", "").output("out/.build-state/spec-inventory-check.txt")
     spec_inventory.action = run_check_spec_inventory_action
@@ -986,8 +975,8 @@ pub fn build(ctx: BuildCtx) -> Build:
     spec_inventory = spec_inventory.input("lib/std")
     out = out.add_target(spec_inventory)
 
-    out = out.add_target(with_object_target("bootstrap-llvm-bridge-object", "seed", "src/compiler/LlvmBridge.w", "out/bootstrap-lib/llvm_bridge.o", "-O0", ""))
-    out = out.add_target(with_object_target("bootstrap-clang-bridge-object", "seed", "src/compiler/ClangBridge.w", "out/bootstrap-lib/clang_bridge.o", "-O0", ""))
+    out = out.add_target(with_object_target("bootstrap-llvm-bridge-object", "seed", "src/compiler/LlvmBridge.w", "out/bootstrap-lib/llvm_bridge.o", "-O1", ""))
+    out = out.add_target(with_object_target("bootstrap-clang-bridge-object", "seed", "src/compiler/ClangBridge.w", "out/bootstrap-lib/clang_bridge.o", "-O1", ""))
 
     var bootstrap_llvm_link_metadata = target_new(.Action, "bootstrap-llvm-link-metadata", "").output("out/bootstrap-lib/.llvm-link-ready")
     bootstrap_llvm_link_metadata.action = run_generate_llvm_link_metadata_action
@@ -1005,17 +994,17 @@ pub fn build(ctx: BuildCtx) -> Build:
     out = out.add_target(with_object_target("bootstrap-rt-platform-object", "seed", host_runtime.platform_source, host_runtime.bootstrap_platform_object, "-O2", ""))
     out = out.add_target(empty_file_target("bootstrap-empty-opposite-runtime-blob", host_runtime.opposite_bootstrap_platform_blob))
     out = out.add_target(empty_file_target("bootstrap-empty-second-opposite-runtime-blob", host_runtime.second_opposite_bootstrap_platform_blob))
-    out = out.add_target(with_object_target("bootstrap-cimport-stubs-object", "seed", "rt/cimport_stubs.w", "out/bootstrap-lib/cimport_stubs.o", "-O0", ""))
-    out = out.add_target(with_object_target("bootstrap-compat-runtime-object", "seed", "out/gen/compat_runtime.w", "out/bootstrap-lib/compat_runtime.o", "-O0", "compat-runtime-source"))
-    out = out.add_target(with_object_target("bootstrap-panic-runtime-object", "seed", "rt/panic_runtime.w", "out/bootstrap-lib/panic_runtime.o", "-O0", ""))
+    out = out.add_target(with_object_target("bootstrap-cimport-stubs-object", "seed", "rt/cimport_stubs.w", "out/bootstrap-lib/cimport_stubs.o", "-O1", ""))
+    out = out.add_target(with_object_target("bootstrap-compat-runtime-object", "seed", "out/gen/compat_runtime.w", "out/bootstrap-lib/compat_runtime.o", "-O1", "compat-runtime-source"))
+    out = out.add_target(with_object_target("bootstrap-panic-runtime-object", "seed", "rt/panic_runtime.w", "out/bootstrap-lib/panic_runtime.o", "-O1", ""))
     out = out.add_target(with_ir_target_overflow("bootstrap-regex-runtime-ir", "seed", "rt/regex_runtime.w", "out/bootstrap-tmp/regex_runtime.ll", "", "wrap"))
     var bootstrap_regex_runtime = target_new(.CompileLlvmIrObject, "bootstrap-regex-runtime-object", "out/bootstrap-tmp/regex_runtime.ll").output("out/bootstrap-lib/regex_runtime.o")
     bootstrap_regex_runtime = bootstrap_regex_runtime.dep("bootstrap-regex-runtime-ir")
     out = out.add_target(bootstrap_regex_runtime)
-    out = out.add_target(with_object_target("bootstrap-fiber-stubs-object", "seed", "rt/fiber_stubs.w", "out/bootstrap-lib/fiber_stubs.o", "-O0", ""))
-    out = out.add_target(with_object_target("bootstrap-channel-runtime-object", "seed", "rt/channel_runtime.w", "out/bootstrap-lib/channel_runtime.o", "-O0", ""))
-    out = out.add_target(with_object_target("bootstrap-fiber-runtime-object", "seed", "rt/fiber_runtime.w", "out/bootstrap-lib/fiber_runtime.o", "-O0", ""))
-    out = out.add_target(with_object_target("bootstrap-fiber-core-object", "seed", host_runtime.fiber_core_source, "out/bootstrap-lib/fiber.o", "-O0", ""))
+    out = out.add_target(with_object_target("bootstrap-fiber-stubs-object", "seed", "rt/fiber_stubs.w", "out/bootstrap-lib/fiber_stubs.o", "-O1", ""))
+    out = out.add_target(with_object_target("bootstrap-channel-runtime-object", "seed", "rt/channel_runtime.w", "out/bootstrap-lib/channel_runtime.o", "-O1", ""))
+    out = out.add_target(with_object_target("bootstrap-fiber-runtime-object", "seed", "rt/fiber_runtime.w", "out/bootstrap-lib/fiber_runtime.o", "-O1", ""))
+    out = out.add_target(with_object_target("bootstrap-fiber-core-object", "seed", host_runtime.fiber_core_source, "out/bootstrap-lib/fiber.o", "-O1", ""))
     var bootstrap_fiber_asm = target_new(.CompileAsmObject, "bootstrap-fiber-asm-object", host_runtime.fiber_asm_source).output("out/bootstrap-lib/fiber_asm.o")
     out = out.add_target(bootstrap_fiber_asm)
 
@@ -1087,8 +1076,8 @@ pub fn build(ctx: BuildCtx) -> Build:
     sha256_tool = sha256_tool.dep("prepare-bootstrap-link-root")
     out = out.add_target(sha256_tool)
 
-    out = out.add_target(with_object_target("llvm-bridge-object", stage_compiler_bin("with-stage2"), "src/compiler/LlvmBridge.w", "out/lib/llvm_bridge.o", "-O0", "stage2"))
-    out = out.add_target(with_object_target("clang-bridge-object", stage_compiler_bin("with-stage2"), "src/compiler/ClangBridge.w", "out/lib/clang_bridge.o", "-O0", "stage2"))
+    out = out.add_target(with_object_target("llvm-bridge-object", stage_compiler_bin("with-stage2"), "src/compiler/LlvmBridge.w", "out/lib/llvm_bridge.o", "-O1", "stage2"))
+    out = out.add_target(with_object_target("clang-bridge-object", stage_compiler_bin("with-stage2"), "src/compiler/ClangBridge.w", "out/lib/clang_bridge.o", "-O1", "stage2"))
 
     var llvm_link_metadata = target_new(.Action, "llvm-link-metadata", "").output("out/lib/.llvm-link-ready")
     llvm_link_metadata.action = run_generate_llvm_link_metadata_action
@@ -1107,7 +1096,7 @@ pub fn build(ctx: BuildCtx) -> Build:
     stage1 = stage1.compiler("seed")
     stage1 = stage1.input("out/gen/main.w")
     stage1 = target_with_compiler_source_inputs(stage1, ctx)
-    stage1 = stage1.arg("-O0")
+    stage1 = stage1.arg("-O1")
     stage1 = stage1.extra_output("out/command/stage1")
     stage1 = stage1.extra_output("out/.build-state/seed-input.json")
     stage1 = stage1.input(host_bin("out/bin/with-sha256"))
@@ -1126,7 +1115,7 @@ pub fn build(ctx: BuildCtx) -> Build:
     stage2 = stage2.compiler(bootstrap_compiler_bin("with-stage1"))
     stage2 = stage2.input("out/gen/main.w")
     stage2 = target_with_compiler_source_inputs(stage2, ctx)
-    stage2 = stage2.arg("-O0")
+    stage2 = stage2.arg("-O1")
     stage2 = stage2.extra_output("out/command/stage2")
     stage2 = stage2.write_scope("out/stage/bin")
     stage2 = stage2.dep("stage1")
@@ -1139,7 +1128,7 @@ pub fn build(ctx: BuildCtx) -> Build:
     stage3 = stage3.compiler(stage_compiler_bin("with-stage2"))
     stage3 = stage3.input("out/gen/main.w")
     stage3 = target_with_compiler_source_inputs(stage3, ctx)
-    stage3 = stage3.arg("-O0")
+    stage3 = stage3.arg("-O1")
     stage3 = stage3.extra_output("out/command/stage3")
     stage3 = stage3.write_scope("out/stage/bin")
     stage3 = stage3.dep("stage2")
@@ -1153,7 +1142,7 @@ pub fn build(ctx: BuildCtx) -> Build:
     stage2_fixpoint = stage2_fixpoint.input("out/gen/main.w")
     stage2_fixpoint = target_with_compiler_source_inputs(stage2_fixpoint, ctx)
     stage2_fixpoint = stage2_fixpoint.arg("--emit-obj")
-    stage2_fixpoint = stage2_fixpoint.arg("-O0")
+    stage2_fixpoint = stage2_fixpoint.arg("-O1")
     stage2_fixpoint = stage2_fixpoint.extra_output("out/command/stage2-fixpoint-object")
     stage2_fixpoint = stage2_fixpoint.write_scope("out/stage/bin")
     stage2_fixpoint = stage2_fixpoint.dep("stage1")
@@ -1167,7 +1156,7 @@ pub fn build(ctx: BuildCtx) -> Build:
     stage3_fixpoint = stage3_fixpoint.input("out/gen/main.w")
     stage3_fixpoint = target_with_compiler_source_inputs(stage3_fixpoint, ctx)
     stage3_fixpoint = stage3_fixpoint.arg("--emit-obj")
-    stage3_fixpoint = stage3_fixpoint.arg("-O0")
+    stage3_fixpoint = stage3_fixpoint.arg("-O1")
     stage3_fixpoint = stage3_fixpoint.extra_output("out/command/stage3-fixpoint-object")
     stage3_fixpoint = stage3_fixpoint.write_scope("out/stage/bin")
     stage3_fixpoint = stage3_fixpoint.dep("stage2")
@@ -1216,20 +1205,20 @@ pub fn build(ctx: BuildCtx) -> Build:
     out = out.add_target(with_object_target("rt-platform-object", stage_compiler_bin("with-stage2"), host_runtime.platform_source, host_runtime.platform_object, "-O2", "stage2"))
     out = out.add_target(empty_file_target("empty-opposite-runtime-blob", host_runtime.opposite_platform_blob))
     out = out.add_target(empty_file_target("empty-second-opposite-runtime-blob", host_runtime.second_opposite_platform_blob))
-    out = out.add_target(with_object_target("cimport-stubs-object", stage_compiler_bin("with-stage2"), "rt/cimport_stubs.w", "out/lib/cimport_stubs.o", "-O0", "stage2"))
-    var compat_runtime_obj = with_object_target("compat-runtime-object", stage_compiler_bin("with-stage2"), "out/gen/compat_runtime.w", "out/lib/compat_runtime.o", "-O0", "stage2")
+    out = out.add_target(with_object_target("cimport-stubs-object", stage_compiler_bin("with-stage2"), "rt/cimport_stubs.w", "out/lib/cimport_stubs.o", "-O1", "stage2"))
+    var compat_runtime_obj = with_object_target("compat-runtime-object", stage_compiler_bin("with-stage2"), "out/gen/compat_runtime.w", "out/lib/compat_runtime.o", "-O1", "stage2")
     compat_runtime_obj = compat_runtime_obj.dep("compat-runtime-source")
     out = out.add_target(compat_runtime_obj)
-    out = out.add_target(with_object_target("panic-runtime-object", stage_compiler_bin("with-stage2"), "rt/panic_runtime.w", "out/lib/panic_runtime.o", "-O0", "stage2"))
+    out = out.add_target(with_object_target("panic-runtime-object", stage_compiler_bin("with-stage2"), "rt/panic_runtime.w", "out/lib/panic_runtime.o", "-O1", "stage2"))
     out = out.add_target(with_ir_target_overflow("regex-runtime-ir", stage_compiler_bin("with-stage2"), "rt/regex_runtime.w", "out/tmp/regex_runtime.ll", "stage2", "wrap"))
 
     var regex_runtime = target_new(.CompileLlvmIrObject, "regex-runtime-object", "out/tmp/regex_runtime.ll").output("out/lib/regex_runtime.o")
     out = out.add_target(regex_runtime)
 
-    out = out.add_target(with_object_target("fiber-stubs-object", stage_compiler_bin("with-stage2"), "rt/fiber_stubs.w", "out/lib/fiber_stubs.o", "-O0", "stage2"))
-    out = out.add_target(with_object_target("channel-runtime-object", stage_compiler_bin("with-stage2"), "rt/channel_runtime.w", "out/lib/channel_runtime.o", "-O0", "stage2"))
-    out = out.add_target(with_object_target("fiber-runtime-object", stage_compiler_bin("with-stage2"), "rt/fiber_runtime.w", "out/lib/fiber_runtime.o", "-O0", "stage2"))
-    out = out.add_target(with_object_target("fiber-core-object", stage_compiler_bin("with-stage2"), host_runtime.fiber_core_source, "out/lib/fiber.o", "-O0", "stage2"))
+    out = out.add_target(with_object_target("fiber-stubs-object", stage_compiler_bin("with-stage2"), "rt/fiber_stubs.w", "out/lib/fiber_stubs.o", "-O1", "stage2"))
+    out = out.add_target(with_object_target("channel-runtime-object", stage_compiler_bin("with-stage2"), "rt/channel_runtime.w", "out/lib/channel_runtime.o", "-O1", "stage2"))
+    out = out.add_target(with_object_target("fiber-runtime-object", stage_compiler_bin("with-stage2"), "rt/fiber_runtime.w", "out/lib/fiber_runtime.o", "-O1", "stage2"))
+    out = out.add_target(with_object_target("fiber-core-object", stage_compiler_bin("with-stage2"), host_runtime.fiber_core_source, "out/lib/fiber.o", "-O1", "stage2"))
 
     var fiber_asm = target_new(.CompileAsmObject, "fiber-asm-object", host_runtime.fiber_asm_source).output("out/lib/fiber_asm.o")
     out = out.add_target(fiber_asm)
@@ -1278,7 +1267,7 @@ pub fn build(ctx: BuildCtx) -> Build:
     compiler = compiler.compiler(stage_compiler_bin("with-stage2"))
     compiler = compiler.input("out/gen/main.w")
     compiler = target_with_compiler_source_inputs(compiler, ctx)
-    compiler = compiler.arg("-O0")
+    compiler = compiler.arg("-O1")
     compiler = compiler.extra_output("out/command/build")
     compiler = compiler.write_scope("out/release/bin")
     compiler = compiler.dep("llvm-link-metadata")
@@ -1514,7 +1503,6 @@ pub fn build(ctx: BuildCtx) -> Build:
     tests = tests.dep("issue61-regression")
     tests = tests.dep("embedded-runtime-regression")
     tests = tests.dep("emit-c-smoke")
-    tests = tests.dep("requirements-check")
     tests = tests.dep("requirements-informative-check")
     tests = tests.dep("spec-inventory-check")
     tests = tests.dep("test-green")

@@ -1,9 +1,8 @@
 //! expect-stdout: ok
 
 // #613: a Drop value moved out of an outer binding inside a `for` body and
-// reinitialized before the back-edge is sound and must compile + run.
-// (Exact drop count not asserted — see #614, the pre-existing reassign-after-move
-// double-drop.)
+// reinitialized before the back-edge is sound. The reassignment does not drop the
+// already-moved value (#614). 3 loop takes + 1 final take = 4 drops.
 
 type R { id: i32, slot: *mut i32 }
 impl Drop for R:
@@ -20,4 +19,5 @@ fn main:
         take(r)
         r = make(&raw mut drops)
     take(r)
+    assert(drops == 4)
     print("ok")

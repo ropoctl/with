@@ -462,6 +462,38 @@ code generation is nondeterministic. Stop and fix.
 
 **If the build breaks, fixing the build is the top priority.**
 
+### Optimization level: ALWAYS `-O1`, NEVER `-O0`
+
+The compiler is built at **`-O1`** everywhere — **all** stages (stage1, stage2,
+stage3), the fixpoint stages, every runtime/bootstrap object, and the release
+binary. There is **no `-O0` anywhere** in `build.w` / `build/*.w`. The build files
+encode this; **it is an invariant, not a preference.** (The first build after a
+fresh seed is slow because the `-O0` seed builds the `-O1` stage1; once the `-O1`
+compiler is installed as the seed, subsequent builds are fast. That one-time cost
+is not a reason to drop to `-O0`.)
+
+- **Never switch the build to `-O0`.** `-O0` produces pathologically slow,
+  unoptimized output (e.g. it turned a 26k-line module's object build into 31+
+  minutes; `-O1` does it in seconds). The build/test step timeouts assume an
+  `-O1` compiler.
+- **`-O1` is fully deterministic** (fixed pass pipeline, no RNG, no
+  address-dependent choices). If fixpoint (`stage2 == stage3`) breaks under `-O1`,
+  that is a **real nondeterminism bug in our codegen** — find it with
+  `with build :fixpoint-diff` and **fix it**. Dropping to `-O0` to make fixpoint
+  pass is forbidden; it hides the bug.
+- **A bug that only appears at `-O1` is a real bug** — latent undefined behavior
+  the optimizer exposed, or a genuine miscompile. Root-cause and fix it. `-O0` is
+  **not** a workaround; "it works at `-O0`" means "we have a UB/codegen bug we are
+  hiding."
+- **Switching to `-O0` to make a red build/test/fixpoint go green is the single
+  most forbidden shortcut here.** It has been done repeatedly by agents dodging
+  real, fixable bugs. Do not do it. If you catch yourself reaching for `-O0`,
+  stop — the task is to fix the bug `-O1` revealed.
+- The *only* allowed `-O0` use is a deliberate, explicitly-approved, temporary
+  local diagnostic. It must be reverted before any commit. **Never commit an
+  `-O0` build setting.** If you see `-O0` anywhere in `build.w` / `build/*.w`,
+  that is a regression — restore `-O1`.
+
 ---
 
 ## Seed Compiler
