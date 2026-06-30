@@ -115,7 +115,7 @@ With: **the borrows are structurally safe, so put the runtime truth on the owner
 
 That single inversion is the whole design. Vale's real lesson isn't "generations" — it's *correctness should be a runtime fact, not a static proof.* Generations are just how Vale spends that idea on borrows. With's borrows don't need it, so I asked the sharper question: what is the **cheapest runtime fact** that makes the *owner's drop* safe?
 
-It isn't a generation. A generation is a header read plus a compare — the right tool for a stored reference that has to ask "is the thing I point at still alive?", but overkill for a drop, which is already holding the value. The cheapest fact for a drop is simpler, and it's the one I kept refusing to see while I chased drop flags and dead-drop analysis:
+It isn't a generation. A generation is an extra load plus a compare — the right tool for a stored reference that has to ask "is the thing I point at still alive?", but overkill for a drop, which is already holding the value. The cheapest fact for a drop is simpler, and it's the one I kept refusing to see while I chased drop flags and dead-drop analysis:
 
 > **A move blanks the value it moves out of. Dropping a blank frees nothing.**
 
@@ -165,9 +165,11 @@ use(r)
 
 No drop flags. No conditional-drop elaboration. No per-path bookkeeping. The blank settles it.
 
-**The generation lives in the allocation header — for the *handle* path.** The allocator stamps a generation on every allocation and bumps it on free (writing a *random* value on reuse, so a recycled slot can't accidentally match a stale snapshot). That counter is what `Handle` and `SlotMap` (§6) check to catch a use-after-free on a *stored, non-owning* reference — turning it into a recoverable `None` instead of UB. Owners never read or compare it; reset-on-move is the owner's whole story, and it's *cheaper* than a generation check — the drop consults only the pointer it already holds, with no header read at all.
+**The handle generation lives per slot, inside the `SlotMap`.** §6's `Handle` is a typed `SlotMap` index plus a generation. The `SlotMap` keeps a generation *per slot*: removing a value bumps that slot's generation, and every handle access compares the handle's snapshot against the slot's current generation — match means still-alive, mismatch means the slot was reused, so the access returns a recoverable `None` instead of reading freed data. That's the only place a generation is ever checked. Owners don't carry one — reset-on-move is their whole story, and it's *cheaper* than any check, because the drop consults only the pointer it already holds.
 
-And one quiet advantage falls out of exactly that. Because an owner's drop never reads the allocation header, With carries no "the generation field must stay readable forever" constraint on owned memory — so we can hand freed pages **back to the OS**. Vale can't; its owning model still needs the header live. (The handle path stays sound across returned memory via an existing slab-range oracle, `rt_payload_start_is_owned`, that knows whether an address is still inside a live region.)
+> *An aside, because I got this wrong first: I initially put the generation in the **allocation header** — one counter per heap block, bumped on free — and had handles check that. It can't work for a `SlotMap`, which is one allocation holding many slots: free a slot, reuse it, and the block itself was never freed, so a per-block counter never moves — it literally can't tell a recycled slot from a live one. The generation has to live per slot, inside the container. I shipped the per-slot version and deleted the header experiment.*
+
+And a quiet advantage falls out of owners reading **no** generation at all: nothing requires a freed allocation's header to stay readable, so With can hand freed pages **back to the OS**. Vale can't — its references still need the block's generation live forever.
 
 The cost, honestly stated:
 
@@ -227,6 +229,6 @@ Rust taught the world that you don't need a GC to be safe. Vale taught me that y
 
 ## Where this goes
 
-The model is in the spec now (§2.5, Generational Ownership) and the implementation notes (§2.6). The runtime substrate is already partly there — the allocator that knows what it owns. The work ahead is reset-on-move, the null-guarded drop, the generation field with its bump-on-free for the handle path, and re-pointing the old move analysis from "safety" to "optimizer." The two failed half-measures — runtime drop flags and static dead-drop elaboration — are retired, on purpose, in writing, so no future version of me rebuilds the trap.
+The model is in the spec now (§2.5, Generational Ownership) and the implementation notes (§2.6). The runtime substrate is already partly there — the allocator that knows what it owns. The work ahead is reset-on-move, the null-guarded drop, the per-slot SlotMap generation for the handle path, and re-pointing the old move analysis from "safety" to "optimizer." The two failed half-measures — runtime drop flags and static dead-drop elaboration — are retired, on purpose, in writing, so no future version of me rebuilds the trap.
 
 If you've ever loved what Rust protects you from but resented how much it makes you say to get there — this is the language I'm building for you.

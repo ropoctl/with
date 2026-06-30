@@ -557,11 +557,14 @@ blocks run.
 
 ### 2.5 Generational Ownership
 
-Ownership in With is enforced by **generations**, not by a static proof of
-single ownership. This is the one mechanism behind every ownership guarantee
-in the language: the destructors of §2.4, the handles of §6, and the soundness
-of move semantics (§2.2) are the same idea at different scales. It is what lets
-§1.4 promise Rust-level safety without lifetime annotations.
+Ownership in With is enforced by **runtime facts**, not by a static proof of
+single ownership: an owner is safe because a move blanks its source and a
+blanked value's drop frees nothing (§2.5.1), and a handle is safe because the
+slot it names carries a generation it can check (§6). One philosophy —
+*validity is a runtime fact, not a static proof* — realized by the cheapest
+mechanism each lifetime needs: **reset-on-move for owners, a per-slot
+generation for handles.** It is what lets §1.4 promise Rust-level safety
+without lifetime annotations.
 
 #### 2.5.1 Reset-on-move and the null drop
 
@@ -599,11 +602,18 @@ source) and the null guard is part of the destructor itself, so neither relies
 on the move analysis (§2.5.2) being correct.
 
 The **generation** that §6 surfaces in `Handle` is the *same philosophy*
-applied to long-lived **non-owning** references: the allocator stamps a
-generation per allocation and bumps it on free, so a stored handle can detect
-that the slot it names was reclaimed (use-after-free → a checked `None`,
-§2.5.5). Owning values do not carry or compare a generation for their own
-drop — reset-on-move is their mechanism; the generation is the handle story.
+applied to long-lived **non-owning** references, realized **per slot** by the
+owning `SlotMap`: each slot carries its own generation, bumped when that slot's
+value is removed, and a handle access compares its snapshot against the slot's
+current generation (mismatch → the slot was reclaimed → use-after-free → a
+checked `None`, §2.5.5). The generation lives in the `SlotMap`'s per-slot
+metadata, **not** in the allocation header. A `SlotMap` is a single allocation
+holding many slots, so a per-allocation header generation cannot tell a
+removed-and-reused slot from a live one and is **incapable** of serving
+handles; an earlier draft of this section described an allocation-header
+generation, which was a spec bug (an impossible mechanism), now corrected.
+Owning values do not carry or compare a generation for their own drop —
+reset-on-move is their mechanism; the per-slot generation is the handle story.
 
 #### 2.5.2 Static analysis is an optimization, never the guarantee
 
@@ -653,8 +663,9 @@ never reset and never drop-checked — copying one is a plain bit copy, exactly
 as fast and exactly as unsafe as C. Ownership, and therefore the reset, begins
 only when a value enters With's care: an allocation, or a `Drop` type wrapping
 a foreign handle. `with migrate`'s modeled-C `Drop` types get reset-on-move for
-free; raw migrated pointers pay nothing for it. (The **generation** of §2.5.1
-likewise lives only on With-owned allocations, for the handle path of §6.)
+free; raw migrated pointers pay nothing for it. (The handle **generation** of
+§2.5.1 lives in the `SlotMap`'s per-slot metadata — see §2.5.1 — not in
+allocation headers, so it imposes no per-allocation cost.)
 
 #### 2.5.5 Relationship to handles (§6)
 

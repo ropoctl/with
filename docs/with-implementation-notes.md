@@ -69,9 +69,10 @@ The borrow checker is dramatically simpler than Rust's because:
 This chapter is the **aliasing** checker (exclusive vs. shared borrows,
 ephemeral lifetimes). It does *not* enforce ownership or drop safety: no
 use-after-free or double-free of an *owned* value is the borrow checker's
-responsibility — those are enforced at runtime by **generations** (§2.6, spec
-§2.5). The move-conflict check below, and the use-after-move check, are
-diagnostics layered on that generational guarantee, not the guarantee itself.
+responsibility — those are enforced at runtime by **reset-on-move and the null
+drop** (§2.6, spec §2.5). The move-conflict check below, and the use-after-move
+check, are diagnostics layered on that runtime guarantee, not the guarantee
+itself.
 
 ### 2.1 Data Structures
 
@@ -177,9 +178,9 @@ The borrow checker above is the *aliasing* checker. **Ownership and drop
 safety — no double-free, no use-after-free of an owned value — are enforced at
 runtime by reset-on-move and the null drop** (spec §2.5), not by the borrow
 checker and not by static drop-flag elaboration. The move analysis (below) is a
-diagnostic and an optimizer, never the safety mechanism. (The allocator
-*generation* is the runtime mechanism for the long-lived **handle** path —
-spec §6 / §2.5.5 — not what makes the owner's drop safe.)
+diagnostic and an optimizer, never the safety mechanism. (The long-lived
+**handle** path — spec §6 / §2.5.5 — is made safe by a per-slot `SlotMap`
+generation, not by anything in the owner's drop; see below.)
 
 **Reset-on-move (the owner-drop mechanism).** Lowering a move of an owned value
 copies its bits to the destination and then **zeroes the source storage**: the
@@ -219,12 +220,26 @@ loop-carried reinit correct with no per-site bookkeeping: the live bits sit in
 exactly one binding, every move blanks the previous holder, and a blanked
 holder's drop is inert.
 
-**Allocator side (the handle generation, Stage 1).** Each owning allocation
-carries a **generation** counter at header offset 8 (`rt/rt_core.w`):
-`rt_take_gen` stamps a fresh generation on every alloc path and `free` bumps it.
-This backs `Handle`/`SlotMap` use-after-free detection (spec §6); the owner's
-drop does **not** consult it. (`rt_payload_start_is_owned` locates the header;
-the generation rides at offset 8, which the small-block freelist never touches.)
+**Handle generation (per-slot, in the `SlotMap`).** `Handle`/`SlotMap`
+use-after-free detection (spec §6 / §2.5.5) uses a generation the **`SlotMap`
+maintains per slot**, in its own metadata — not the allocator. Each slot has a
+generation, bumped when that slot's value is removed; `with_slotmap_*`
+(`rt/rt_core.w`) compares the handle's snapshot against the slot's generation on
+every access (mismatch → the slot was reclaimed → a checked `None`). The
+owner's drop does **not** consult any generation — reset-on-move is its whole
+mechanism.
+
+> **Spec-bug correction (Stage 5).** An earlier design (Stage 1; an earlier
+> draft of spec §2.5.1) stamped a generation into the *allocation header*
+> (`rt_take_gen` / `alloc_store_generation` at offset 8) and claimed handles
+> checked it. That mechanism is **impossible** for `SlotMap`: a `SlotMap` is
+> one allocation holding many slots, so a per-allocation header generation
+> never changes when a slot is removed and reused *inside* the live allocation,
+> and therefore cannot distinguish a stale handle from a live one. The header
+> generation also had no reader (`alloc_generation` was never called) — pure
+> per-allocation cost. It has been **deleted** (`rt/rt_core.w`); the per-slot
+> `SlotMap` generation is the canonical and only handle mechanism. This was a
+> spec bug describing an impossible mechanism, not an implementation divergence.
 
 **The move analysis is an optimizer + diagnostic, never the guarantee
 (spec §2.5.2).** The flow-sensitive move dataflow still runs, for two
@@ -247,15 +262,15 @@ because correctness lives in the unconditional reset-on-move.
 > and the static dead-drop elaboration that rewrote provably-moved `Drop`
 > statements to `Nop` are both **obsolete** under spec §2.5 — they were two
 > halves of a static *safety* mechanism. Reset-on-move + the null drop (for
-> owners) and the allocator generation (for §6 handles) are the runtime safety
+> owners) and the per-slot `SlotMap` generation (for §6 handles) are the runtime safety
 > mechanisms; the move dataflow is demoted to the optimizer that elides the
 > reset and the null check. New code must not reintroduce drop flags or
 > safety-bearing drop elaboration.
 
-**C interop.** Generations exist only on With-owned allocations. Raw `*mut T` /
-`*const T` and `c_import`ed structs are ungenerationed and unchecked (spec
-§2.5.4); the snapshot and header generation are established only when a value
-enters With ownership.
+**C interop.** Reset-on-move and the null drop apply only to With-owned `Drop`
+values (spec §2.5.4). Raw `*mut T` / `*const T` and `c_import`ed structs have no
+`Drop`, so they are never reset and never drop-checked; nor do they carry a
+handle generation — that exists only for values stored in a `SlotMap`.
 
 ---
 
