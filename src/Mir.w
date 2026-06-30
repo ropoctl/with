@@ -466,6 +466,12 @@ type MirBody {
     // drop_flag_locals[i] guards the cleanup of drop_flag_value_locals[i].
     drop_flag_value_locals: Vec[i32],
     drop_flag_locals: Vec[i32],
+    // Stage 4 (spec §2.5.2): locals that are ever moved — and therefore
+    // reset-on-move (§2.5.1) — recorded at the single pending_reset_locals.push
+    // site during lowering. A drop of a local NOT in this set can never observe
+    // the reset sentinel, so codegen elides its null guard and emits an
+    // unconditional drop (the zero-cost common case).
+    ever_moved_locals: Vec[i32],
 }
 
 type MirModule {
@@ -643,11 +649,31 @@ fn MirBody.init_for_fn(fn_sym: i32) -> MirBody:
         call_ast_nodes: Vec.new(),
         drop_flag_value_locals: Vec.new(),
         drop_flag_locals: Vec.new(),
+        ever_moved_locals: Vec.new(),
     }
 
     // Local 0 is always the return place.
     body.new_local(0, 1, 0, 0)
     body
+
+// Stage 4 (spec §2.5.2): record/query whether a local is ever moved (and thus
+// reset-on-move). Recorded at the single pending_reset_locals.push site during
+// lowering; read by codegen to decide whether a drop needs its null guard.
+fn MirBody.mark_local_ever_moved(mut self: MirBody, local_id: i32) -> Unit:
+    var i = 0
+    while i < self.ever_moved_locals.len() as i32:
+        if self.ever_moved_locals.get(i as i64) == local_id:
+            return
+        i = i + 1
+    self.ever_moved_locals.push(local_id)
+
+fn MirBody.local_ever_moved(self: &MirBody, local_id: i32) -> bool:
+    var i = 0
+    while i < self.ever_moved_locals.len() as i32:
+        if self.ever_moved_locals.get(i as i64) == local_id:
+            return true
+        i = i + 1
+    false
 
 fn MirBody.init(fn_sym: i32, sema: &Sema) -> MirBody:
     var body = MirBody.init_for_fn(fn_sym)

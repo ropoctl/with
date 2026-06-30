@@ -3845,6 +3845,17 @@ fn Codegen.mir_emit_with_free_ptr(self: Codegen, ptr: i64):
 // never a fault or double-free (all-zero ⇒ owns nothing ⇒ nothing to drop), so
 // a move-analysis bug can never become memory unsafety.
 fn Codegen.mir_emit_guarded_user_drop(self: Codegen, ptr: i64, ty: i64, drop_fn_val: i64, drop_fn_ty: i64) -> Unit:
+    if not self.current_drop_needs_guard:
+        // Stage 4 (§2.5.2): the move analysis proved the dropped local is never
+        // moved, so it can never hold the reset sentinel — drop unconditionally
+        // (byte-for-byte the codegen a static-only model would emit).
+        let u_args: Vec[i64] = Vec.new()
+        if wl_get_type_kind(ty) == wl_struct_type_kind():
+            u_args.push(ptr)
+        else:
+            u_args.push(wl_build_load(self.builder, ty, ptr))
+        let _u = wl_build_call(self.builder, drop_fn_ty, drop_fn_val, vec_data_i64(&u_args), 1)
+        return
     let i64_ty = wl_i64_type(self.context)
     let i32_ty = wl_i32_type(self.context)
     let ptr_ty = wl_ptr_type(self.context)
@@ -4707,8 +4718,15 @@ fn Codegen.mir_emit_stmt(self: Codegen, body: &MirBody, stmt_id: i32) -> bool:
     if sk == StmtKind.Drop:
         let saved_origin_ptr = self.current_drop_origin_ptr
         let saved_origin_len = self.current_drop_origin_len
+        let saved_needs_guard = self.current_drop_needs_guard
         self.mir_set_current_drop_origin(d1)
+        // Stage 4 (§2.5.2): a local never recorded as moved can never be the
+        // reset sentinel, so drop it unconditionally; otherwise keep the guard.
+        if d0 >= 0 and d0 < body.place_locals.len() as i32:
+            let drop_local = body.place_locals.get(d0 as i64)
+            self.current_drop_needs_guard = body.local_ever_moved(drop_local)
         let ok = self.mir_emit_drop_place_current_origin(body, d0)
+        self.current_drop_needs_guard = saved_needs_guard
         self.current_drop_origin_ptr = saved_origin_ptr
         self.current_drop_origin_len = saved_origin_len
         return ok

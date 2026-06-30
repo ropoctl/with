@@ -673,6 +673,10 @@ fn MirBuilder.consume_moved_operand(self: MirBuilder, operand_id: i32) -> Unit:
         // is unconditional, so it does not depend on the move analysis below.
         if self.sema.type_needs_drop(self.local_type(local_id)) != 0:
             self.pending_reset_locals.push(local_id)
+            // Stage 4 (§2.5.2): this local is reset-on-move, so its drop must
+            // keep its null guard. Locals never recorded here are never reset,
+            // and codegen elides their guard (unconditional drop).
+            self.body.mark_local_ever_moved(local_id)
         if self.branch_move_should_use_drop_flag(local_id) != 0:
             let flag_local = self.ensure_maybe_moved_flag_for_local(local_id, 0)
             self.emit_drop_flag_store(flag_local, 0, 0)

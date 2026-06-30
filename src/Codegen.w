@@ -102,6 +102,11 @@ type Codegen {
     current_method_owner_sym: i32,
     current_drop_origin_ptr: i64,
     current_drop_origin_len: i64,
+    // Stage 4 (spec §2.5.2): true = emit the rt_value_is_zero guard on a user
+    // Drop (the value may be reset-on-move); false = the move analysis proved
+    // the dropped local is never moved, so emit an unconditional drop. Scoped
+    // around each Drop statement; defaults to true (guard) everywhere else.
+    current_drop_needs_guard: bool,
 
     // Pre-interned symbols for O(1) dispatch (avoid string comparisons)
     sym_vec: i32,
@@ -555,6 +560,7 @@ fn Codegen.init_with_opt(module_name: str, opt_level: i32) -> Codegen:
         current_method_owner_sym: 0,
         current_drop_origin_ptr: 0,
         current_drop_origin_len: 0,
+        current_drop_needs_guard: true,
         sym_vec: 0, sym_option: 0, sym_result: 0, sym_hashmap: 0,
         sym_hashset: 0, sym_btreemap: 0, sym_btreeset: 0, sym_handle: 0, sym_slotmap: 0, sym_slotmapslot: 0,
         sym_vecslot: 0, sym_vecrange: 0, sym_veciterref: 0, sym_veciterplace: 0,
