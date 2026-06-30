@@ -845,8 +845,6 @@ fn run_deep_debug_tool_tests_action(ctx: ActionCtx) -> i32:
         return 1
     if deep_debug_tool_expect(ctx, root, compiler, ownership_abs, out_dir, "trace-cleanup-edge", "--trace-cleanup-edge", "choose:bb0->bb1", "edge=bb0->bb1") != 0:
         return 1
-    if deep_debug_tool_expect(ctx, root, compiler, ownership_abs, out_dir, "dump-drop-flags", "--dump-drop-flags", "", "drop-flags module") != 0:
-        return 1
     let _ = fs.write_text(build_project_join(out_dir, ".stamp"), "ok")
     0
 

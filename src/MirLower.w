@@ -677,13 +677,6 @@ fn MirBuilder.consume_moved_operand(self: MirBuilder, operand_id: i32) -> Unit:
             // keep its null guard. Locals never recorded here are never reset,
             // and codegen elides their guard (unconditional drop).
             self.body.mark_local_ever_moved(local_id)
-        if self.branch_move_should_use_drop_flag(local_id) != 0:
-            let flag_local = self.ensure_maybe_moved_flag_for_local(local_id, 0)
-            self.emit_drop_flag_store(flag_local, 0, 0)
-            self.mark_local_value_moved(local_id)
-            self.cancel_stmt_temp_for_local(local_id)
-            self.clear_moved_fields_for_local(local_id)
-            return
         self.mark_local_value_moved(local_id)
         // §2.5.2: do NOT cancel the scope-exit drop here. emit_drop_entry's
         // dynamic moved-skip already elides the drop while the local is moved;
@@ -778,11 +771,9 @@ fn MirBuilder.emit_conditional_value_drop_entry(self: MirBuilder, local_id: i32,
     self.switch_to(after_bb)
 
 fn MirBuilder.emit_drop_entry(self: MirBuilder, local_id: i32, drop_kind: i32):
-    if drop_kind == DropKind.DK_VALUE:
-        let flag_local = self.local_maybe_moved_flag(local_id)
-        if flag_local >= 0:
-            self.emit_conditional_value_drop_entry(local_id, flag_local)
-            return
+    // Stage 6: M7 drop flags are retired. Conditional moves are handled by the
+    // niche — reset-on-move blanks the moved branch, and the guarded drop below
+    // skips a blanked value at runtime — so a DK_VALUE drop needs no flag.
     if self.drop_kind_owns_value(drop_kind) != 0 and self.local_value_moved(local_id) != 0:
         self.body.push_stmt(self.cur_bb, StmtKind.StorageDead, local_id, 0, 0)
         return
@@ -5259,13 +5250,6 @@ fn MirBuilder.lower_if(self: MirBuilder, cond_expr: i32, then_expr: i32, else_ex
     // by) this if.
     let pending_reset_start = self.pending_reset_locals.len() as i32
 
-    self.push_conditional_move_context(if_entry_bb, branch_drop_depth)
-    for drop_i in 0..branch_drop_depth:
-        if self.drop_kinds.get(drop_i as i64) == DropKind.DK_VALUE:
-            let drop_local = self.drop_local_ids.get(drop_i as i64)
-            if self.local_value_moved(drop_local) == 0 and self.local_has_moved_fields(drop_local) == 0:
-                let _ = self.ensure_maybe_moved_flag_for_local(drop_local, self.ast.get_start(node))
-
     let then_bb = self.new_block()
     let else_bb = self.new_block()
     let join_bb = self.new_block()
@@ -5315,7 +5299,6 @@ fn MirBuilder.lower_if(self: MirBuilder, cond_expr: i32, then_expr: i32, else_ex
 
     self.restore_moved_value_len(branch_moved_value_len)
     self.restore_moved_field_lengths(branch_moved_field_len, branch_moved_field_path_len)
-    self.pop_conditional_move_context()
 
     self.expected_type = saved_expected
 
@@ -7504,12 +7487,6 @@ fn MirBuilder.lower_match(self: MirBuilder, scrutinee_expr: i32, arms_start: i32
     let branch_moved_field_len = self.moved_field_base_locals.len() as i32
     let branch_moved_field_path_len = self.moved_field_path_kinds.len() as i32
     let pending_reset_start = self.pending_reset_locals.len() as i32
-    self.push_conditional_move_context(match_entry_bb, branch_drop_depth)
-    for drop_i in 0..branch_drop_depth:
-        if self.drop_kinds.get(drop_i as i64) == DropKind.DK_VALUE:
-            let drop_local = self.drop_local_ids.get(drop_i as i64)
-            if self.local_value_moved(drop_local) == 0 and self.local_has_moved_fields(drop_local) == 0:
-                let _ = self.ensure_maybe_moved_flag_for_local(drop_local, self.ast.get_start(node))
 
     var dispatch_bb = self.cur_bb
     for ai in 0..arms_count:
@@ -7570,8 +7547,6 @@ fn MirBuilder.lower_match(self: MirBuilder, scrutinee_expr: i32, arms_start: i32
         self.restore_moved_field_lengths(branch_moved_field_len, branch_moved_field_path_len)
 
         dispatch_bb = fail_bb
-
-    self.pop_conditional_move_context()
 
     // #605/#606: the match takes ownership of its subject; arms move payloads out
     // of the materialized scrutinee. Consume the scrutinee copy and a named source
@@ -11453,15 +11428,13 @@ fn MirBuilder.lower_expr(self: MirBuilder, node: i32) -> i32:
         return self.lower_expr(self.ast.get_data0(node))
 
     if kind == NodeKind.NK_MOVE_ARG:
-        let inner = self.ast.get_data0(node)
-        var guarded_conditional_move = 0
-        if self.ast.kind(inner) == NodeKind.NK_IDENT and self.current_conditional_move_entry_bb() >= 0:
-            let local = self.lookup_local(self.ast.get_data0(inner))
-            if local >= 0 and self.local_maybe_moved_flag(local) >= 0:
-                guarded_conditional_move = 1
-        if guarded_conditional_move == 0:
-            self.cancel_scheduled_value_drop_for_receiver_expr(inner)
-        return self.lower_expr(inner)
+        // Stage 6: the niche makes a moved receiver's scope-exit drop inert —
+        // reset-on-move blanks it, and the guarded drop / moved-skip elide it —
+        // so we keep the drop scheduled rather than cancel it. Canceling (the
+        // old behavior for non-flagged moves) would skip the drop on a path
+        // where a conditional move did NOT fire, leaking the still-live value
+        // (da_drop_conditional_move_value / da_match_conditional_move_value).
+        return self.lower_expr(self.ast.get_data0(node))
 
     if kind == NodeKind.NK_COPY_ARG:
         let inner = self.ast.get_data0(node)
