@@ -61,21 +61,26 @@ installed. This file records what that means for the remaining slices.
   `da_async_drop_across_await`, `behav_async_drop_across_await`,
   `da_async_cancel_drops_live`. (No copy/zero hazard — the `gen_zero_operand` the
   plan worried about is the aggregate-init/reset helper, not used in async lowering.)
+- **Field-read drop suppression** — fixed. `cancel_scheduled_value_drop_for_receiver_expr`
+  (`MirLower.w`) marked *any* field-access RHS of a `let` moved (the #606 self-aliasing
+  case), including a plain **Copy** field read (`let _ = r.ptr`). Marking a Copy field of
+  a `Drop` struct moved degraded the owner's whole-value `Drop` into a partial drop that
+  emits nothing (its fields are not individually needs-drop) → the user `Drop` was
+  bypassed → leak. Fix: skip the mark when the field type is `Copy` (a Copy read carries
+  no owned buffer; only the non-Copy aliasing read does). Root-caused at the instruction
+  level (`--dump-mir` showed `StorageDead(_2)` with no `drop(_2)` after `_4 = copy _2.f8`).
+  Fixtures: `da_field_read_keeps_drop`, `behav_field_read_keeps_drop`; #606 aliasing
+  (`behav_mut_self_field_assign_vec_tail`) still passes.
 
 ## Genuinely remaining
 
-1. **Field-read drop suppression (pre-existing; found during the M8 audit).**
-   `let _ = r.field` / `let p = r.field` — binding a read of a field of a `Drop`
-   struct to a `let`, where the struct is then dropped at scope exit (not moved) —
-   **suppresses the struct's `Drop` impl → leak.** Minimal repro: `let r = make();
-   let _ = r.ptr` then scope end leaks `r` (its user drop never runs; the freed
-   buffer leaks). Scope: only the `let`-binding form — a field read in a *condition*
-   (`if r.ptr != 0:`) is clean, and consuming `r` afterward is clean. Sync AND async;
-   **pre-existing** (the pre-Slice-E installed compiler leaks too) — not the async
-   mechanism. Hypothesis (unverified at the instruction level): the `let`-bound field
-   read lowers a Copy field as `OK_MOVE`, so `mark_place_field_moved` fires and the
-   owner's drop degrades to a partial drop that skips the user `Drop` impl. Needs
-   instruction-level root-cause (lldb / `--dump-mir` / `--trace-ownership`) before a fix.
+1. **Deeper partial-move precision (A6/A7/A8 — separate future phases, not the niche
+   core).** Nested aggregate-in-struct-field drop (A6), wildcard/discard element drop in
+   irrefutable destructure (A7), and precise per-element partial-extraction tracking to
+   replace the conservative whole-base consume (A8). See `docs/phase_8_handoff.md` and
+   `docs/a5_handoff.md`. The niche plus conditional whole-value and field moves (Slices
+   A–F) and the field-read drop fix are complete; A6/A7/A8 are precision refinements
+   (the current whole-base consume is conservative/safe), not soundness gaps.
 
 ## Verification protocol (every change)
 

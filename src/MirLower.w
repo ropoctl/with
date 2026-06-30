@@ -8689,6 +8689,16 @@ fn MirBuilder.cancel_scheduled_value_drop_for_receiver_expr(self: MirBuilder, ex
         let root_sym = self.place_expr_root_symbol(expr)
         if root_sym == 0 or self.lookup_local(root_sym) < 0:
             return
+        // A Copy field read (e.g. a raw pointer or int field) copies a value and
+        // carries no owned buffer out, so it must NOT mark the field moved. Marking
+        // a Copy field of a Drop struct moved degrades the owner's whole-value Drop
+        // into a partial drop that emits nothing (the fields are not individually
+        // needs-drop) — silently bypassing the user `Drop` impl and leaking. Only an
+        // owning/aliasing (non-Copy) field read carries the receiver's buffer out
+        // (the #606 self-aliasing case).
+        let field_ty = self.expr_type(expr)
+        if field_ty != 0 and self.sema.is_copy(field_ty) != 0:
+            return
         let recv_place = self.lower_expr_place(expr)
         self.mark_place_field_moved(recv_place)
         return
