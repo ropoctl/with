@@ -1,182 +1,89 @@
-# Resume Later: Drop/Move Ownership (M7+) and the Branch-Merge Blocker
+# Resume Later: Drop/Move Ownership — current state under the niche
 
-Status snapshot for continuing the `docs/drop-move-ownership.md` effort. Written
-2026-06-27. The branch-merge soundness blocker (#612) is **fixed** (see
-`docs/branch-merge-soundness.md`) and **Slice D (loops, #613) is now done** for all
-four loop constructs. The active tasks are **Slice E (conditional field moves)** and
-**Slice F (M8 audit + M9 matrix)**; **#614** (pre-existing reassign-after-move
-double-drop) blocks tightening the loop reinit drop-count assertions. This file is
-the live resume record.
+Resume record for the `docs/drop-move-ownership.md` effort. **Updated 2026-06-30
+to the niche design.** The drop/move substrate is no longer built on runtime
+drop flags + static drop elaboration; it is built on the **niche** (reset-on-move
++ the guarded drop), which shipped as Stages 1–6 and is now merged to `main` and
+installed. This file records what that means for the remaining slices.
 
-## TL;DR
+## The design now (read these first)
 
-- Slices A, B, C of `drop-move-ownership.md` are **done and committed** (4 commits
-  this session, each gated: build + fixpoint + fresh `:test` + test-green).
-- The branch-merge soundness bug (#612) that blocked Slice D is now **FIXED** for
-  `if/else` (`2a0da1d1`) and `match` (`ec65024f`, closes #579). See
-  `docs/branch-merge-soundness.md`. Slice D (loops, #613) is **unblocked**.
-- Other conditional constructs (if-let/while-let/`&&`/`||`/`?`) were verified
-  already sound (conservative); extending the union-join to them is precision-only.
-- Slice E (conditional field moves) and Slice F (generator audit + M9 matrix)
-  are not started; scope notes below.
+- Canonical: **spec §2.5** (Generational Ownership), **impl-notes §2.6**
+  (implementation), and the niche memory `project-generational-ownership-niche`.
+- **Owner safety is a runtime fact, not a static proof.** A move blanks its
+  source (owning pointer → null, container → empty); a drop checks the reset
+  sentinel (`rt_value_is_zero`) and skips a blanked value. Double-free is
+  impossible by construction.
+- **Sema move-checking is the diagnostic/optimizer layer, not the safety
+  mechanism.** The branch-merge union-join (#612), the loop back-edge dataflow
+  (#613), and the never-moved guard-elision optimizer (Stage 4,
+  `MirBody.ever_moved_locals`) all live here. A bug in any of them can over-reject
+  or cost a redundant store — never leak or double-free.
+- **The M7 runtime drop-flag scheme and the static dead-drop elaboration are
+  RETIRED** (spec §2.5.2 forbids reintroducing them). Conditional moves
+  (if/match/loop) route entirely through the niche. Do not rebuild
+  `ensure_maybe_moved_flag_for_local`, `--dump-drop-flags`, etc. — they are gone.
 
-## Commits landed this session (on `main`, oldest→newest)
+## Done (closed)
 
-| Commit | What |
-|---|---|
-| `4da567c5` | Build memory-limit + per-target subprocess workers, **plus the worker-isolation fix** (see below) |
-| `ed5a1149` | M7: runtime drop flags for conditional whole-value moves through `if` |
-| `aca63335` | Runtime: free fiber pool before the debug-alloc leak walk at shutdown (**closes #609**) |
-| `e0ffaa29` | M7: runtime drop flags for conditional whole-value moves through `match` |
+- **#612 / #579** branch-merge move-state soundness — union-join for `if`/`match`.
+  Analysis + fix record: `docs/completed/branch-merge-soundness.md`.
+- **#613** loop maybe-init dataflow — sound for `while`/do-while/`loop`/`for`
+  (back-edge UAM, continue-carried move, break accumulator).
+- **#614** reassign-after-move double-drop — fixed by reset-on-move (the niche),
+  not by the static-elaboration pass the old analysis recommended. Record:
+  `docs/completed/drop-elaboration-soundness.md`. `da_reassign_after_move` is green
+  and the loop reinit fixtures now assert exact drop counts.
+- **#609** fiber pool reported as a leak at shutdown — drained before the ledger
+  walk.
+- **M7 conditional whole-value moves** (if/match/loop) — sound via the niche.
 
-### Worker-isolation fix (folded into `4da567c5`)
-The build-memory tangent (subprocess workers for build action/test targets) had a
-bug: a worker re-execs `with build :TARGET --no-deps`, which **re-evaluates
-`build(ctx)` at comptime**, re-running non-idempotent ToolFs side effects
-(`fs.extract_tar`'s `symlink` → `EEXIST`). Root-caused by direct lldb observation
-of the worker child (backtrace into `comptime_eval_tool_build_result` →
-`toolfs_extract_tar`; `rt_symlink` returned `-17`/EEXIST). Fix: a
-`ComptimeEvaluator.suppress_toolfs_writes` flag set in worker mode
-(`load_build_graph_from_build_w` → `comptime_eval_tool_build_result`), with a
-centralized skip in `eval_toolfs_capability_method`
-(`comptime_toolfs_method_is_mutating`). Reads stay live so the worker still
-reconstructs the graph from the parent's outputs. Also reworded the `--no-deps`
-message ("action **and test** targets") and updated `build/selfhost.w`'s
-`build_w_no_deps_non_action` assertion.
+## Genuinely remaining
 
-## How drop/move "ought to work" (from spec + mission)
+1. **Slice E — conditional *field* moves.** `SemaCheck.w:18691` still rejects
+   "conditional move of Drop field requires drop-state tracking" and `:18701` the
+   value form. Under the niche these are very likely **now-unnecessary
+   over-rejections**: reset-on-move already blanks moved fields (the `moved_field_*`
+   model) and the guarded drop skips them at runtime, so the static rejection no
+   longer guards anything. The work is to **verify** (write the conditional
+   field-move repro, run it under `--debug-alloc`) and, if the niche covers it,
+   **lift the rejection** — *not* to rebuild a field-level drop-flag (that approach
+   is retired). Field move-OUT of a `Drop` aggregate stays forbidden (§2.4 policy;
+   `err_move_out_vec_field_*` + `SemaCheck.w:18685/18688/18741`).
+2. **Slice F — M8 generator/async-state ownership audit + M9 matrix gaps.** No
+   generator-state Drop fixtures exist yet (`da_*gen*` is empty). Confirm generator
+   state fields holding `Drop`/`Vec[Drop]` across a suspend are moved in/out as
+   owned places (the niche resets them on move), not copied or zeroed. The M9 `da_*`
+   matrix is otherwise well-populated (38 drop fixtures).
 
-Grounding (read these): spec §2.1 (single owner), §2.2 (move invalidates source),
-§2.4 (drop-on-reassignment; **partial moves from Drop types forbidden**),
-§21.1 rule 3 (use-after-move forbidden), rule 7 (implicit drop is a use); §22
-("false rejection of safe code is precision debt, not user ceremony"); `mission.md`
-("exactly as safe as Rust", "remove the suffering").
+## Verification protocol (every change)
 
-Intent = Rust's flow-sensitive model: a value moved on some paths is *maybe-init*;
-dropped only where still init (runtime drop flag when static analysis can't
-decide). Accept what Rust accepts; reject what Rust rejects.
-
-Per construct:
-- **if / match**: move in one branch/arm → accept, drop only on non-moving paths
-  via drop flag. **DONE** (`if` work + Slice C). Sema marks the binding MOVED
-  after the move (so later *uses* are rejected — correct); MIR drop-flags only the
-  *cleanup*.
-- **loops**: depends on reinit.
-  - moved + not reinitialized before the back-edge → **use-after-move**, reject
-    (Rust rejects "moved in previous iteration"). This is the `err_loop` case;
-    it must STAY rejected (a correct permanent rejection, not a missing feature).
-  - reinitialized each iteration (`h = transform(h)`, §2.4's own example) → accept.
-  - moved only on a path that exits (move-then-break) → accept (drop flag).
-  - **Today all of these are blanket-rejected** with the misleading message
-    "conditional move of Drop value requires drop-state tracking". That message is
-    wrong: it advertises a mix of correct-rejections and should-compile cases as a
-    missing feature.
-- **fields**: §2.4 **forbids** field move-out of a `Drop` aggregate (permanent;
-  the `err_move_out_vec_field_*` policy + the `drop-move-ownership.md` Decision
-  Boundary). Field move-out of a **non-Drop** aggregate where the field needs drop
-  IS allowed by spec — that is the only legitimate drop-flag target for Slice E.
-
-## The (former) blocker: branch-merge soundness — RESOLVED
-
-#612 is fixed: `check_if_expr` (`2a0da1d1`) and `check_match_expr` (`ec65024f`,
-closes #579) now snapshot the entry move-state, analyze each branch/arm from it,
-and union the non-diverging exits (`Sema.merge_branch_move_states` /
-`Sema.union_move_states`; `restore_scope_states` now borrows). Test B rejects;
-the over-rejections compile. Other conditional constructs (if-let/while-let/`&&`/
-`||`/`?`) verified already sound. Full design + verification in
-`docs/branch-merge-soundness.md`. The active task is now **Slice D (loops, #613)**.
-
-## Resume plan for the drop/move slices (AFTER branch-merge is fixed)
-
-1. **Slice D (loops)** — **DONE** (all four constructs: `while`, do-while, `loop`,
-   `for`). All loop move-contexts now `push_move_control_flow_context(1)`; the sound
-   analysis is three checks plus a post-loop merge in `Sema.finalize_loop_move_state`:
-   - **Back-edge use-after-move** (in finalize, skipped when the body diverges): an
-     outer binding LIVE at loop entry and MOVED at body-end is moved across the
-     back-edge without reinit → **use of moved value** (Rust's "moved in previous
-     iteration"). Reinit ends LIVE → accepted; `err_loop` ends MOVED → rejected.
-   - **Continue-carried move** (`Sema.check_loop_continue_carried_move`, at NK_CONTINUE):
-     a `continue` jumps to the back-edge, so an outer binding MOVED at the continue
-     would be used moved next iteration → rejected (no accumulator needed).
-   - **Break accumulator → post-loop state** (`Sema.capture_loop_break_move_state` at
-     NK_BREAK; merged in finalize). A `break` can carry a move OUT of the loop, so the
-     post-loop state = union(entry, body-end if `has_condition_exit`, break flags).
-     `has_condition_exit` = 1 for while/do-while/for (condition/exhaustion exit), 0 for
-     `loop` (break-only). So move-then-break compiles, but using the value *after* the
-     loop is a use-after-move.
-   - **Storage** (seed-compatible — no `Vec[Vec[i32]]`): per label-frame `Vec[i32]`
-     arrays `label_loop_entry_binds` / `label_break_off` / `label_break_seen`, plus a
-     flat `loop_break_flat: Vec[i32]` stack of per-binding break-flag regions
-     (`alloc_loop_break_region` on loop entry, freed in finalize). **GOTCHA fixed:**
-     `push_label_boundary` (function-entry frame) must push these arrays too, or the
-     frame index overshoots them (symptom: `seen=-1`, post-loop never marks moved).
-   - **Scoped to needs-drop** (like the conditional-move feature): POD `Vec[i32]` move
-     is a non-destructive copy today (#607) and the compiler relies on it, so only
-     Drop/transitive-Drop loop-carried moves are use-after-move errors. Without this
-     gate the self-build cascades (e.g. `step_tys: mut Vec[i32]` in `autoderef`).
-   - **`for` wrinkle:** snapshot entry BEFORE binding the loop variable, so the
-     back-edge check covers only outer bindings (moving the fresh per-iteration loop
-     var is sound). `restore_scope_states` overwrites only the prefix, so a shorter
-     outer-only snapshot is safe.
-   - **Fixtures:** `behav_while_reinit_move`, `behav_for_reinit_move` (compile+run —
-     drop count NOT asserted, blocked by #614); `err_loop_conditional_move_drop_value`
-     (while, reworded to use-of-moved), `err_while_move_then_break_use`,
-     `err_loop_move_then_break_use`, `err_for_loop_carried_move`,
-     `err_while_continue_carried_move`.
-   - **Blocked dependency:** the §2.4 reinit pattern over-counts drops by one per
-     iteration because of **#614** (pre-existing reassign-after-move double-drop, also
-     reproducible straight-line). Tighten the reinit behavior fixtures to assert exact
-     drop counts once #614 lands. No new loop drop-flag is needed for the reinit/break
-     subset.
-2. **Slice E (conditional field moves)** — only for **non-Drop** aggregates (spec
-   §2.4). Drop-aggregate field move-out stays rejected ("partial move from Drop
-   type", already correctly worded at `SemaCheck.w:18621`). The diagnostic at
-   `:18627` ("conditional move of Drop field requires drop-state tracking") is the
-   real target; mirror the if/match drop-flag machinery for field places, reusing
-   the partial-aggregate-drop path (M4/M5).
-3. **Slice F** — M8 generator-state ownership audit (the channel leak is already
-   fixed; verify generator state fields holding `Drop`/`Vec[Drop]` across a suspend
-   are moved in/out as owned places, not copied/zeroed); fill the M9 regression
-   matrix (`drop-move-ownership.md` §Milestone 9).
-
-## Diagnostics to fix (task #8, can be folded into D/E)
-- `SemaCheck.w:5241` / `:18637` "conditional move of Drop value requires drop-state
-  tracking" — now fires **only for loops** (Slice C moved if/match to `push(1)`).
-  Reword to use-after-move once Slice D lands (don't reword in isolation — the
-  honest message depends on the dataflow that distinguishes reinit/break from the
-  genuine UAM).
-- `SemaCheck.w:18621` "partial move from Drop type" — already correct (§2.4).
-- `SemaCheck.w:18624` "moving a field that needs drop out of a struct is not yet
-  supported (#607)…" — already honest.
-
-## Verification protocol (every slice)
 `./out/release/bin/with check src/main.w` → `with build` → `with build :fixpoint`
-→ `with build :debug-alloc-tests` → `rm -rf out/test-graph && with build :test`
-(fresh, so action/test targets are not cache-skipped — a real gotcha this session;
-capture the **real** exit code with `( ... ; echo REAL_EXIT=$? )`, never trust a
-`| tail` pipeline's exit) → `with build :test-green`. Each commit must independently
-pass `:fixpoint` (verified Slice A's intermediate via a worktree with a symlinked
-`.deps`).
+→ `with build :debug-alloc-tests` (the soundness oracle) →
+`rm -rf out/test-graph && with build :test` (fresh) → `with build :test-green`.
+For conditional moves the `da_*conditional_move*` fixtures must show `leak count=0`
+and never `DOUBLE FREE`.
 
-## Relevant GitHub issues
-- **#612 branch-merge move-state soundness** — **FIXED + CLOSED** (`2a0da1d1`, `ec65024f`).
-- **#613 loop maybe-init dataflow** — Slice D; **DONE** for while/do-while/loop/for.
-- **#614 reassign-after-move double-drop** — pre-existing (not loop-specific); blocks
-  asserting exact drop counts on the loop reinit fixtures.
-- #579 diverging-arm over-rejection — **FIXED + CLOSED** by the match merge.
-- #605/#606/#607 the transitive-Drop move/drop substrate this effort continues.
-- #608 POD `Vec[i32]` buffer not freed (sentinel: `da_pod_vec` expects leak count=1).
-- #609 fiber pool reported as leak before shutdown — **FIXED + CLOSED** (`aca63335`).
+## Key files (current)
 
-## Key files
-- `src/Sema.w` — `VarState` (52), `bind_states`/`bind_names` (572,575),
-  `scope_binding_index`, `save_scope_states`/`restore_scope_states` (3765/3772),
-  `push/pop_move_control_flow_context` (3736+), `outer_binding_has_unsupported_move_context` (3750).
-- `src/SemaCheck.w` — `check_if_expr` (7333+, the merge gap), `check_match_expr`
-  (9332+), loop checks (4820+), `mark_moved_if_consumed` (18604+).
-- `src/MirLower.w` — `lower_if` (5192), `lower_match` (7418) drop-flag machinery
-  (`push_conditional_move_context`, `ensure_maybe_moved_flag_for_local`,
-  `emit_conditional_value_drop_entry`, `restore_moved_value_len`).
+- `src/Sema.w` / `src/SemaCheck.w` — move-checking diagnostic: `check_if_expr`,
+  `check_match_expr`, the loop dataflow (`finalize_loop_move_state`,
+  `check_loop_continue_carried_move`, `capture_loop_break_move_state`), the
+  field-move rejections (`:18685`–`:18741`).
+- `src/MirLower.w` — the niche: reset-on-move recorded at the single
+  `pending_reset_locals.push` site (also marks `ever_moved_locals` for the Stage-4
+  elision); the guarded drop in `emit_drop_entry`.
+- `src/Mir.w` — `MirBody.ever_moved_locals` (the elision set).
+- `rt/rt_core.w` — `rt_value_is_zero` (the reset-sentinel check); per-slot
+  `with_slotmap_*` generation for §6 handles.
 - Tests: `test/behavior/behav_{conditional,match_conditional}_move_drop_value.w`,
   `test/debug_alloc/da_{drop,match}_conditional_move_value.w`,
-  `test/compile_errors/err_loop_conditional_move_drop_value.w`.
+  `test/compile_errors/err_loop_conditional_move_drop_value.w`,
+  `test/compile_errors/err_move_out_vec_field_*.w`.
+
+## Open issues
+
+- #617 — pre-existing, layout-sensitive flaky corruption in cli-selfhost cases
+  (unrelated to drop/move; see memory `project-617-flaky-cli-selfhost`).
+- #607/#605/#606 — the transitive-Drop move/drop substrate this effort continued;
+  Vec drop and aggregate content drop now ride the niche.

@@ -189,15 +189,16 @@ load (no `'a`, no `where` clauses full of lifetime bounds, no
 `PhantomData<&'a T>`) while preserving Rust-level guarantees against
 use-after-free, double-free, and data races.
 
-Those guarantees are enforced by **generations** (§2.5) — the same counter
-that makes handles (§6) safe against use-after-remove — not by lifetime
-tracking. A value's owner holds the live generation; a stale generation makes
-a double-free or use-after-free a caught no-op rather than undefined behavior.
-The compiler's static move analysis is an *optimizer and a diagnostic* over
-this runtime guarantee, never the guarantee itself (§2.5.2) — so a bug in the
-analysis can cost performance but never safety. All three rows above share the
-one mechanism: ownership is the live generation, borrowing is ephemeral (so it
-needs none), and handles are the generation made explicit and long-lived.
+Those guarantees are enforced by **runtime facts** (§2.5), not by lifetime
+tracking: a move blanks its source (reset-on-move), so the moved-from value
+owns nothing and its later implicit drop is a caught no-op rather than a
+double-free; a handle (§6) carries a per-slot generation, so a stale handle
+reads back a checked `None` rather than dangling. The compiler's static move
+analysis is an *optimizer and a diagnostic* over this runtime guarantee, never
+the guarantee itself (§2.5.2) — so a bug in the analysis can cost performance
+but never safety. All three rows above share one philosophy, each with the
+mechanism its lifetime needs: ownership is reset-on-move, borrowing is ephemeral
+(so it needs none), and a handle is a generation made explicit and long-lived.
 
 The trade-off is explicit: you cannot store references in structs. You
 cannot write `struct Lexer { source: &str }`. You cannot return a lazy
@@ -370,8 +371,8 @@ reinitialized on *every* path reaching the use.
 This flow-sensitive check is a *diagnostic*, not the safety mechanism: it
 rejects almost-certainly-wrong code at compile time. Memory safety itself —
 the soundness of the move and the impossibility of a double-free if the check
-were ever wrong — comes from the runtime generation (§2.5), not from this
-analysis.
+were ever wrong — comes from reset-on-move (§2.5): the moved-from binding is
+blanked, so its drop is a guarded no-op. It does not come from this analysis.
 
 ### 2.3 Copy Types
 
@@ -438,10 +439,10 @@ impl Drop for Database:
 
 Because `drop` consumes `self`, there is no need to defensively
 null out fields to prevent double-free — the value ceases to exist
-after `drop` returns, and running `drop` bumps the allocation's
-generation (§2.5), so any other reference to that storage — a
-moved-from source, a reassigned binding — finds it stale and drops
-to a no-op. The compiler handles the details: fields you use in your
+after `drop` returns, and a moved-from or reassigned source was
+already blanked by reset-on-move (§2.5), so its later scope-exit
+drop sees the reset sentinel and is a no-op. The compiler handles
+the details: fields you use in your
 drop body are consumed, remaining fields are dropped automatically.
 No recursion, no leaks, no ceremony:
 

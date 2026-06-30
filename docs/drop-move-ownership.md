@@ -1,5 +1,21 @@
 # Plan: Correct Complete Drop/Move Ownership Solution
 
+> **Design update (2026-06-30): the runtime mechanism is the niche, not drop
+> flags.** This plan was written against a runtime-drop-flag + static
+> drop-elaboration design. That design was **superseded** by the **niche**:
+> owner safety is now a runtime fact — **reset-on-move** blanks a moved source
+> and the **guarded drop** skips a blanked value (`rt_value_is_zero`) — with the
+> static move analysis demoted to an optimizer/diagnostic. The M7 runtime
+> drop-flag scheme and the static dead-drop elaboration this document describes
+> are **retired**; spec §2.5.2 forbids reintroducing them, and the flag
+> machinery + `--dump-drop-flags` tooling have been deleted. Read **spec §2.5**
+> and **impl-notes §2.6** for the live design (shipped as Stages 1–6, merged +
+> installed). The Milestone 0–6 substrate below — canonical places, partial
+> aggregate drop, sema-typed drop glue, path-sensitive cleanup — still stands;
+> Milestone 7 ("runtime drop flags for conditional ownership") is now realized by
+> the niche instead. The live remaining work is in `docs/resume_later.md`
+> (Slice E conditional field moves, Slice F M8 generator audit).
+
 ## Purpose
 
 This document defines the implementation plan for completing With’s drop/move substrate correctly, without accidentally changing language semantics or hiding unresolved allocator evidence.
@@ -16,7 +32,7 @@ canonical MIR places
 + partial aggregate drop emission
 + sema-typed drop glue
 + path-sensitive cleanup
-+ runtime drop flags for conditional ownership
++ reset-on-move + the guarded drop (the niche) for conditional ownership
 + generated async/generator state modeled as ordinary owned places
 + explicit language decision on user-visible field move-out
 ```
@@ -81,7 +97,6 @@ the current facts with the diagnostic-only `with check` tools:
 --dump-drop-state
 --dump-drop-plan
 --trace-cleanup-edge '<fn:bbA->bbB>'
---dump-drop-flags
 --validate-ownership
 --validate-all
 ```
@@ -1007,6 +1022,15 @@ compile-error checks and `with build :native-compile-error-tests`.
 ### Milestone 7: Runtime drop flags for conditional ownership
 
 Implement the complete dynamic solution.
+
+> **Superseded (2026-06-30):** the conditional-ownership runtime mechanism is the
+> **niche** (reset-on-move + the guarded drop), not drop flags. The flag locals,
+> `emit_conditional_value_drop_entry`, and `--dump-drop-flags` described below were
+> removed; spec §2.5.2 forbids reintroducing them. The tasks/cases below are kept
+> as the historical M7 record — the *behavior* they target (sound conditional
+> moves through if/match/loop) is delivered by the niche. Conditional **field**
+> moves (Slice E) and the M8 audit (Slice F) are the live remainder; see
+> `docs/resume_later.md`.
 
 Tasks:
 
