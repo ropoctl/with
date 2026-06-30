@@ -52,14 +52,30 @@ installed. This file records what that means for the remaining slices.
   `behav_conditional_field_move_drop` (if + match), `da_conditional_field_move`.
   Field move-OUT of a `Drop` aggregate stays forbidden (§2.4;
   `err_move_out_vec_field_*` + `SemaCheck.w:18685/18688/18741`).
+- **Slice F — M8 generator/async-state ownership audit** — done; the async path is
+  sound. With's async is fiber-based, so a `Drop` value live across a suspend
+  (await) stays on the fiber stack (no copy/zero of "generator state") and the
+  niche drops it normally — on normal completion, on move-after-await, and on
+  cancellation (the loser of a `select await` unwinds and drops its live locals).
+  Verified for a `Drop` struct and a `Vec[Drop]` across a suspend. Fixtures:
+  `da_async_drop_across_await`, `behav_async_drop_across_await`,
+  `da_async_cancel_drops_live`. (No copy/zero hazard — the `gen_zero_operand` the
+  plan worried about is the aggregate-init/reset helper, not used in async lowering.)
 
 ## Genuinely remaining
 
-1. **Slice F — M8 generator/async-state ownership audit + M9 matrix gaps.** No
-   generator-state Drop fixtures exist yet (`da_*gen*` is empty). Confirm generator
-   state fields holding `Drop`/`Vec[Drop]` across a suspend are moved in/out as
-   owned places (the niche resets them on move), not copied or zeroed. The M9 `da_*`
-   matrix is otherwise well-populated (38 drop fixtures).
+1. **Field-read drop suppression (pre-existing; found during the M8 audit).**
+   `let _ = r.field` / `let p = r.field` — binding a read of a field of a `Drop`
+   struct to a `let`, where the struct is then dropped at scope exit (not moved) —
+   **suppresses the struct's `Drop` impl → leak.** Minimal repro: `let r = make();
+   let _ = r.ptr` then scope end leaks `r` (its user drop never runs; the freed
+   buffer leaks). Scope: only the `let`-binding form — a field read in a *condition*
+   (`if r.ptr != 0:`) is clean, and consuming `r` afterward is clean. Sync AND async;
+   **pre-existing** (the pre-Slice-E installed compiler leaks too) — not the async
+   mechanism. Hypothesis (unverified at the instruction level): the `let`-bound field
+   read lowers a Copy field as `OK_MOVE`, so `mark_place_field_moved` fires and the
+   owner's drop degrades to a partial drop that skips the user `Drop` impl. Needs
+   instruction-level root-cause (lldb / `--dump-mir` / `--trace-ownership`) before a fix.
 
 ## Verification protocol (every change)
 

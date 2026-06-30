@@ -14,8 +14,10 @@
 > aggregate drop, sema-typed drop glue, path-sensitive cleanup — still stands;
 > Milestone 7 ("runtime drop flags for conditional ownership") is now realized by
 > the niche instead — including conditional *field* moves (Slice E), via the
-> field-place niche. The live remaining work is in `docs/resume_later.md`
-> (Slice F: the M8 generator-state audit).
+> field-place niche. The M8 generator/async-state audit (Slice F) is also done:
+> async is fiber-based, so a `Drop` value across a suspend is preserved on the
+> fiber stack and the niche drops it normally. See `docs/resume_later.md` for the
+> current remaining item.
 
 ## Purpose
 
@@ -1030,8 +1032,9 @@ Implement the complete dynamic solution.
 > removed; spec §2.5.2 forbids reintroducing them. The tasks/cases below are kept
 > as the historical M7 record — the *behavior* they target (sound conditional
 > moves through if/match/loop, including conditional **field** moves, Slice E) is
-> delivered by the niche. The M8 generator-state audit (Slice F) is the live
-> remainder; see `docs/resume_later.md`.
+> delivered by the niche. The M8 generator-state audit (Slice F) is also complete
+> (async Drop-across-suspend is sound); see `docs/resume_later.md` for the current
+> remaining item.
 
 Tasks:
 
