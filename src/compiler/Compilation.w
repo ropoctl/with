@@ -1271,19 +1271,6 @@ fn Compilation.trace_cleanup_edge_file(self: Compilation, source_path: str, spec
         return ""
     self.trace_cleanup_edge(pool, spec)
 
-fn Compilation.dump_drop_flags(self: Compilation, pool: AstPool) -> str:
-    if self.zcu.last_mir_module.body_count() == 0:
-        let _ = self.run_mir_lower(pool)
-    if self.zcu.last_mir_module.body_count() == 0:
-        return ""
-    dump_drop_flags_module(self.zcu.last_mir_module, self.zcu.pool, self.zcu.last_sema)
-
-fn Compilation.dump_drop_flags_file(self: Compilation, source_path: str) -> str:
-    let pool = self.compile_file(source_path)
-    if pool.decl_count() == 0:
-        return ""
-    self.dump_drop_flags(pool)
-
 fn Compilation.validate_ownership_file(self: Compilation, source_path: str) -> str:
     let pool = self.compile_file(source_path)
     if pool.decl_count() == 0:

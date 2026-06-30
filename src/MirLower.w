@@ -46,10 +46,6 @@ type MirBuilder = ephemeral {
     drop_kinds: Vec[i32],
     drop_scope_starts: Vec[i32],
     moved_value_local_ids: Vec[i32],
-    maybe_moved_value_local_ids: Vec[i32],
-    maybe_moved_value_flag_locals: Vec[i32],
-    conditional_move_entry_bbs: Vec[i32],
-    conditional_move_drop_depths: Vec[i32],
     moved_field_base_locals: Vec[i32],
     moved_field_path_starts: Vec[i32],
     moved_field_path_counts: Vec[i32],
@@ -131,10 +127,6 @@ fn MirBuilder.init(sema: &Sema, ast: AstPool, pool: InternPool, fn_sym: i32) -> 
         drop_kinds: Vec.new(),
         drop_scope_starts: Vec.new(),
         moved_value_local_ids: Vec.new(),
-        maybe_moved_value_local_ids: Vec.new(),
-        maybe_moved_value_flag_locals: Vec.new(),
-        conditional_move_entry_bbs: Vec.new(),
-        conditional_move_drop_depths: Vec.new(),
         moved_field_base_locals: Vec.new(),
         moved_field_path_starts: Vec.new(),
         moved_field_path_counts: Vec.new(),
@@ -233,81 +225,6 @@ fn MirBuilder.schedule_drop(self: MirBuilder, local_id: i32, drop_kind: i32) -> 
     self.drop_local_ids.push(local_id)
     self.drop_kinds.push(drop_kind)
 
-fn MirBuilder.scheduled_drop_index_for_local(self: MirBuilder, local_id: i32) -> i32:
-    var i = self.drop_local_ids.len() as i32 - 1
-    while i >= 0:
-        if self.drop_local_ids.get(i as i64) == local_id:
-            return i
-        i = i - 1
-    -1
-
-fn MirBuilder.current_conditional_move_entry_bb(self: MirBuilder) -> i32:
-    let depth = self.conditional_move_entry_bbs.len() as i32
-    if depth == 0:
-        return -1
-    self.conditional_move_entry_bbs.get((depth - 1) as i64)
-
-fn MirBuilder.current_conditional_move_drop_depth(self: MirBuilder) -> i32:
-    let depth = self.conditional_move_drop_depths.len() as i32
-    if depth == 0:
-        return -1
-    self.conditional_move_drop_depths.get((depth - 1) as i64)
-
-fn MirBuilder.push_conditional_move_context(self: MirBuilder, entry_bb: i32, drop_depth: i32):
-    self.conditional_move_entry_bbs.push(entry_bb)
-    self.conditional_move_drop_depths.push(drop_depth)
-
-fn MirBuilder.pop_conditional_move_context(self: MirBuilder):
-    if self.conditional_move_entry_bbs.len() as i32 == 0:
-        return
-    self.conditional_move_entry_bbs.pop()
-    self.conditional_move_drop_depths.pop()
-
-fn MirBuilder.local_maybe_moved_flag(self: MirBuilder, local_id: i32) -> i32:
-    for i in 0..self.maybe_moved_value_local_ids.len() as i32:
-        if self.maybe_moved_value_local_ids.get(i as i64) == local_id:
-            return self.maybe_moved_value_flag_locals.get(i as i64)
-    -1
-
-fn MirBuilder.emit_drop_flag_store_in_block(self: MirBuilder, bb: i32, flag_local: i32, value: i32, span: i32):
-    let flag_place = self.place_for_local(flag_local)
-    let value_op = self.const_operand(ConstKind.CK_BOOL, value, self.sema.ty_bool)
-    let rv = self.body.new_rvalue(RvalueKind.RK_USE, value_op, 0, 0)
-    self.body.push_stmt(bb, StmtKind.Assign, flag_place, rv, span)
-
-fn MirBuilder.emit_drop_flag_store(self: MirBuilder, flag_local: i32, value: i32, span: i32):
-    self.emit_drop_flag_store_in_block(self.cur_bb, flag_local, value, span)
-
-fn MirBuilder.ensure_maybe_moved_flag_for_local(self: MirBuilder, local_id: i32, span: i32) -> i32:
-    let existing = self.local_maybe_moved_flag(local_id)
-    if existing >= 0:
-        return existing
-    let entry_bb = self.current_conditional_move_entry_bb()
-    let flag_local = self.body.new_local(self.sema.ty_bool as i32, 1, 0, 0)
-    if entry_bb >= 0:
-        self.body.push_stmt(entry_bb, StmtKind.StorageLive, flag_local, 0, span)
-        self.emit_drop_flag_store_in_block(entry_bb, flag_local, 1, span)
-    self.maybe_moved_value_local_ids.push(local_id)
-    self.maybe_moved_value_flag_locals.push(flag_local)
-    self.body.drop_flag_value_locals.push(local_id)
-    self.body.drop_flag_locals.push(flag_local)
-    flag_local
-
-fn MirBuilder.branch_move_should_use_drop_flag(self: MirBuilder, local_id: i32) -> i32:
-    let entry_bb = self.current_conditional_move_entry_bb()
-    if entry_bb < 0:
-        return 0
-    let drop_depth = self.current_conditional_move_drop_depth()
-    if drop_depth < 0:
-        return 0
-    let drop_idx = self.scheduled_drop_index_for_local(local_id)
-    if drop_idx < 0 or drop_idx >= drop_depth:
-        return 0
-    if self.drop_kinds.get(drop_idx as i64) != DropKind.DK_VALUE:
-        return 0
-    if self.local_maybe_moved_flag(local_id) < 0:
-        return 0
-    1
 
 fn MirBuilder.fn_node_is_drop_body(self: MirBuilder, fn_node: i32) -> i32:
     let raw_sym = self.ast.get_data0(fn_node)
@@ -750,25 +667,6 @@ fn MirBuilder.emit_task_cancel_call(self: MirBuilder, task_op: i32, intrinsic: M
     let after_cancel_bb = self.new_block()
     self.terminate(TermKind.TK_CALL, self.unit_operand(), cancel_call_id, cancel_result_place, after_cancel_bb)
     self.switch_to(after_cancel_bb)
-
-fn MirBuilder.emit_conditional_value_drop_entry(self: MirBuilder, local_id: i32, flag_local: i32):
-    let flag_place = self.place_for_local(flag_local)
-    let flag_op = self.body.new_operand(OperandKind.OK_COPY, flag_place)
-    let drop_bb = self.new_block()
-    let after_bb = self.new_block()
-    let vals: Vec[i32] = Vec.new()
-    vals.push(1)
-    let targets: Vec[i32] = Vec.new()
-    targets.push(drop_bb as i32)
-    let table = self.body.new_switch_table(vals, targets)
-    self.terminate(TermKind.TK_SWITCH_INT, flag_op, table, after_bb, 0)
-
-    self.switch_to(drop_bb)
-    let place = self.place_for_local(local_id)
-    self.emit_drop_stmt(place, "scope-exit", 0)
-    self.terminate(TermKind.TK_GOTO, after_bb, 0, 0, 0)
-
-    self.switch_to(after_bb)
 
 fn MirBuilder.emit_drop_entry(self: MirBuilder, local_id: i32, drop_kind: i32):
     // Stage 6: M7 drop flags are retired. Conditional moves are handled by the
@@ -3141,9 +3039,6 @@ fn MirBuilder.assign_operand_to_place(self: MirBuilder, place: i32, operand_id: 
     if dest_local >= 0:
         self.clear_local_value_moved(dest_local)
         self.clear_moved_fields_for_local(dest_local)
-        let flag_local = self.local_maybe_moved_flag(dest_local)
-        if flag_local >= 0:
-            self.emit_drop_flag_store(flag_local, 1, span)
     else:
         self.clear_moved_fields_for_place(place)
 

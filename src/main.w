@@ -707,7 +707,6 @@ fn run_cli(argc: i32) -> i32:
     let validate_ownership_flag = cli_has_flag(argc, "--validate-ownership")
     let dump_place_map_flag = cli_has_flag(argc, "--dump-place-map")
     let trace_cleanup_edge_spec = cli_value_or_prefix(argc, "--trace-cleanup-edge", "--trace-cleanup-edge=")
-    let dump_drop_flags_flag = cli_has_flag(argc, "--dump-drop-flags")
     let validate_all_flag = cli_has_flag(argc, "--validate-all")
     let debug_info = not cli_has_flag(argc, "-g0") and not cli_has_flag(argc, "--release")
 
@@ -833,8 +832,6 @@ fn run_cli(argc: i32) -> i32:
             return dump_place_map_artifact(source, no_std, alloc_mode, runtime_available, prelude_mode)
         if trace_cleanup_edge_spec.len() > 0:
             return trace_cleanup_edge_artifact(source, trace_cleanup_edge_spec, no_std, alloc_mode, runtime_available, prelude_mode)
-        if dump_drop_flags_flag:
-            return dump_drop_flags_artifact(source, no_std, alloc_mode, runtime_available, prelude_mode)
         if validate_all_flag:
             return validate_all_artifact(source, no_std, alloc_mode, runtime_available, prelude_mode)
         if dump_async_mir_flag:
@@ -2217,17 +2214,6 @@ fn trace_cleanup_edge_artifact(source_file: str, spec: str, no_std: bool, alloc_
     with_write(text)
     0
 
-fn dump_drop_flags_artifact(source_file: str, no_std: bool, alloc_mode: bool, runtime_available: bool, prelude_mode: i32) -> i32:
-    var comp = Compilation.init()
-    comp.configure(0, no_std, alloc_mode, runtime_available)
-    comp.set_prelude_mode(prelude_mode)
-    let text = comp.dump_drop_flags_file(source_file)
-    if text.len() == 0:
-        with_eprint("error: drop-flags dump failed during compilation or mir lowering")
-        return 1
-    with_write(text)
-    0
-
 fn validate_all_artifact(source_file: str, no_std: bool, alloc_mode: bool, runtime_available: bool, prelude_mode: i32) -> i32:
     var comp = Compilation.init()
     comp.configure(0, no_std, alloc_mode, runtime_available)
@@ -3517,8 +3503,6 @@ fn print_usage:
     with_write("  --dump-place-map Print canonical MIR place/projection map from 'check'\n")
     with_write("  --trace-cleanup-edge <fn:from->to>\n")
     with_write("                   Print ownership state across one MIR CFG edge\n")
-    with_write("  --dump-drop-flags\n")
-    with_write("                   Print runtime drop-flag wiring from 'check'\n")
     with_write("  --validate-all   Run all MIR validators from 'check'\n")
     with_write("  --no-std         Disable standard library support\n")
     with_write("  --no-runtime     Disable the fiber runtime; async constructs are errors\n")
