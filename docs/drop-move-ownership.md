@@ -13,8 +13,9 @@
 > installed). The Milestone 0–6 substrate below — canonical places, partial
 > aggregate drop, sema-typed drop glue, path-sensitive cleanup — still stands;
 > Milestone 7 ("runtime drop flags for conditional ownership") is now realized by
-> the niche instead. The live remaining work is in `docs/resume_later.md`
-> (Slice E conditional field moves, Slice F M8 generator audit).
+> the niche instead — including conditional *field* moves (Slice E), via the
+> field-place niche. The live remaining work is in `docs/resume_later.md`
+> (Slice F: the M8 generator-state audit).
 
 ## Purpose
 
@@ -1028,9 +1029,9 @@ Implement the complete dynamic solution.
 > `emit_conditional_value_drop_entry`, and `--dump-drop-flags` described below were
 > removed; spec §2.5.2 forbids reintroducing them. The tasks/cases below are kept
 > as the historical M7 record — the *behavior* they target (sound conditional
-> moves through if/match/loop) is delivered by the niche. Conditional **field**
-> moves (Slice E) and the M8 audit (Slice F) are the live remainder; see
-> `docs/resume_later.md`.
+> moves through if/match/loop, including conditional **field** moves, Slice E) is
+> delivered by the niche. The M8 generator-state audit (Slice F) is the live
+> remainder; see `docs/resume_later.md`.
 
 Tasks:
 

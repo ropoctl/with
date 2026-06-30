@@ -37,26 +37,25 @@ installed. This file records what that means for the remaining slices.
 - **#609** fiber pool reported as a leak at shutdown — drained before the ledger
   walk.
 - **M7 conditional whole-value moves** (if/match/loop) — sound via the niche.
+- **Slice E — conditional *field* moves** — closed by the **field-place niche**.
+  A Drop-bearing field moved conditionally out of a non-Drop struct is blanked on
+  the moving path (`MirLower.consume_moved_operand` records the field place in
+  `pending_reset_field_places` when `field_move_in_branch > 0`; flushed scoped per
+  branch in `flush_pending_resets_since`), and the owner's existing guarded
+  per-field drop (`rt_value_is_zero`) skips the blanked field — with the base local
+  marked `ever_moved` so the Stage-4 elision keeps the owner's guard (else the
+  blanked field's drop null-derefs). The reset is scoped to CONDITIONAL moves (the
+  `field_move_in_branch` counter, inc'd around if/match/while/loop bodies); an
+  unconditional field move stays statically moved and the owner's partial drop
+  skips it without a reset (preserved drop-plan, no dead store). The
+  `SemaCheck.w:18691` rejection is lifted. Fixtures:
+  `behav_conditional_field_move_drop` (if + match), `da_conditional_field_move`.
+  Field move-OUT of a `Drop` aggregate stays forbidden (§2.4;
+  `err_move_out_vec_field_*` + `SemaCheck.w:18685/18688/18741`).
 
 ## Genuinely remaining
 
-1. **Slice E — conditional *field* moves (rejection VERIFIED load-bearing).**
-   `SemaCheck.w:18691` rejects "conditional move of Drop field requires drop-state
-   tracking" (`:18701` is the value form). **This is not a stale over-rejection.**
-   Probe (2026-06-30): lifting it and running a conditional field move out of a
-   non-Drop struct under `--debug-alloc` produced a **`DOUBLE FREE`** on the moved
-   path. Cause: `consume_moved_operand` (`MirLower.w`) records reset-on-move only
-   for **whole locals** (`pending_reset_locals.push`, in the `local_id >= 0`
-   branch); a field place gets `mark_place_field_moved` with **no reset**, so a
-   conditionally-moved field keeps its bits and the owner's scope-exit drop frees
-   it a second time. Closing Slice E therefore needs the **field-place niche**:
-   blank a conditionally-moved field on the moving path, and make the owner's
-   per-field drop guarded (`rt_value_is_zero`) so it skips the blanked field — the
-   field analogue of the whole-value niche. That is real work, **not** a lift, and
-   **not** a rebuilt field-level drop flag (retired). Field move-OUT of a `Drop`
-   aggregate stays forbidden (§2.4 policy; `err_move_out_vec_field_*` +
-   `SemaCheck.w:18685/18688/18741`).
-2. **Slice F — M8 generator/async-state ownership audit + M9 matrix gaps.** No
+1. **Slice F — M8 generator/async-state ownership audit + M9 matrix gaps.** No
    generator-state Drop fixtures exist yet (`da_*gen*` is empty). Confirm generator
    state fields holding `Drop`/`Vec[Drop]` across a suspend are moved in/out as
    owned places (the niche resets them on move), not copied or zeroed. The M9 `da_*`

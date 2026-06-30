@@ -18687,9 +18687,11 @@ fn Sema.mark_moved_if_consumed(self: Sema, node: i32):
                 if self.type_needs_drop(field_ty) != 0 and self.type_has_drop_impl(field_ty) == 0:
                     self.emit_error("moving a field that needs drop out of a struct is not yet supported (#607); clone the field or move the whole struct instead", node)
                 else:
-                    if self.move_control_flow_depth != 0:
-                        self.emit_error("conditional move of Drop field requires drop-state tracking", node)
-                        return
+                    // Slice E: conditional field moves are sound under the
+                    // field-place niche — MirLower.consume_moved_operand blanks
+                    // the moved field on the moving path, and the owner's guarded
+                    // per-field drop (rt_value_is_zero) skips the blanked field.
+                    // No static drop-state tracking is required.
                     self.mark_field_moved(node)
         return
     if kind == NodeKind.NK_IDENT:

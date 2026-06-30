@@ -54,6 +54,15 @@ type MirBuilder = ephemeral {
     stmt_temp_locals: Vec[i32],
     stmt_temp_starts: Vec[i32],
     pending_reset_locals: Vec[i32],
+    // Field-place niche (Slice E): a conditionally-moved Drop-bearing field place
+    // and its sema type, blanked at the branch/statement boundary so the owner's
+    // guarded per-field drop skips it — the field analogue of pending_reset_locals.
+    pending_reset_field_places: Vec[i32],
+    pending_reset_field_types: Vec[i32],
+    // >0 while lowering a branch body (if/match/loop). Only a field move inside a
+    // branch needs the niche reset: an unconditional field move stays statically
+    // moved and the owner's partial drop skips it without a reset.
+    field_move_in_branch: i32,
     with_cleanup_guard_locals: Vec[i32],
     with_cleanup_payload_locals: Vec[i32],
     with_cleanup_method_syms: Vec[i32],
@@ -135,6 +144,9 @@ fn MirBuilder.init(sema: &Sema, ast: AstPool, pool: InternPool, fn_sym: i32) -> 
         stmt_temp_locals: Vec.new(),
         stmt_temp_starts: Vec.new(),
         pending_reset_locals: Vec.new(),
+        pending_reset_field_places: Vec.new(),
+        pending_reset_field_types: Vec.new(),
+        field_move_in_branch: 0,
         with_cleanup_guard_locals: Vec.new(),
         with_cleanup_payload_locals: Vec.new(),
         with_cleanup_method_syms: Vec.new(),
@@ -607,6 +619,22 @@ fn MirBuilder.consume_moved_operand(self: MirBuilder, operand_id: i32) -> Unit:
         return
     if self.place_field_projection_count(place) > 0:
         self.mark_place_field_moved(place)
+        // Field-place niche (Slice E): blank a moved Drop-bearing field at the
+        // branch/statement boundary so the owner's guarded per-field drop (the
+        // existing rt_value_is_zero check) skips it. Mirrors the whole-local
+        // reset above; scoped via flush_pending_resets_since so a conditional
+        // field move resets only on the moving path.
+        let field_ty = self.place_local_type(place)
+        if self.field_move_in_branch > 0 and field_ty > 0 and self.sema.type_needs_drop(field_ty) != 0:
+            self.pending_reset_field_places.push(place)
+            self.pending_reset_field_types.push(field_ty)
+            // The owner's drop must keep its niche guard, so the per-field guarded
+            // drop runs and skips the blanked field. Mark the base local moved so
+            // the Stage-4 elision (§2.5.2) does not drop the owner — and with it
+            // the reset field — unconditionally (a null deref in the field's drop).
+            let base_local = self.body.place_locals.get(place as i64)
+            if base_local >= 0:
+                self.body.mark_local_ever_moved(base_local)
 
 fn MirBuilder.flush_stmt_temp_frame(self: MirBuilder) -> Unit:
     if self.stmt_temp_starts.len() as i32 == 0:
@@ -625,7 +653,7 @@ fn MirBuilder.flush_stmt_temp_frame(self: MirBuilder) -> Unit:
     self.flush_pending_resets()
 
 fn MirBuilder.flush_pending_resets(self: MirBuilder) -> Unit:
-    self.flush_pending_resets_since(0)
+    self.flush_pending_resets_since(0, 0)
 
 // Reset-on-move (spec §2.5.1): emit `local = <zero>` for each owned local moved
 // since `start`, AFTER the move read it, then truncate the pending list back to
@@ -634,7 +662,7 @@ fn MirBuilder.flush_pending_resets(self: MirBuilder) -> Unit:
 // local's later drops (drop-before-overwrite, scope-exit) free nothing.
 // `start` scopes the flush to a branch/statement so an outer-scope move's reset
 // is not emitted inside (and made conditional by) an inner branch.
-fn MirBuilder.flush_pending_resets_since(self: MirBuilder, start: i32) -> Unit:
+fn MirBuilder.flush_pending_resets_since(self: MirBuilder, start: i32, field_start: i32) -> Unit:
     var ri = start
     while ri < self.pending_reset_locals.len() as i32:
         let rl = self.pending_reset_locals.get(ri as i64)
@@ -644,6 +672,21 @@ fn MirBuilder.flush_pending_resets_since(self: MirBuilder, start: i32) -> Unit:
         ri = ri + 1
     while self.pending_reset_locals.len() as i32 > start:
         self.pending_reset_locals.pop()
+    // Field-place niche (Slice E): blank each conditionally-moved Drop-bearing
+    // field since `field_start` (scoped like the local resets above, so a
+    // conditional field move resets only on the moving path). The owner's
+    // existing guarded per-field drop then skips the blanked field.
+    var fri = field_start
+    while fri < self.pending_reset_field_places.len() as i32:
+        let fplace = self.pending_reset_field_places.get(fri as i64)
+        let fty = self.pending_reset_field_types.get(fri as i64)
+        let fzop = self.body.gen_zero_operand(fty)
+        let frval = self.body.new_rvalue(RvalueKind.RK_USE, fzop, 0, 0)
+        self.body.push_stmt(self.cur_bb, StmtKind.Assign, fplace, frval, 0)
+        fri = fri + 1
+    while self.pending_reset_field_places.len() as i32 > field_start:
+        self.pending_reset_field_places.pop()
+        self.pending_reset_field_types.pop()
 
 fn MirBuilder.finish_stmt_temp_frame(self: MirBuilder, frame_depth: i32) -> Unit:
     while self.stmt_temp_starts.len() as i32 > frame_depth:
@@ -5144,6 +5187,7 @@ fn MirBuilder.lower_if(self: MirBuilder, cond_expr: i32, then_expr: i32, else_ex
     // so an outer-scope move's reset is not pulled inside (and made conditional
     // by) this if.
     let pending_reset_start = self.pending_reset_locals.len() as i32
+    let pending_reset_field_start = self.pending_reset_field_places.len() as i32
 
     let then_bb = self.new_block()
     let else_bb = self.new_block()
@@ -5167,6 +5211,7 @@ fn MirBuilder.lower_if(self: MirBuilder, cond_expr: i32, then_expr: i32, else_ex
         self.expected_type = self.sema.ty_void as i32
 
     self.switch_to(then_bb)
+    self.field_move_in_branch = self.field_move_in_branch + 1
     if regex_capture_node != 0:
         self.lower_regex_capture_bindings_from_option(regex_capture_node, regex_captures_opt_place)
     let then_op = if want_result != 0: self.lower_expr(then_expr) else: self.lower_expr_discard(then_expr)
@@ -5176,20 +5221,23 @@ fn MirBuilder.lower_if(self: MirBuilder, cond_expr: i32, then_expr: i32, else_ex
     // INSIDE the branch, before merging. A move in the branch's tail expression
     // has no per-statement flush; left pending it would be emitted after the if
     // on BOTH paths and blank a still-live value on the not-taken path.
-    self.flush_pending_resets_since(pending_reset_start)
+    self.flush_pending_resets_since(pending_reset_start, pending_reset_field_start)
+    self.field_move_in_branch = self.field_move_in_branch - 1
     self.terminate(TermKind.TK_GOTO, join_bb, 0, 0, 0)
 
     self.restore_moved_value_len(branch_moved_value_len)
     self.restore_moved_field_lengths(branch_moved_field_len, branch_moved_field_path_len)
 
     self.switch_to(else_bb)
+    self.field_move_in_branch = self.field_move_in_branch + 1
     let else_op = if else_expr_opt != 0:
         if want_result != 0: self.lower_expr(else_expr_opt) else: self.lower_expr_discard(else_expr_opt)
     else:
         self.unit_operand()
     if want_result != 0:
         self.assign_operand_to_place(result_place, else_op, self.ast.get_start(node))
-    self.flush_pending_resets_since(pending_reset_start)
+    self.flush_pending_resets_since(pending_reset_start, pending_reset_field_start)
+    self.field_move_in_branch = self.field_move_in_branch - 1
     self.terminate(TermKind.TK_GOTO, join_bb, 0, 0, 0)
 
     self.restore_moved_value_len(branch_moved_value_len)
@@ -5272,10 +5320,13 @@ fn MirBuilder.lower_loop(self: MirBuilder, body_expr: i32, node: i32) -> i32:
 
     self.switch_to(body_bb)
     let pending_reset_start = self.pending_reset_locals.len() as i32
+    let pending_reset_field_start = self.pending_reset_field_places.len() as i32
+    self.field_move_in_branch = self.field_move_in_branch + 1
     let _ = self.lower_expr_discard(body_expr)
     // Reset-on-move (spec §2.5.1): flush body-local resets before the back-edge,
     // so a move in the loop body's tail is reset inside the body (same as lower_if).
-    self.flush_pending_resets_since(pending_reset_start)
+    self.flush_pending_resets_since(pending_reset_start, pending_reset_field_start)
+    self.field_move_in_branch = self.field_move_in_branch - 1
     // Back-edge when body does not diverge.
     self.terminate(TermKind.TK_GOTO, header_bb, 0, 0, 0)
 
@@ -5327,8 +5378,11 @@ fn MirBuilder.lower_while(self: MirBuilder, cond_expr: i32, body_expr: i32, node
     if regex_capture_node != 0:
         self.lower_regex_capture_bindings_from_option(regex_capture_node, regex_captures_opt_place)
     let pending_reset_start = self.pending_reset_locals.len() as i32
+    let pending_reset_field_start = self.pending_reset_field_places.len() as i32
+    self.field_move_in_branch = self.field_move_in_branch + 1
     let _ = self.lower_expr_discard(body_expr)
-    self.flush_pending_resets_since(pending_reset_start)
+    self.flush_pending_resets_since(pending_reset_start, pending_reset_field_start)
+    self.field_move_in_branch = self.field_move_in_branch - 1
     self.terminate(TermKind.TK_GOTO, cond_bb, 0, 0, 0)
 
     self.pop_control_target()
@@ -7382,6 +7436,7 @@ fn MirBuilder.lower_match(self: MirBuilder, scrutinee_expr: i32, arms_start: i32
     let branch_moved_field_len = self.moved_field_base_locals.len() as i32
     let branch_moved_field_path_len = self.moved_field_path_kinds.len() as i32
     let pending_reset_start = self.pending_reset_locals.len() as i32
+    let pending_reset_field_start = self.pending_reset_field_places.len() as i32
 
     var dispatch_bb = self.cur_bb
     for ai in 0..arms_count:
@@ -7404,6 +7459,7 @@ fn MirBuilder.lower_match(self: MirBuilder, scrutinee_expr: i32, arms_start: i32
         // different arm was taken (memory corruption for Drop-typed payloads).
         self.push_scope()
         let _ = self.lower_pattern(pat_node, scrutinee_place)
+        self.field_move_in_branch = self.field_move_in_branch + 1
 
         if guard_node != 0:
             let guard_op = self.lower_expr(guard_node)
@@ -7436,7 +7492,8 @@ fn MirBuilder.lower_match(self: MirBuilder, scrutinee_expr: i32, arms_start: i32
             self.assign_operand_to_place(result_place, arm_value, self.ast.get_start(body_node))
         // Reset-on-move (spec §2.5.1): flush this arm's pending source-resets
         // inside the arm, before it merges to the join (same reason as lower_if).
-        self.flush_pending_resets_since(pending_reset_start)
+        self.flush_pending_resets_since(pending_reset_start, pending_reset_field_start)
+        self.field_move_in_branch = self.field_move_in_branch - 1
         self.pop_scope_with_goto(join_bb)
         self.restore_moved_value_len(branch_moved_value_len)
         self.restore_moved_field_lengths(branch_moved_field_len, branch_moved_field_path_len)
