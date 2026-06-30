@@ -40,16 +40,22 @@ installed. This file records what that means for the remaining slices.
 
 ## Genuinely remaining
 
-1. **Slice E — conditional *field* moves.** `SemaCheck.w:18691` still rejects
-   "conditional move of Drop field requires drop-state tracking" and `:18701` the
-   value form. Under the niche these are very likely **now-unnecessary
-   over-rejections**: reset-on-move already blanks moved fields (the `moved_field_*`
-   model) and the guarded drop skips them at runtime, so the static rejection no
-   longer guards anything. The work is to **verify** (write the conditional
-   field-move repro, run it under `--debug-alloc`) and, if the niche covers it,
-   **lift the rejection** — *not* to rebuild a field-level drop-flag (that approach
-   is retired). Field move-OUT of a `Drop` aggregate stays forbidden (§2.4 policy;
-   `err_move_out_vec_field_*` + `SemaCheck.w:18685/18688/18741`).
+1. **Slice E — conditional *field* moves (rejection VERIFIED load-bearing).**
+   `SemaCheck.w:18691` rejects "conditional move of Drop field requires drop-state
+   tracking" (`:18701` is the value form). **This is not a stale over-rejection.**
+   Probe (2026-06-30): lifting it and running a conditional field move out of a
+   non-Drop struct under `--debug-alloc` produced a **`DOUBLE FREE`** on the moved
+   path. Cause: `consume_moved_operand` (`MirLower.w`) records reset-on-move only
+   for **whole locals** (`pending_reset_locals.push`, in the `local_id >= 0`
+   branch); a field place gets `mark_place_field_moved` with **no reset**, so a
+   conditionally-moved field keeps its bits and the owner's scope-exit drop frees
+   it a second time. Closing Slice E therefore needs the **field-place niche**:
+   blank a conditionally-moved field on the moving path, and make the owner's
+   per-field drop guarded (`rt_value_is_zero`) so it skips the blanked field — the
+   field analogue of the whole-value niche. That is real work, **not** a lift, and
+   **not** a rebuilt field-level drop flag (retired). Field move-OUT of a `Drop`
+   aggregate stays forbidden (§2.4 policy; `err_move_out_vec_field_*` +
+   `SemaCheck.w:18685/18688/18741`).
 2. **Slice F — M8 generator/async-state ownership audit + M9 matrix gaps.** No
    generator-state Drop fixtures exist yet (`da_*gen*` is empty). Confirm generator
    state fields holding `Drop`/`Vec[Drop]` across a suspend are moved in/out as
