@@ -1134,10 +1134,11 @@ pub fn Sema.prepare_comptime_eval_copy(mut self: Sema) -> Sema:
     self.generic_inst_cache = sema_new_map_i64_i32()
     self.generic_subst_param_syms = sema_clone_i32_vec(&self.generic_subst_param_syms)
     self.generic_subst_type_ids = sema_clone_i32_vec(&self.generic_subst_type_ids)
-    self.tracked_input_paths = sema_clone_str_vec(&self.tracked_input_paths)
     self.source_text_file_ids = sema_clone_i32_vec(&self.source_text_file_ids)
-    self.source_text_names = sema_clone_str_vec(&self.source_text_names)
-    self.source_texts = sema_clone_str_vec(&self.source_texts)
+    // source_texts / source_text_names / tracked_input_paths are read-only during
+    // comptime eval and are restored by the write-back in comptime_eval_finish, so
+    // share them (shallow) instead of deep-cloning. Deep-cloning the full source
+    // text on every comptime eval leaked ~8.5 MB × N evals = GBs of dead copies.
     self
 
 fn sema_pair_key(a: i32, b: i32) -> i64:
