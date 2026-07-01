@@ -16,6 +16,7 @@ extern fn with_fs_remove_file(path: str) -> i32
 extern fn with_fs_remove_dir(path: str) -> i32
 extern fn with_fs_remove_tree(path: str) -> i32
 extern fn with_fs_mkdir_p(path: str) -> i32
+extern fn with_fs_rename_file(old_path: str, new_path: str) -> i32
 extern fn with_getenv_str(name: str) -> str
 extern fn with_setenv_str(name: str, value: str) -> i32
 extern fn with_clock_nanos() -> i64
@@ -70,6 +71,11 @@ pub fn runtime_remove_tree(path: str) -> i32:
 
 pub fn runtime_mkdir_p(path: str) -> i32:
     with_fs_mkdir_p(path)
+
+// Atomic on all platforms: POSIX rename replaces the target; the Windows
+// backend uses MoveFileExW with MOVEFILE_REPLACE_EXISTING.
+pub fn runtime_rename(old_path: str, new_path: str) -> i32:
+    with_fs_rename_file(old_path, new_path)
 
 pub fn runtime_getenv(name: str) -> str:
     with_getenv_str(name)

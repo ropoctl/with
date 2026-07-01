@@ -1488,14 +1488,24 @@ fn mir_drop_state_name(state: i32) -> str:
 // transfer. This is the #614 perf hot path (rt_payload_start_is_owned ~67%). Pure
 // memo of a deterministic function → no effect on compiler output/fixpoint.
 var mir_local_key_cache: Vec[str] = Vec.new()
+var mir_local_key_cache_lock: Atomic[i32]
 
 fn mir_drop_state_local_key(local_id: i32) -> str:
     if local_id < 0:
         return f"_{local_id}"
+    // Comptime parallel() lowers MIR on concurrent threads that share this global
+    // cache; an unguarded push races vec_grow (double free of the old buffer,
+    // #617), and a get during another thread's grow reads a freed buffer, so the
+    // lock must bracket both. The returned str stays valid across grows — the Vec
+    // buffer holds handles, not the string bytes.
+    while mir_local_key_cache_lock.swap(1, .Acquire) != 0:
+        let _ = 0
     while mir_local_key_cache.len() as i32 <= local_id:
         let n = mir_local_key_cache.len() as i32
         mir_local_key_cache.push(f"_{n}")
-    mir_local_key_cache.get(local_id as i64)
+    let key = mir_local_key_cache.get(local_id as i64)
+    mir_local_key_cache_lock.store(0, .Release)
+    key
 
 fn mir_drop_state_key_is_descendant(key: str, local_key: str) -> bool:
     if key == local_key:

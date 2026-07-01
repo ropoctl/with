@@ -29,6 +29,14 @@ extern let with_embedded_rt_windows_x86_64_o_start: u8
 extern let with_embedded_rt_windows_x86_64_o_end: u8
 
 var link_stage_temp_archives: Vec[str] = Vec.new()
+var link_stage_temp_archives_lock: Atomic[i32]
+
+fn link_stage_temp_archives_lock_acquire():
+    while link_stage_temp_archives_lock.swap(1, .Acquire) != 0:
+        let _ = 0
+
+fn link_stage_temp_archives_lock_release():
+    link_stage_temp_archives_lock.store(0, .Release)
 
 type LinkStageEnvVar {
     name: str,
@@ -171,7 +179,11 @@ fn link_stage_cleanup_files(files: &Vec[str]):
         let _remove = runtime_remove_file(files.get(i as i64))
 
 fn link_stage_register_temp_archive(path: str):
+    // Comptime parallel() links on concurrent threads; an unguarded push to this
+    // shared registry races vec_grow (double free of the old buffer, #617).
+    link_stage_temp_archives_lock_acquire()
     link_stage_temp_archives.push(path)
+    link_stage_temp_archives_lock_release()
 
 fn link_stage_basename(path: str) -> str:
     var last_slash = -1
@@ -207,8 +219,10 @@ fn link_stage_cleanup_owned_temp_archives_in(dir: str, pid_text: str):
             let _remove = runtime_remove_file(remove_path)
 
 pub fn link_stage_cleanup_current_process_temp_archives() -> Unit:
+    link_stage_temp_archives_lock_acquire()
     link_stage_cleanup_files(link_stage_temp_archives)
     link_stage_temp_archives = Vec.new()
+    link_stage_temp_archives_lock_release()
     let root = link_stage_artifact_root()
     let pid_text = f"{runtime_getpid()}"
     link_stage_cleanup_owned_temp_archives_in(root ++ "/lib", pid_text)
@@ -543,7 +557,24 @@ fn link_stage_extract_runtime_obj(name: str, path: str) -> i32:
     let data = link_stage_embedded_runtime_object(name)
     if data.len() == 0:
         return 1
-    if runtime_write_file(path, data) != 0:
+    // Concurrent links (comptime parallel() threads and separate processes)
+    // extract to this shared path. Writing it directly truncates the file under
+    // a concurrent reader mid-link — empty reads ("cannot read member") or
+    // partial-object parses (#617). Reuse a complete matching extraction, else
+    // write a unique temp file and rename it into place: rename replaces
+    // atomically, so readers only ever observe a complete file.
+    let existing = runtime_read_file(path)
+    if existing.len() == data.len() and existing == data:
+        return 0
+    let tmp_path = path ++ f".{runtime_getpid()}.{runtime_clock_nanos()}.tmp"
+    if runtime_write_file(tmp_path, data) != 0:
+        return 1
+    if runtime_rename(tmp_path, path) != 0:
+        let _ = runtime_remove_file(tmp_path)
+        // A concurrent extractor may have won the rename; accept its complete copy.
+        let after = runtime_read_file(path)
+        if after.len() == data.len() and after == data:
+            return 0
         return 1
     0
 
