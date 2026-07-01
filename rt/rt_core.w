@@ -562,7 +562,29 @@ fn rt_payload_start_can_be_owned(ptr: *const u8) -> i32:
         return 1
     0
 
+var alloc_no_reuse_state: i32 = 0   // DIAGNOSTIC (#617): 0=unread,1=off,2=on
+
+// DIAGNOSTIC (#617): WITH_ALLOC_NO_REUSE=1 makes freed small blocks never return to the
+// freelist — they are dropped and their header poisoned with a -1 sentinel. Every
+// allocation is then fresh slab memory, so a use-after-free can no longer corrupt a
+// re-handed block (any reuse-dependent corruption vanishes = signal) and a double-free
+// hits the invalid-free check deterministically. Non-allocating rt_getenv + cached.
+// (Large allocs already rt_munmap on free, so they fault on UAF today.)
+fn alloc_no_reuse_on() -> i32:
+    if alloc_no_reuse_state == 0:
+        let v = rt_getenv(c"WITH_ALLOC_NO_REUSE".ptr)
+        if v as i64 != 0 and (unsafe *v) != 0:
+            alloc_no_reuse_state = 2
+        else:
+            alloc_no_reuse_state = 1
+    if alloc_no_reuse_state == 2:
+        return 1
+    0
+
 fn free_small_block(block: i64, idx: i32):
+    if alloc_no_reuse_on() != 0:
+        unsafe *(block as *mut i64) = -1
+        return
     let old_head = get_freelist(idx)
     unsafe *(block as *mut i64) = old_head
     set_freelist(idx, block)
