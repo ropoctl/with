@@ -1052,8 +1052,14 @@ fn rt_alloc_with_origin(size_arg: i64, origin: i64) -> *mut u8:
     let ptr = rt_alloc_unlocked(size_arg)
     if dbg_on() != 0 and ptr as i64 != 0:
         dbg_record_alloc(ptr as i64, alloc_payload_size(ptr as *const u8), origin)
+    // The ownership range tables mutate under the lock (rt_record_slab_range
+    // shift-insert, rt_forget_large_range swap-remove), so this sanity check must
+    // read them while the lock is still held — checked after unlock it reads a
+    // torn table mid-mutation and panics on a healthy allocation (#617). Only the
+    // panic itself is deferred past unlock so the panic path cannot deadlock.
+    let payload_ok = rt_payload_start_can_be_owned(ptr as *const u8)
     rt_allocator_unlock()
-    if rt_payload_start_can_be_owned(ptr as *const u8) == 0:
+    if payload_ok == 0:
         with_panic_core(make_str("allocator returned invalid payload" as *const u8, 34), make_str("" as *const u8, 0), 0)
     ptr
 
