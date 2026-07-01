@@ -1,7 +1,7 @@
 # Resume Later: Drop/Move Ownership — current state under the niche
 
-Resume record for the `docs/drop-move-ownership.md` effort. **Updated 2026-06-30
-to the niche design.** The drop/move substrate is no longer built on runtime
+Resume record for the `docs/completed/drop-move-ownership.md` effort. **Updated
+2026-06-30 to the niche design.** The drop/move substrate is no longer built on runtime
 drop flags + static drop elaboration; it is built on the **niche** (reset-on-move
 + the guarded drop), which shipped as Stages 1–6 and is now merged to `main` and
 installed. This file records what that means for the remaining slices.
@@ -78,7 +78,10 @@ installed. This file records what that means for the remaining slices.
    core).** Nested aggregate-in-struct-field drop (A6), wildcard/discard element drop in
    irrefutable destructure (A7), and precise per-element partial-extraction tracking to
    replace the conservative whole-base consume (A8). See `docs/phase_8_handoff.md` and
-   `docs/a5_handoff.md`. The niche plus conditional whole-value and field moves (Slices
+   `docs/completed/a5_handoff.md`. (One A5 coverage gap noted while archiving: the
+   `behav_mut_self_vec_owner_receiver.w` test from the handoff's restore list was never
+   restored; the other two A5 fixtures exist and pass.) The niche plus conditional
+   whole-value and field moves (Slices
    A–F) and the field-read drop fix are complete; A6/A7/A8 are precision refinements
    (the current whole-base consume is conservative/safe), not soundness gaps.
 
@@ -109,7 +112,9 @@ and never `DOUBLE FREE`.
 
 ## Open issues
 
-- #617 — pre-existing, layout-sensitive flaky corruption in cli-selfhost cases
-  (unrelated to drop/move; see memory `project-617-flaky-cli-selfhost`).
+- #617 — the parallel-workspace corruption is root-caused and fixed (three
+  thread races in the comptime `parallel()` compile path; commits `e8a01e48` +
+  `da6176fb`). The issue stays open only for the original, never-reproduced
+  `with get` zlib symptom.
 - #607/#605/#606 — the transitive-Drop move/drop substrate this effort continued;
   Vec drop and aggregate content drop now ride the niche.
