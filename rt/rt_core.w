@@ -734,6 +734,13 @@ fn rt_alloc_release_mmap_bytes(total: i64):
     else:
         rt_alloc_committed_bytes = rt_alloc_committed_bytes - total
 
+// Current committed (reserved) byte count. Exposed for memory profiling: bracket a
+// compile phase (read before/after, accumulate deltas + a call count, print) to
+// localize allocation growth to a phase when the debug allocator's fixed ledger
+// overflows at scale. See docs/debug-allocator.md; a proper call-site profiler is #618.
+pub fn with_alloc_committed_bytes() -> i64:
+    rt_alloc_committed_bytes
+
 pub fn with_set_memory_limit_bytes(limit: i64) -> Unit:
     rt_allocator_lock()
     if limit > 0:

@@ -185,6 +185,30 @@ suppressing ordinary leaks. `da_pod_vec` intentionally remains `leak count=1` fo
   conditioned on that address. In-process backtraces are not used (see the note above).
 - **Abnormal exit.** Leak-at-exit fires on normal termination via `with_runtime_shutdown`;
   exits via `rt_exit`/panic skip the report.
+- **Ledger overflows at scale.** The per-allocation ledger is fixed-size and overflows on
+  large compilations (`debug-alloc: ledger full, tracking truncated` — millions of
+  allocations, e.g. `with check src/main.w`). Past that point the leak report is truncated,
+  so the debug allocator cannot profile whole-compiler *allocation volume*. Use the
+  committed-bytes technique below for that; a bounded call-site profiler is tracked in #618.
+
+## Profiling allocation volume when the ledger overflows
+
+When you need *how much* memory a phase allocates (not double-free/leak verdicts), and the
+ledger overflows, bracket the phase with the committed-byte counter instead:
+
+- `with_alloc_committed_bytes()` (`rt/rt_core.w`) returns the current committed (reserved)
+  byte count — mmap reserve/release for large allocations plus slab-page growth, so it
+  tracks real RSS growth.
+- Read it before and after each sub-step of the suspect phase, accumulate the deltas into
+  module-level counters plus a call count, and print at the end (e.g. with `with_eprint`).
+  The per-phase deltas localize the growth to the exact sub-call. Revert the instrumentation
+  before committing.
+
+This is how the comptime source-text deep-clone leak (`Sema.prepare_comptime_eval_copy`
+was deep-cloning the full ~8.5 MB source text on every comptime eval — ~2 GB across ~239
+evals; `check src/main.w` 4.76 GB → 2.51 GB) was localized, after the debug allocator and
+disable-and-remeasure both proved inadequate. It only localizes to a manually chosen phase;
+#618 is the reusable call-site version.
 
 ## Follow-ons (not in the first cut)
 
