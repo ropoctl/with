@@ -77,7 +77,7 @@ installed. This file records what that means for the remaining slices.
 1. **Deeper partial-move precision (A6/A7/A8 — separate future phases, not the niche
    core).** Nested aggregate-in-struct-field drop (A6), wildcard/discard element drop in
    irrefutable destructure (A7), and precise per-element partial-extraction tracking to
-   replace the conservative whole-base consume (A8). See `docs/phase_8_handoff.md` and
+   replace the conservative whole-base consume (A8). See `docs/completed/phase_8_handoff.md` and
    `docs/completed/a5_handoff.md`. (One A5 coverage gap noted while archiving: the
    `behav_mut_self_vec_owner_receiver.w` test from the handoff's restore list was never
    restored; the other two A5 fixtures exist and pass.) The niche plus conditional

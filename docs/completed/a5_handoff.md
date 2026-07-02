@@ -136,7 +136,7 @@ All discarded code is recoverable from `wip-a5-wide-audit` at
 - WIP salvage branch: `wip-a5-wide-audit`. `[verified-by-test]`
 - WIP salvage commit: `b6f05eabdd47a99d350ecc24ae7c6d2571a1ca36`. `[verified-by-test]`
 - `out/project-state.md` is stale local scratch and still describes "reset then reimplement"; do not treat it as current truth. `[verified-by-test]`
-- Broader durable phase state is in `docs/phase_8_handoff.md`. `[verified-by-test]`
+- Broader durable phase state is in `docs/completed/phase_8_handoff.md`. `[verified-by-test]`
 - A5 test files to restore from the WIP:
   - `test/behavior/behav_drop_vec_elements.w`: expected count `8`. `[verified-by-test]`
   - `test/behavior/behav_mut_self_field_assign_vec_tail.w`: expected count `2`. `[verified-by-test]`
