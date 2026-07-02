@@ -85,6 +85,70 @@ installed. This file records what that means for the remaining slices.
    A–F) and the field-read drop fix are complete; A6/A7/A8 are precision refinements
    (the current whole-base consume is conservative/safe), not soundness gaps.
 
+## Session state 2026-07-01 evening (A6/A7/A8 probes; resume here)
+
+- **A5 restore-list gap: RESOLVED, no restore.** `behav_mut_self_vec_owner_receiver.w`
+  cannot come back as a behavior test — its shape (move-self returning a `Vec[W]`
+  field) is deliberately rejected (#607 boundary, `SemaCheck.w` reject sites) and is
+  pinned by `err_move_out_vec_field_moveself.w`, which documents it flips back to a
+  behavior test (count 1) when #607 lands.
+- **A6 VERIFIED + FIXTURES LANDED (uncommitted).** All six shapes re-run heap-backed
+  under `--debug-alloc`: exact counts, leak 0. New fixtures for the uncovered shapes:
+  `da_drop_struct_tuple_field`, `da_drop_struct_option_field`,
+  `da_drop_nested_struct_tuple_field`, `behav_drop_struct_field_aggregates`, plus
+  README update. (Array/Vec/nested-Vec shapes were already pinned by existing da_.)
+- **A7 IS A REAL LEAK FAMILY — FIX IMPLEMENTED (uncommitted, build verifying).**
+  Every pattern-position discard orphans Drop values: `let (a,_)`, nested `_`,
+  `let {x, y: _}`, `let {x, ..}` , match arm `(a,_)`, and whole-subject `_` arm
+  (leaks the ENTIRE subject: `match make(): _ => ()` → 2 leaks). Root cause: the
+  consuming contexts (let-destructure/if-let/match, `MirLower.w` consume sites)
+  cancel the subject's drop while `lower_pattern` binds only NAMED elements; the
+  match consume comment documented the leak as a known follow-up. `let _ = expr`
+  (statement discard) and param patterns (`fn f({x, y: _}: P)`) were already sound.
+  FIX in `MirLower.w lower_pattern`: NK_PAT_WILDCARD moves a needs-value-drop
+  scrutinee into an anonymous drop-scheduled local (mirrors NK_PAT_IDENT; borrowed
+  subjects arrive ref-typed → untouched); NK_PAT_STRUCT `..` rest iterates
+  unmentioned fields via type reflection and does the same (by-value subjects only,
+  `pattern_subject_ref_mutability(scrutinee) < 0`). New fixtures (uncommitted):
+  `da_drop_wildcard_destructure`, `da_drop_match_wildcard_arm`,
+  `da_drop_struct_pat_rest`, `behav_drop_pattern_discard`.
+- **A-TAIL COMPLETE — ALL COMMITTED.** A6 fixtures `036bb50a`; A7 fix+fixtures
+  `0e22d06f`; A8 fix+fixtures `ca713079`. All gates green per cycle (fixpoint,
+  debug-alloc lane, 742+ behavior, all targets). Host note: `with build :test`
+  needs `WITH_MEMORY_LIMIT_BYTES=0` here — the limit trips AFTER "EMIT-C SMOKE
+  OK" in :test's final phase (known; feedback_bootstrap_sequence memory).
+  A8 final shape: NK_INDEX extraction materializes into a temp + blanks the
+  slot IMMEDIATELY (deferred pending-reset double-freed tail-position
+  extraction — consumed after scope drops); array keeps its guarded drop
+  (ever_moved). Codegen: zero-const struct store memset extended to PROJECTED
+  destinations (aggregate zeroinitializer left PADDING bytes unwritten →
+  rt_value_is_zero saw nonzero → drop on blanked value → null deref; lldb
+  verified 0xff padding). REMAINING FOLLOW-UPS: (a) bootstrap/seed update not
+  done this session (seed still pre-A7/A8; run the chain when convenient);
+  (b) comment/close-retarget #605/#606 on GitHub with the A6/A7/A8 record;
+  (c) enum-payload wildcard probe (`.A(a, _)` — covered by the A7 fix via
+  recursion but no fixture pins nominal-enum payload discard) and payload-rest
+  (`.A(a, ..)` if the syntax exists) — small fixture follow-up.
+- **A8 SPLIT VERDICT.** Tuple partial extraction ALREADY per-element precise
+  (`let a = t.0` → t.1 still drops; existing machinery: static field move + partial
+  base drop). ARRAY index extraction LEAKS siblings (`let a = arr[0]` → arr[1]
+  leaked): root cause is the documented whole-base consume in the NK_INDEX branch
+  of `MirLower.w lower_expr` (search "#606: moving a non-Copy element out of an
+  ARRAY"), which cancels the array's drop and returns OK_COPY. NEXT CYCLE fix
+  (designed, not yet applied): return OK_MOVE, push the index place onto
+  `pending_reset_field_places`/`_types` (unconditional slot blank at stmt boundary;
+  flush handles arbitrary places), `mark_local_ever_moved(base)` so the array's
+  kept drop stays guarded (`mir_emit_drop_array_ptr` → per-element
+  `mir_emit_guarded_user_drop` skips blanked slots), and DELETE the
+  cancel/mark-moved lines. Note `place_field_projection_count` returns -1 for index
+  projections so `consume_moved_operand` won't record bogus static marks. Probe
+  tail-position extraction (`return arr[0]`) for reset-before-scope-exit-drop
+  ordering. Existing pinned fixtures (extract-both, count 2) must stay green.
+- **Verification per cycle:** check src/main.w → build → :fixpoint →
+  :debug-alloc-tests → fresh :test → :test-green. Commit A6 fixtures and A7
+  fix+fixtures as separate commits after gates; A8 is its own cycle after.
+- Probes live in the session scratchpad (a6/, a7/, a8/) — regenerate trivially.
+
 ## Session state 2026-07-01 (saved before a host reboot; resume here)
 
 - **#617 — DONE end-to-end.** Three thread races in the comptime `parallel()`
