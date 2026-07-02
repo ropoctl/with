@@ -2245,9 +2245,12 @@ let s = sum(arr[..])      // slice of entire array
 let s2 = sum(arr[1..3])   // slice of elements 1, 2
 ```
 
-Slices are ephemeral (§5) — they cannot be stored in structs or
-returned from functions (they borrow the underlying storage).
-Bounds-checked in debug mode.
+Slices are ephemeral (§5) — they cannot be stored in structs (a
+persistent relationship to elements is what handles, §6, are for).
+Returning a slice from a function is checked by §21.1 Rule 6: the
+result is tied to the intersection of its possible origin parameters'
+lifetimes, and the program is rejected if any possible origin dies
+before the view's last use. Bounds-checked in debug mode.
 
 **Exclusivity rules for `[]mut T`:** a mutable slice is an exclusive
 view of its range. While a `[]mut T` is live (NLL: until its last
