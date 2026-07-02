@@ -7249,6 +7249,23 @@ fn MirBuilder.lower_pattern(self: MirBuilder, pat_node: i32, scrutinee_place: i3
             let raw = self.ast.get_extra(bind_start + bi)
             let inner_pat = self.pattern_payload_node(pat_node, raw)
             if inner_pat != 0 and self.ast.kind(inner_pat) == NodeKind.NK_PAT_REST:
+                // A7 (#606): `..` discards the remaining payload fields of the
+                // consumed variant; move each Drop one into an anonymous
+                // drop-scheduled local (same obligation as `_`). By-value
+                // subjects only — a borrowed subject keeps ownership.
+                if self.pattern_subject_ref_mutability(scrutinee_place) < 0:
+                    let rest_enum_ty = self.place_local_type(variant_subject_place)
+                    let rest_payloads = self.sema.enum_variant_payload_types(rest_enum_ty, variant_sym)
+                    var rpi = bi
+                    while rpi < rest_payloads.len() as i32:
+                        let rp_ty = rest_payloads.get(rpi as i64)
+                        if self.type_needs_value_drop(rp_ty) != 0:
+                            let rp_place = self.body.new_field_place(variant_place, rpi, rp_ty)
+                            let rp_local = self.body.new_local(rp_ty, 0, 0, 1)
+                            self.body.push_stmt(self.cur_bb, StmtKind.StorageLive, rp_local, 0, self.ast.get_start(pat_node))
+                            self.schedule_drop(rp_local, DropKind.DK_VALUE)
+                            self.assign_operand_to_place(self.place_for_local(rp_local), self.body.new_operand(OperandKind.OK_MOVE, rp_place), self.ast.get_start(pat_node))
+                        rpi = rpi + 1
                 continue
             let field_place = self.body.new_field_place(variant_place, bi, 0)
             let child_place = self.pattern_child_subject_place(scrutinee_place, field_place, self.ast.get_start(pat_node))
