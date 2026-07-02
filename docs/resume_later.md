@@ -85,6 +85,46 @@ installed. This file records what that means for the remaining slices.
    A–F) and the field-read drop fix are complete; A6/A7/A8 are precision refinements
    (the current whole-base consume is conservative/safe), not soundness gaps.
 
+## Session state 2026-07-01 (saved before a host reboot; resume here)
+
+- **#617 — DONE end-to-end.** Three thread races in the comptime `parallel()`
+  compile path fixed (`e8a01e48` rt sanity-check-under-lock, `da6176fb` Mir
+  cache spinlock + atomic `out/tmp/with_runtime` extraction via temp+rename +
+  temp-archive registry lock). Verified 0/45 repro runs (was ~50%), full gates
+  green, merged + pushed to `main`, **bootstrap completed**: seed `src/main` and
+  `~/.local/bin/with` (both 2026-07-01 ~20:20) carry the fixes; installed
+  compiler smoke-tested 3/3 clean on the 8-workspace `parallel()` stress repro.
+  #617 stays open only for the never-reproduced `with get` zlib symptom.
+  Full record: the 2026-07 comments on GitHub #617.
+- **#604 — decision brief delivered in-session, AWAITING MAINTAINER RULING.**
+  Recommendation: **Option A staged** — realize `[]mut T` per spec §4.8,
+  parameter-position first (coercion + `d1=1` slice creation from mutable
+  places + call-local §21.1 exclusivity; codegen unchanged — same fat-pointer
+  ABI). Spec review confirmed: §2.5's Vale-style "validity is a runtime fact"
+  covers owners (reset-on-move) and handles (per-slot generation) but
+  deliberately NOT borrows — the borrow row is ephemerality + §21.1 Rule 1
+  (view-liveness), which is existing, load-bearing machinery this extends.
+  `VecRange` was verified to snapshot `(data,offset,len)` — same hazard class
+  as a slice, no runtime validation — so blessing it (Option B) buys nothing.
+  On ruling: post the brief + ruling to #604, then implement staged.
+- **A6 — probe matrix run (2026-07-01): nested aggregate-in-struct-field drop
+  ALREADY WORKS.** Six probes (Drop type `W{id,slot}` adding `id` to a counter
+  in `fn drop`; struct dropped at scope exit): plain field → 1 ✓, tuple field
+  `(W,W)` → 3 ✓, array field `[W;2]` → 3 ✓, `Option[W]` field (Some) → 1 ✓,
+  `Vec[W]` field (2 elems) → 3 ✓, two-level `Outer{Inner{(W,W)}}` → 3 ✓.
+  Exact counts = no leak AND no double-free. So A6 is **verification + fixtures,
+  not implementation**: (a) re-run the matrix heap-backed under `--debug-alloc`
+  (leak-count oracle), (b) land the matrix as `behav_`/`da_` fixtures (+ restore
+  the missing `behav_mut_self_vec_owner_receiver.w` from the A5 list), (c) probe
+  A7 (wildcard/discard destructure) and A8 (partial extraction then drop) the
+  same way — the whole A-tail may already be delivered by the niche, reducing
+  #605/#606 to fixtures + close/retarget.
+- **Campaign status (docs/implementation_plan.md):** Phases 0–7, 10, 11 fully
+  closed. Remaining: Phase 8 = #348 (partial), #357 (partial), #604 (ruling),
+  #605/#606 (the A-tail above); Phase 9 = #369 (Windows); Phase 13 = 56
+  coverage-sweep test issues; ~44 open issues sit outside the plan → Phase 12
+  triage. Agreed order: A6→A7→A8, then #357/#348, then triage + sweep.
+
 ## Verification protocol (every change)
 
 `./out/release/bin/with check src/main.w` → `with build` → `with build :fixpoint`
