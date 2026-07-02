@@ -18,6 +18,16 @@ Approved plan: `/Users/eric/.claude/plans/anything-windows-specific-waits-until-
   rejection fixture (`err_destructure_vec_drop_field`) was missed on the first
   gate run → flipped to `behav_destructure_vec_drop_field`. Process lesson
   saved to memory: confirm "GATES EXIT: 0" as its own step BEFORE commit/close.
+- **Track 3a UPDATE (later 2026-07-02): increment 4 ALSO DONE (`f2b13386`).**
+  `owns:`/`borrows:` c_import annotation keys (parser → appended counted
+  record → Frontend readers → ci_set_owned_annotations bracket around
+  translation → consulted ahead of curated tables → in the cache key).
+  Increment 3 (refcount families) DEFERRED with design sketch posted to #357:
+  blocked on framework linking (verified CF doesn't link); the `owns:` surface
+  already covers +1 constructors; the open design is retain-over-type-family
+  (shared `CRef_<family>` wrapper). 3a is otherwise complete; #357 stays open
+  for refcounts + framework-linking prerequisite. NEXT: Track 3b (#348).
+  Bootstrap chain for `4a77a123` + `f2b13386` still pending.
 - **Track 3a increments 1+2 DONE (committed `4a77a123`, NOT yet bootstrapped).**
   Schema decision: kept the codebase's accessor-fn pattern (parallel curated
   tables) instead of the planned record schema — `ci_owned_borrow_param_ctor`
