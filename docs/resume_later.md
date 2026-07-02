@@ -165,7 +165,12 @@ installed. This file records what that means for the remaining slices.
   compiler smoke-tested 3/3 clean on the 8-workspace `parallel()` stress repro.
   #617 stays open only for the never-reproduced `with get` zlib symptom.
   Full record: the 2026-07 comments on GitHub #617.
-- **#604 — decision brief delivered in-session, AWAITING MAINTAINER RULING.**
+- **#604 — RULED 2026-07-02: Option A staged** (ruling posted to the issue;
+  Eric delegated the call via the spec-as-compass). Implement parameter-position
+  `[]mut T` first (coercion from mutable places, `d1=1` slice creation,
+  call-local §21.1 exclusivity, unchanged fat-pointer ABI), which unblocks
+  #379 `buf_out`; local-binding and return-position follow as separate
+  increments. `VecRange` stays internal. Original brief context below:
   Recommendation: **Option A staged** — realize `[]mut T` per spec §4.8,
   parameter-position first (coercion + `d1=1` slice creation from mutable
   places + call-local §21.1 exclusivity; codegen unchanged — same fat-pointer
