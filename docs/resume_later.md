@@ -1,4 +1,42 @@
-# Resume Later: Drop/Move Ownership — current state under the niche
+# Resume Later
+
+## Session state 2026-07-02 (post-A-tail campaign; resume here)
+
+Approved plan: `/Users/eric/.claude/plans/anything-windows-specific-waits-until-fancy-scott.md`
+(tracks, ordering, designs). Progress:
+
+- **Track 1 DONE + bootstrapped.** `[]mut T` stage 1 (`4188d5e7`): first
+  collection→slice call-site coercion (imm + mut), call-local §21.1 exclusivity
+  (`check_mut_slice_call_exclusivity`), `in_param_type_position` choke point,
+  MIR borrow-not-materialize lowering; 13 fixtures. buf_out (`8274956e`):
+  memset/explicit_bzero as `[]mut u8`; #379 commented. Callee-side slice
+  writes (`buf[i] = x`) already worked.
+- **Track 2 DONE + bootstrapped + #607 CLOSED.** Rejections removed
+  (`5f697306`) — the niche machinery already delivered all five shapes
+  (verified by probe before editing; no lowering changes). A5's
+  `behav_mut_self_vec_owner_receiver` restored and green. NOTE: a 4th stale
+  rejection fixture (`err_destructure_vec_drop_field`) was missed on the first
+  gate run → flipped to `behav_destructure_vec_drop_field`. Process lesson
+  saved to memory: confirm "GATES EXIT: 0" as its own step BEFORE commit/close.
+- **Track 3a increments 1+2 DONE (committed `4a77a123`, NOT yet bootstrapped).**
+  Schema decision: kept the codebase's accessor-fn pattern (parallel curated
+  tables) instead of the planned record schema — `ci_owned_borrow_param_ctor`
+  joins `ci_owned_return_destructor`. Borrow-params shipped: readdir/rewinddir
+  take `&COwned_opendir`, forward `.handle()`; safe-wrapper convention =
+  holding/returning a raw pointer is safe, deref unsafe. REMAINING 3a:
+  increment 3 refcount modeling — needs FAMILY-typed handles (CFRetain takes
+  any CFTypeRef; per-ctor tables don't fit; consider a curated type-family
+  table CFTypeRef→CFRelease with retain fns returning a second owned ref);
+  increment 4 `@[owned]`/`consumes` annotation evidence surface (greenfield).
+- **Track 3b NOT STARTED** (#348 clang Preprocessor shim; golden tests first —
+  see plan).
+- Run the bootstrap chain for `4a77a123`+ before or with the next increment.
+- Host rule: `WITH_MEMORY_LIMIT_BYTES=0` on every :test/:test-green/:last-green
+  step; bootstrap as ONE chain, no commits mid-chain.
+
+---
+
+# (Historical) Drop/Move Ownership — current state under the niche
 
 Resume record for the `docs/completed/drop-move-ownership.md` effort. **Updated
 2026-06-30 to the niche design.** The drop/move substrate is no longer built on runtime
