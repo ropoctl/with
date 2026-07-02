@@ -16,7 +16,7 @@
 > the niche instead — including conditional *field* moves (Slice E), via the
 > field-place niche. The M8 generator/async-state audit (Slice F) is also done:
 > async is fiber-based, so a `Drop` value across a suspend is preserved on the
-> fiber stack and the niche drops it normally. See `docs/resume_later.md` for the
+> fiber stack and the niche drops it normally. See `docs/completed/resume_later_2026-07.md` for the
 > current remaining item.
 
 ## Purpose
@@ -1033,7 +1033,7 @@ Implement the complete dynamic solution.
 > as the historical M7 record — the *behavior* they target (sound conditional
 > moves through if/match/loop, including conditional **field** moves, Slice E) is
 > delivered by the niche. The M8 generator-state audit (Slice F) is also complete
-> (async Drop-across-suspend is sound); see `docs/resume_later.md` for the current
+> (async Drop-across-suspend is sound); see `docs/completed/resume_later_2026-07.md` for the current
 > remaining item.
 
 Tasks:
