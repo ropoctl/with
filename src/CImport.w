@@ -43,6 +43,78 @@ fn ci_clear_no_methods():
     g_cimport_no_methods_all = 0
     g_cimport_no_methods_types = Vec.new()
 
+// #357 increment 4: per-import ownership annotations — the explicit-annotation
+// evidence source beside the curated tables (§16.3c). Set before translation,
+// cleared after, like no_methods.
+//   owns entry:    "ctor -> dtor"        (fn's returned pointer is owned;
+//                                         dtor releases it exactly once)
+//   borrows entry: "fn(pi) -> ctor"      (param pi borrows ctor's owned handle)
+var g_cimport_owns_ann: Vec[str] = Vec.new()
+var g_cimport_borrows_ann: Vec[str] = Vec.new()
+
+fn ci_set_owned_annotations(owns: Vec[str], borrows: Vec[str]):
+    g_cimport_owns_ann = owns
+    g_cimport_borrows_ann = borrows
+
+fn ci_clear_owned_annotations():
+    g_cimport_owns_ann = Vec.new()
+    g_cimport_borrows_ann = Vec.new()
+
+fn ci_ann_trim(s: str) -> str:
+    var b = 0 as i64
+    var e = s.len()
+    while b < e and (s.byte_at(b) == 32 or s.byte_at(b) == 9):
+        b = b + 1
+    while e > b and (s.byte_at(e - 1) == 32 or s.byte_at(e - 1) == 9):
+        e = e - 1
+    s.slice(b, e)
+
+// "lhs -> rhs" → lhs into out[0], rhs into out[1]; empty vec if malformed.
+fn ci_ann_split_arrow(entry: str) -> Vec[str]:
+    let out: Vec[str] = Vec.new()
+    var i = 0 as i64
+    while i + 1 < entry.len():
+        if entry.byte_at(i) == 45 and entry.byte_at(i + 1) == 62:
+            out.push(ci_ann_trim(entry.slice(0, i)))
+            out.push(ci_ann_trim(entry.slice(i + 2, entry.len())))
+            return out
+        i = i + 1
+    out
+
+// Annotated destructor for an owning constructor, or "".
+fn ci_ann_owned_return_destructor(name: str) -> str:
+    for i in 0..g_cimport_owns_ann.len() as i32:
+        let parts = ci_ann_split_arrow(g_cimport_owns_ann.get(i as i64))
+        if parts.len() == 2 and parts.get(0) == name:
+            return parts.get(1)
+    ""
+
+// Annotated borrow-param constructor for (name, pi), or "".
+fn ci_ann_borrow_param_ctor(name: str, pi: i32) -> str:
+    for i in 0..g_cimport_borrows_ann.len() as i32:
+        let parts = ci_ann_split_arrow(g_cimport_borrows_ann.get(i as i64))
+        if parts.len() != 2:
+            continue
+        let lhs = parts.get(0)
+        // lhs is "fn(pi)": find '(' and compare name + index.
+        var pp = 0 as i64
+        while pp < lhs.len() and lhs.byte_at(pp) != 40:
+            pp = pp + 1
+        if pp >= lhs.len():
+            continue
+        if ci_ann_trim(lhs.slice(0, pp)) != name:
+            continue
+        var qq = pp + 1
+        var idx = 0
+        var saw_digit = 0
+        while qq < lhs.len() and lhs.byte_at(qq) >= 48 and lhs.byte_at(qq) <= 57:
+            idx = idx * 10 + ((lhs.byte_at(qq) - 48) as i32)
+            saw_digit = 1
+            qq = qq + 1
+        if saw_digit != 0 and idx == pi:
+            return parts.get(1)
+    ""
+
 // True when auto-method/constructor generation is suppressed for `name`.
 fn ci_no_methods_for_type(name: str) -> bool:
     if g_cimport_no_methods_all != 0:
@@ -1286,6 +1358,10 @@ fn ci_local_storage_name(escaped: str, cursor: i32) -> str:
 // curated. Deterministic curated convention (shared schema with the #379 cstr/
 // buf overlays); name heuristics never insert cleanup on their own.
 fn ci_owned_return_destructor(name: str) -> str:
+    // Explicit annotation (owns:) outranks the curated convention (§16.3c).
+    let ann = ci_ann_owned_return_destructor(name)
+    if ann.len() > 0:
+        return ann
     if name == "strdup": return "free"
     if name == "strndup": return "free"
     // #357: stdio/dirent owning constructors — each returns an owned opaque handle
@@ -1302,6 +1378,10 @@ fn ci_owned_return_destructor(name: str) -> str:
 // wrapper accepts `&COwned_<ctor>` and forwards `.handle()`, so user code
 // never touches the raw handle. "" = not a borrow-param.
 fn ci_owned_borrow_param_ctor(name: str, pi: i32) -> str:
+    // Explicit annotation (borrows:) outranks the curated convention (§16.3c).
+    let ann = ci_ann_borrow_param_ctor(name, pi)
+    if ann.len() > 0:
+        return ann
     if name == "readdir" and pi == 0: return "opendir"
     if name == "rewinddir" and pi == 0: return "opendir"
     ""

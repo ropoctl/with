@@ -337,7 +337,17 @@ fn Zcu.expand_c_imports_frontend(self: Zcu, pool: AstPool) -> AstPool:
                 for nmi in 0..c_import_no_methods_count(nm_packed):
                     nm_types.push(frontend_owned_text(self.pool.resolve(out.get_extra(nm_base + nmi))))
                 ci_set_no_methods(c_import_no_methods_all(nm_packed), nm_types)
+                // #357: register this import's ownership annotations for the
+                // duration of translation (annotation evidence, §16.3c).
+                let ann_owns = frontend_new_vec_str()
+                for aoi in 0..self.c_import_owns_count_frontend(out, decl):
+                    ann_owns.push(frontend_owned_text(self.c_import_owns_entry_frontend(out, decl, aoi)))
+                let ann_borrows = frontend_new_vec_str()
+                for abi in 0..self.c_import_borrows_count_frontend(out, decl):
+                    ann_borrows.push(frontend_owned_text(self.c_import_borrows_entry_frontend(out, decl, abi)))
+                ci_set_owned_annotations(ann_owns, ann_borrows)
                 let libclang_result = process_c_import_with_defines(libclang_header_spec, self.project_config.c_import_defines)
+                ci_clear_owned_annotations()
                 ci_clear_no_methods()
                 if self.trace_c_import_cache != 0 and libclang_result.len() > 0:
                     runtime_eprint("c_import generated:")
@@ -443,6 +453,14 @@ fn Zcu.c_import_cache_key_frontend(self: Zcu, pool: AstPool, decl: i32, header_s
     let only_count = self.c_import_only_count_frontend(pool, decl)
     for oi in 0..only_count:
         key = key ++ "|" ++ self.c_import_only_name_frontend(pool, decl, oi)
+    // #357: ownership annotations shape the generated wrappers — a cached
+    // translation must not survive an annotation edit.
+    key = key ++ "\n#owns:"
+    for koi in 0..self.c_import_owns_count_frontend(pool, decl):
+        key = key ++ "|" ++ self.c_import_owns_entry_frontend(pool, decl, koi)
+    key = key ++ "\n#borrows:"
+    for kbi in 0..self.c_import_borrows_count_frontend(pool, decl):
+        key = key ++ "|" ++ self.c_import_borrows_entry_frontend(pool, decl, kbi)
     key = key ++ "\n#defines:"
     for di in 0..self.project_config.c_import_defines.len() as i32:
         key = key ++ "|" ++ self.project_config.c_import_defines.get(di as i64)
@@ -697,6 +715,26 @@ fn Zcu.c_import_only_count_frontend(self: Zcu, pool: AstPool, decl: i32) -> i32:
 
 fn Zcu.c_import_only_name_frontend(self: Zcu, pool: AstPool, decl: i32, idx: i32) -> str:
     self.pool.resolve(pool.get_extra(self.c_import_select_base_frontend(pool, decl) + 2 + idx))
+
+// #357 ownership-annotation record: [owns_count, owns..., borrows_count,
+// borrows...] follows the selective-import record [strict, only_count, only...].
+fn Zcu.c_import_ann_base_frontend(self: Zcu, pool: AstPool, decl: i32) -> i32:
+    let sel = self.c_import_select_base_frontend(pool, decl)
+    sel + 2 + pool.get_extra(sel + 1)
+
+fn Zcu.c_import_owns_count_frontend(self: Zcu, pool: AstPool, decl: i32) -> i32:
+    pool.get_extra(self.c_import_ann_base_frontend(pool, decl))
+
+fn Zcu.c_import_owns_entry_frontend(self: Zcu, pool: AstPool, decl: i32, idx: i32) -> str:
+    self.pool.resolve(pool.get_extra(self.c_import_ann_base_frontend(pool, decl) + 1 + idx))
+
+fn Zcu.c_import_borrows_count_frontend(self: Zcu, pool: AstPool, decl: i32) -> i32:
+    let ab = self.c_import_ann_base_frontend(pool, decl)
+    pool.get_extra(ab + 1 + pool.get_extra(ab))
+
+fn Zcu.c_import_borrows_entry_frontend(self: Zcu, pool: AstPool, decl: i32, idx: i32) -> str:
+    let ab = self.c_import_ann_base_frontend(pool, decl)
+    self.pool.resolve(pool.get_extra(ab + 2 + pool.get_extra(ab) + idx))
 
 // A produced declaration's bound name (fn/type/const/extern all store the
 // name symbol in d0). For `Type.method` names, the leading segment before the

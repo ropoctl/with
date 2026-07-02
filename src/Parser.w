@@ -2448,6 +2448,8 @@ fn Parser.parse_c_import(self: Parser, start: i32) -> NodeId:
     var no_methods_all = 0
     let only_names: Vec[i32] = Vec.new()
     var strict_flag = 0
+    let owns_entries: Vec[i32] = Vec.new()
+    let borrows_entries: Vec[i32] = Vec.new()
 
     while self.peek() == TokenKind.TK_COMMA:
         self.advance()
@@ -2568,6 +2570,43 @@ fn Parser.parse_c_import(self: Parser, start: i32) -> NodeId:
                 self.advance()
             else:
                 self.emit_error("expected true or false for strict")
+        else if key == "owns" or key == "borrows":
+            // #357: ownership annotations — owns: ["ctor -> dtor"],
+            // borrows: ["fn(pi) -> ctor"]. String or string array. (Two
+            // branches on push, not an aliased Vec binding: a copied Vec
+            // header would take the pushes and leave the original stale.)
+            if self.peek() == TokenKind.TK_L_BRACKET:
+                self.advance()
+                self.skip_newlines()
+                while self.peek() != TokenKind.TK_R_BRACKET and self.peek() != TokenKind.TK_EOF:
+                    if self.peek() == TokenKind.TK_STRING_LIT:
+                        let obs = self.current_start()
+                        let obe = self.current_end()
+                        let ob_sym = self.intern.intern(self.source.slice((obs + 1) as i64, (obe - 1) as i64))
+                        if key == "owns":
+                            owns_entries.push(ob_sym)
+                        else:
+                            borrows_entries.push(ob_sym)
+                        self.advance()
+                    else:
+                        self.emit_error("expected string literal in " ++ key)
+                        self.advance()
+                    self.skip_newlines()
+                    if self.peek() == TokenKind.TK_COMMA:
+                        self.advance()
+                        self.skip_newlines()
+                self.expect(TokenKind.TK_R_BRACKET)
+            else if self.peek() == TokenKind.TK_STRING_LIT:
+                let obs = self.current_start()
+                let obe = self.current_end()
+                let ob_sym = self.intern.intern(self.source.slice((obs + 1) as i64, (obe - 1) as i64))
+                if key == "owns":
+                    owns_entries.push(ob_sym)
+                else:
+                    borrows_entries.push(ob_sym)
+                self.advance()
+            else:
+                self.emit_error("expected a string literal or a string array for " ++ key)
         else:
             self.emit_error("unknown c_import option")
             while self.peek() != TokenKind.TK_COMMA and self.peek() != TokenKind.TK_R_PAREN and self.peek() != TokenKind.TK_EOF:
@@ -2588,6 +2627,15 @@ fn Parser.parse_c_import(self: Parser, start: i32) -> NodeId:
     self.pool.add_extra(only_names.len() as i32)
     for i in 0..only_names.len() as i32:
         self.pool.add_extra(only_names.get(i as i64))
+    // #357 ownership-annotation record: [owns_count, owns..., borrows_count,
+    // borrows...] appended after the selective-import record. Readers offset
+    // past strict + only using the stored counts.
+    self.pool.add_extra(owns_entries.len() as i32)
+    for i in 0..owns_entries.len() as i32:
+        self.pool.add_extra(owns_entries.get(i as i64))
+    self.pool.add_extra(borrows_entries.len() as i32)
+    for i in 0..borrows_entries.len() as i32:
+        self.pool.add_extra(borrows_entries.get(i as i64))
     self.pool.add_node(NodeKind.NK_C_IMPORT, start, self.prev_end(), header_sym, extra_start, pack_c_import_counts_ex(links.len() as i32, allow_untranslated.len() as i32, no_methods_types.len() as i32, no_methods_all))
 
 // ── let decl ─────────────────────────────────────────────────────
