@@ -1299,6 +1299,8 @@ fn ci_owned_return_destructor(name: str) -> str:
 fn ci_buf_count(name: str) -> i32:
     if name == "memchr": return 1
     if name == "memcmp": return 2
+    if name == "memset": return 1
+    if name == "explicit_bzero": return 1
     0
 
 fn ci_buf_ptr_idx(name: str, bi: i32) -> i32:
@@ -1306,19 +1308,22 @@ fn ci_buf_ptr_idx(name: str, bi: i32) -> i32:
     if name == "memcmp":
         if bi == 0: return 0
         return 1
+    if name == "memset": return 0
+    if name == "explicit_bzero": return 0
     -1
 
 fn ci_buf_len_idx(name: str, bi: i32) -> i32:
     if name == "memchr": return 2
     if name == "memcmp": return 2
+    if name == "memset": return 2
+    if name == "explicit_bzero": return 1
     -1
 
-// buf_out (mutable []mut u8) targets are intentionally not curated yet: With
-// cannot currently construct a []mut u8 argument, so a buf_out wrapper (e.g.
-// memset) would be uncallable and would regress the raw surface. Tracked as the
-// buf_out prerequisite; the generator below already handles is_mut so adding
-// entries is all that remains once []mut arguments exist.
+// buf_out (#379): a mutable buffer parameter models as `[]mut u8` — callable
+// since #604 stage 1 (Vec/array arguments coerce to []mut at the call site).
 fn ci_buf_is_mut(name: str, bi: i32) -> i32:
+    if name == "memset": return 1
+    if name == "explicit_bzero": return 1
     0
 
 // Buffer index whose ptr parameter is at position pi, or -1.
