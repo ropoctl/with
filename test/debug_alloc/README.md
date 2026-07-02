@@ -35,6 +35,14 @@ construction and escape shape: `leak count=0`, never `DOUBLE FREE`.
   `da_drop_tuple_field_extract_defer_return` cover path-sensitive cleanup for
   tuple field moves across early-return/fallthrough cleanup paths, including an
   active `defer`.
+- `da_drop_struct_tuple_field`, `da_drop_struct_option_field`, and
+  `da_drop_nested_struct_tuple_field` (A6) cover Drop values embedded in an
+  aggregate that is itself a struct field — a `(W, W)` tuple field, an
+  `Option[W]` field, and a tuple field two struct levels deep. Together with
+  `da_drop_array_field`, `da_vecdrop_struct_field_owned_elements`, and
+  `da_vecdrop_nested_struct_field` they pin the nested
+  aggregate-in-struct-field drop matrix: every element freed exactly once at
+  the owner's scope exit.
 - `da_drop_conditional_move_value` and `da_match_conditional_move_value` cover
   the runtime drop-flag path: whole `Drop` locals moved in one side of an `if`
   or one arm of a `match` are dropped exactly once on both moved and not-moved
