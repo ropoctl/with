@@ -182,9 +182,9 @@ raw C explicit and fail loudly on unsupported translation or ABI surfaces.
 
 Original issues:
 
-- [ ] `#348` c_import macro helpers still shell out to cc -E (macro `-dM` path done; migrator `preprocess_text` `cc -E` remains)
+- [x] `#348` c_import macro helpers still shell out to cc -E (CLOSED 2026-07-02, `53f48264`: pure-With `ci_expand_macros_in_text` over the libclang macro session replaced the cc -E dump; capture_command_stdout/append_cc_common_args deleted — no shell-out remains in c_import/migrate)
 - [x] `#349` Darwin c_import SDK discovery still shells out to xcrun
-- [ ] `#357` Replace heuristic c_import auto-defer with proven-ownership Drop wrappers (removal half done; positive path FIRST INCREMENT shipped: curated owning-wrapper generation for strdup/strndup→free — `ci_owned_return_destructor` + `ci_emit_owning_wrapper` in CImport.w emit a `COwned_<fn>` type with `impl Drop`. Broader curated coverage (fopen/fclose…), refcount modeling, and an annotation/metadata evidence surface remain)
+- [ ] `#357` Replace heuristic c_import auto-defer with proven-ownership Drop wrappers (2026-07-02: owning wrappers strdup/fopen-family shipped; borrow-params shipped `4a77a123` (readdir/rewinddir take `&COwned_opendir`); `owns:`/`borrows:` annotation evidence surface shipped `f2b13386`. REMAINING: refcount family modeling — blocked on framework linking; design on the issue)
 - [x] `#379` Curated libc contract overlay for c_import modeled surfaces (cstr_in + nullable_ptr + buf_in shipped; buf_out → #604, owned returns → #357)
 - [x] `#426` Bug: str→C-string conversion ignores interior NUL (§16.3c)
 - [x] `#427` String conversion APIs: CString, .to_cstring()/.as_cstr(), .as_view()/.to_owned() (§15.1–§15.3)
@@ -204,9 +204,9 @@ Discovered during Phase 8 (FFI safety substrate; part of this phase):
 
 - [x] `#601` Match-arm pattern bindings dropped on every path (Result/enum drop corruption)
 - [x] `#603` c_import macro collection made libclang-only (toward #348)
-- [ ] `#604` `[]mut T` arguments: collection→mutable-slice coercion missing (blocks #379 buf_out; cross-function mutable-slice mechanism — language-design item)
-- [ ] `#605` Soundness: aggregate construction copies a non-Copy value instead of moving → double-free (struct/tuple/array/enum-variant construction now MOVE Drop values; transitive `Sema.type_needs_drop` predicate added; conservative whole-base consume at tuple field-access `pair.0` and array index extraction; A6/A7/A8 follow-ups CLOSED 2026-07-01: A6 verified+pinned, A7 pattern-discard leaks fixed (0e22d06f), A8 array-extract sibling leak fixed (ca713079); remaining: GitHub close/retarget only)
-- [ ] `#606` Soundness: Drop propagated through contents (tuple/array/enum + generic enums Option/Result now drop their contents — variant-aware enum drop + move/subject-consume at construction, match, if-let, let-else, and `?`). Update 2026-07-01: Vec[Drop] element drop shipped via the narrow gate (da_vecdrop_* lane green); nested aggregate-in-struct-field (A6), wildcard/`..` discard (A7), and partial-extraction (A8) all closed — commits 036bb50a/0e22d06f/ca713079. Remaining: GitHub close/retarget only
+- [x] `#604` `[]mut T` arguments (RULED Option A staged 2026-07-02; stage 1 SHIPPED `4188d5e7`: parameter-position []mut T, collection→slice call-site coercion, §21.1 call-local exclusivity; #379 buf_out unblocked and finished `8274956e`)
+- [x] `#605` Soundness: aggregate construction copies a non-Copy value instead of moving → double-free (struct/tuple/array/enum-variant construction now MOVE Drop values; transitive `Sema.type_needs_drop` predicate added; conservative whole-base consume at tuple field-access `pair.0` and array index extraction; A6/A7/A8 follow-ups CLOSED 2026-07-01: A6 verified+pinned, A7 pattern-discard leaks fixed (0e22d06f), A8 array-extract sibling leak fixed (ca713079); CLOSED on GitHub 2026-07-02)
+- [x] `#606` Soundness: Drop propagated through contents (tuple/array/enum + generic enums Option/Result now drop their contents — variant-aware enum drop + move/subject-consume at construction, match, if-let, let-else, and `?`). Update 2026-07-01: Vec[Drop] element drop shipped via the narrow gate (da_vecdrop_* lane green); nested aggregate-in-struct-field (A6), wildcard/`..` discard (A7), and partial-extraction (A8) all closed — commits 036bb50a/0e22d06f/ca713079. CLOSED on GitHub 2026-07-02; #607 lifted separately `5f697306`
 
 ## Phase 9: Async, Fibers, Channels, and Concurrency Runtime
 
