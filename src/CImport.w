@@ -1296,6 +1296,23 @@ fn ci_owned_return_destructor(name: str) -> str:
     if name == "opendir": return "closedir"
     ""
 
+// #357 increment 2: curated borrow-params — this C function BORROWS the owned
+// resource created by the named constructor at parameter `pi` (it reads or
+// advances the resource but does not release or retain it). The generated
+// wrapper accepts `&COwned_<ctor>` and forwards `.handle()`, so user code
+// never touches the raw handle. "" = not a borrow-param.
+fn ci_owned_borrow_param_ctor(name: str, pi: i32) -> str:
+    if name == "readdir" and pi == 0: return "opendir"
+    if name == "rewinddir" and pi == 0: return "opendir"
+    ""
+
+fn ci_has_owned_borrow_param(session: i64, idx: i32, name: str) -> i32:
+    let n = with_cimport_fn_param_count(session, idx)
+    for pi in 0..n:
+        if ci_owned_borrow_param_ctor(name, pi).len() > 0:
+            return 1
+    0
+
 fn ci_buf_count(name: str) -> i32:
     if name == "memchr": return 1
     if name == "memcmp": return 2
@@ -1474,6 +1491,56 @@ fn ci_emit_owning_wrapper(session: i64, idx: i32, name: str) -> str:
     out = out ++ "impl " ++ wrapper_ty ++ ":\n    fn handle(self: &Self) -> " ++ ret ++ ":\n        self.handle\n"
     out
 
+// #357 increment 2: a function with curated borrow-params is emitted as a safe
+// wrapper taking `&COwned_<ctor>` where the C signature takes the raw owned
+// handle. Requires the constructor's owning wrapper to have been emitted in
+// this import (else fall back to the raw surface — honest, same as before).
+// Non-borrow params pass through with their translated types; the wrapper is
+// safe iff none of them require the raw ABI (holding/returning a raw pointer
+// is safe — deref stays unsafe, matching the `.handle()` accessor convention).
+fn ci_emit_borrowing_wrapper(session: i64, idx: i32, name: str) -> str:
+    if with_cimport_fn_is_variadic(session, idx) != 0:
+        return ""
+    let safe_name = ci_escape_reserved(name)
+    let param_count = with_cimport_fn_param_count(session, idx)
+    let ret = ci_pointer_type_explicit_mut(with_cimport_fn_return_type_translated(session, idx))
+    if ci_starts_with(ret, "__UNSUPPORTED:"):
+        return ""
+    var raw_params = ""
+    var wrap_params = ""
+    var call_args = ""
+    for pi in 0..param_count:
+        let pname = with_cimport_fn_param_name(session, idx, pi)
+        let ptype = ci_pointer_type_explicit_mut(with_cimport_fn_param_type_translated(session, idx, pi))
+        if ci_starts_with(ptype, "__UNSUPPORTED:"):
+            return ""
+        let actual = ci_param_signature_name(ci_escape_reserved(pname), pi)
+        if pi > 0:
+            raw_params = raw_params ++ ", "
+            wrap_params = wrap_params ++ ", "
+            call_args = call_args ++ ", "
+        raw_params = raw_params ++ actual ++ ": " ++ ptype
+        let bctor = ci_owned_borrow_param_ctor(name, pi)
+        if bctor.len() > 0:
+            // The ctor's COwned type must exist in this import.
+            if with_cimport_is_name_emitted(bctor) == 0:
+                return ""
+            wrap_params = wrap_params ++ actual ++ ": &COwned_" ++ ci_escape_reserved(bctor)
+            call_args = call_args ++ actual ++ ".handle()"
+        else:
+            wrap_params = wrap_params ++ actual ++ ": " ++ ptype
+            call_args = call_args ++ actual
+    let raw_name = "__wc_brw_" ++ safe_name
+    var out = "@[link_name(\"" ++ name ++ "\")]\nextern fn " ++ raw_name ++ "(" ++ raw_params ++ ")"
+    if ret != "Unit":
+        out = out ++ " -> " ++ ret
+    out = out ++ "\n"
+    out = out ++ "fn " ++ safe_name ++ "(" ++ wrap_params ++ ")"
+    if ret != "Unit":
+        out = out ++ " -> " ++ ret
+    out = out ++ ":\n    unsafe { " ++ raw_name ++ "(" ++ call_args ++ ") }\n"
+    out
+
 fn ci_translate_function(session: i64, idx: i32, known_structs: str) -> str:
     // B9: fresh per-function temp counter.
     ci_temp_reset()
@@ -1538,6 +1605,14 @@ fn ci_translate_function(session: i64, idx: i32, known_structs: str) -> str:
         if bw.len() > 0:
             with_cimport_mark_name_emitted(name)
             return bw
+
+    // #357 increment 2: a curated borrow-param function is emitted as a safe
+    // wrapper over the raw extern, taking &COwned_<ctor> for the owned handle.
+    if ci_has_owned_borrow_param(session, idx, name) != 0:
+        let brw = ci_emit_borrowing_wrapper(session, idx, name)
+        if brw.len() > 0:
+            with_cimport_mark_name_emitted(name)
+            return brw
 
     // #357: a curated owning constructor becomes an owning-wrapper type whose
     // Drop releases the C resource exactly once.
