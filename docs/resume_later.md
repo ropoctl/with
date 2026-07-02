@@ -38,7 +38,14 @@ Approved plan: `/Users/eric/.claude/plans/anything-windows-specific-waits-until-
   any CFTypeRef; per-ctor tables don't fit; consider a curated type-family
   table CFTypeRef→CFRelease with retain fns returning a second owned ref);
   increment 4 `@[owned]`/`consumes` annotation evidence surface (greenfield).
-- **Track 3b ROUTE RULED, implementation next session (#348).** Plan's premise
+- **Track 3b DONE — #348 CLOSED (`53f48264`).** Pure-With expander
+  (`ci_expand_macros_in_text`) replaced the cc -E dump; every consumer already
+  held its raw text. Exec machinery deleted (with_cimport_preprocess_text,
+  capture_command_stdout, append_cc_common_args, line-marker parsers, weak
+  stub). Goldens byte-identical pre/post (test/migrate/issue348_*.c). No
+  shell-out remains in c_import/migrate. Bootstrap pending for this commit.
+  (Superseded route note below:)
+- **(superseded) Track 3b ROUTE RULED (#348).** Plan's premise
   was WRONG: clang_bridge.o is compiled from ClangBridge.w — the bridge is
   pure With over libclang's C API; no C++ shim exists, and clang's
   Preprocessor/-E is C++-only (not in the C API). Ruled route (c') on the
