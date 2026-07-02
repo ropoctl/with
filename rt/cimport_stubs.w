@@ -387,7 +387,6 @@ fn str_c() -> str: "c"
     let _ = names
     empty_str()
 
-@[weak] pub fn with_cimport_preprocess_text(h: str) -> str:
     let _ = h
     empty_str()
 

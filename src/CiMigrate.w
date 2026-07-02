@@ -889,7 +889,7 @@ fn ci_migrate_file_inner(input_path: str, output_path: str, project_active: bool
     ci_migrate_reset_fn_counts()
     ci_migrate_libc_reset()
     ci_migrate_reset_unsafe_extern_fns()
-    g_migrate_preprocessed_source = ""
+    g_migrate_raw_source = ""
     g_migrate_current_input_path = ""
 
     // Reset name tracking state for fresh migration
@@ -904,19 +904,19 @@ fn ci_migrate_file_inner(input_path: str, output_path: str, project_active: bool
         return 1
     let source_prefix = ci_migrate_source_prefix()
     g_migrate_current_input_path = input_path
-    g_migrate_preprocessed_source = with_cimport_preprocess_text(source)
+    g_migrate_raw_source = source
 
     // Pass to libclang via cimport_parse
     let session = with_cimport_parse(source)
     if session == 0:
-        g_migrate_preprocessed_source = ""
+        g_migrate_raw_source = ""
         g_migrate_current_input_path = ""
         eprint("migrate: failed to parse " ++ input_path)
         return 1
 
     let err_msg = with_cimport_error(session)
     if err_msg.len() > 0:
-        g_migrate_preprocessed_source = ""
+        g_migrate_raw_source = ""
         g_migrate_current_input_path = ""
         eprint("migrate: parse error: " ++ err_msg)
         with_cimport_dispose(session)
@@ -1026,7 +1026,7 @@ fn ci_migrate_file_inner(input_path: str, output_path: str, project_active: bool
         g_migrate_macro_values = ""
         g_migrate_macro_miss_names = Vec.new()
         g_migrate_macro_session = 0
-        g_migrate_preprocessed_source = ""
+        g_migrate_raw_source = ""
         g_migrate_current_input_path = ""
         g_macro_type_names = ""
         g_macro_type_aliases = ""
@@ -1043,7 +1043,7 @@ fn ci_migrate_file_inner(input_path: str, output_path: str, project_active: bool
     g_migrate_macro_values = ""
     g_migrate_macro_miss_names = Vec.new()
     g_migrate_macro_session = 0
-    g_migrate_preprocessed_source = ""
+    g_migrate_raw_source = ""
     g_migrate_current_input_path = ""
     g_macro_type_names = ""
     g_macro_type_aliases = ""
@@ -1072,7 +1072,7 @@ fn ci_migrate_file_inner(input_path: str, output_path: str, project_active: bool
         g_migrate_macro_values = ""
         g_migrate_macro_miss_names = Vec.new()
         g_migrate_macro_session = 0
-        g_migrate_preprocessed_source = ""
+        g_migrate_raw_source = ""
         g_migrate_current_input_path = ""
         return 1
 

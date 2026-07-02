@@ -20,7 +20,6 @@ extern fn readdir(dirp: *mut u8) -> *mut u8
 extern fn closedir(dirp: *mut u8) -> i32
 extern fn strtod(str: *const u8, endptr: *mut *mut u8) -> f64
 extern fn realpath(path: *const u8, resolved_name: *mut u8) -> *mut u8
-extern fn with_exec_argv_capture(args: str, stdout_path: str, stderr_path: str, timeout_ms: i32) -> i32
 extern fn with_fs_read_file(path: str) -> str
 extern fn with_fs_remove_file(path: str) -> i32
 extern fn with_fs_file_exists(path: str) -> i32
@@ -623,47 +622,9 @@ unsafe fn copy_first_line_to_buf(text: str, dst: *mut u8, cap: i64) -> i32:
     *((dst as i64 + i) as *mut u8) = 0
     if i > 0: 1 else: 0
 
-unsafe fn append_argv_arg(argv: str, arg: str) -> str:
-    argv ++ arg ++ "\0"
-
 unsafe fn c_path_to_str(path: *const u8) -> str:
     make_str(path)
 
-unsafe fn capture_command_stdout(argv: str, template_path: *mut u8, timeout_ms: i32) -> str:
-    let fd = mkstemp(template_path)
-    if fd < 0:
-        return ""
-    let _ = rt_close(fd)
-    let out_path = c_path_to_str(template_path)
-    let err_path = if with_sysinfo_os() == "Windows": "NUL" else: "/dev/null"
-    let rc = with_exec_argv_capture(argv, out_path, err_path, timeout_ms)
-    if rc != 0:
-        let _remove_failed = with_fs_remove_file(out_path)
-        return ""
-    let output = with_fs_read_file(out_path)
-    let _remove = with_fs_remove_file(out_path)
-    output
-
-unsafe fn append_cc_common_args(argv: str) -> str:
-    var out = argv
-    let sysroot = get_sdk_path()
-    if sysroot as i64 != 0:
-        out = append_argv_arg(out, "-isysroot")
-        out = append_argv_arg(out, make_str(sysroot))
-    var ip: i32 = 0
-    while ip < g_cimport_include_count:
-        out = append_argv_arg(out, "-I")
-        out = append_argv_arg(out, make_str(g_cimport_include_paths[ip as i64] as *const u8))
-        ip = ip + 1
-    out
-
-// ── SDK path detection ──────────────────────────────────────────
-
-// §16.1: the target macOS SDK is a *target input*, resolved without spawning a
-// host tool. Order: explicit env (WITH_SDKROOT / Xcode-populated SDKROOT) →
-// with.toml [c_import] sdk_path → well-known Command-Line-Tools / Xcode SDK
-// paths (existence stat, never a process spawn). Pure-local-header imports keep
-// working with no SDK at all (returns 0 → no -isysroot).
 unsafe fn get_sdk_path() -> *const u8:
     if with_sysinfo_os() != "Macos":
         return 0 as *const u8
@@ -2305,38 +2266,6 @@ pub fn with_cimport_parse_macros(header_code: str) -> i64:
         // c_import header-parse diagnostic surfaces that loudly. Return the
         // empty session rather than a second engine that can disagree.
         ms as i64
-
-pub fn with_cimport_preprocess_text(source_code: str) -> str:
-    unsafe:
-        var template_path: [4096]u8 = [0 as u8; 4096]
-        let tmpl = "/tmp/with_cimport_pp_XXXXXX\0"
-        let tp = *(&tmpl as *const *const u8)
-        with_memcpy(&raw mut template_path as *mut [4096]u8 as *mut u8, tp, 28)
-        let fd = mkstemp(&raw mut template_path as *mut [4096]u8 as *mut u8)
-        if fd < 0:
-            return ""
-
-        let src_ptr = *(&source_code as *const *const u8)
-        let _ = rt_write(fd, src_ptr, source_code.len() as u64)
-        let _ = rt_write(fd, "\n\0" as *const u8, 1 as u64)
-        let _ = rt_close(fd)
-
-        var argv = ""
-        argv = append_argv_arg(argv, "cc")
-        argv = append_cc_common_args(argv)
-        argv = append_argv_arg(argv, "-E")
-        argv = append_argv_arg(argv, "-x")
-        argv = append_argv_arg(argv, "c")
-        argv = append_argv_arg(argv, make_str(&template_path as *const [4096]u8 as *const u8))
-
-        var out_template: [4096]u8 = [0 as u8; 4096]
-        let out_tmpl = "/tmp/with_cimport_ppout_XXXXXX\0"
-        let out_tp = *(&out_tmpl as *const *const u8)
-        with_memcpy(&raw mut out_template as *mut [4096]u8 as *mut u8, out_tp, 31)
-        let result = capture_command_stdout(argv, &raw mut out_template as *mut [4096]u8 as *mut u8, 120000)
-        let _ = unlink(&template_path as *const [4096]u8 as *const u8)
-
-        result
 
 pub fn with_cimport_collect_object_macro_types(header_code: str, macro_names: str) -> str:
     unsafe:

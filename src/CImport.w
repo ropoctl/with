@@ -11747,6 +11747,81 @@ fn ci_lookup_macro_value(session: i64, name: str) -> str:
     g_migrate_macro_miss_names.push(ci_ir_owned_text(name))
     ""
 
+// #348: is `name` a function-like macro in the session? (by-name variant of
+// with_cimport_macro_is_fn_like).
+fn ci_macro_is_fn_like_name(session: i64, name: str) -> i32:
+    if session == 0 or name.len() == 0:
+        return 0
+    let count = with_cimport_macro_count(session)
+    var i = 0
+    while i < count:
+        if with_cimport_macro_name(session, i) == name:
+            return with_cimport_macro_is_fn_like(session, i)
+        i = i + 1
+    0
+
+// #348: expand object-like macro references in a raw-source snippet using the
+// libclang macro session — the pure-With replacement for slicing a `cc -E`
+// dump (§16.1: no host compiler). String literals pass through verbatim; a
+// function-like macro INVOCATION cannot be expanded here and returns "" so
+// callers surface their existing not-recoverable handling loudly (stringify
+// chains have their own dedicated path). Depth-capped against
+// self-referential macros.
+fn ci_expand_macros_in_text(session: i64, text: str) -> str:
+    ci_expand_macros_in_text_depth(session, text, 0)
+
+fn ci_expand_macros_in_text_depth(session: i64, text: str, depth: i32) -> str:
+    if depth > 16:
+        return ""
+    var result = ""
+    var pos = 0
+    let tlen = text.len() as i32
+    while pos < tlen:
+        let b = text.byte_at(pos as i64)
+        if b == 34 or b == 39:
+            var send = pos + 1
+            while send < tlen:
+                let sb = text.byte_at(send as i64)
+                if sb == 92:
+                    send = send + 2
+                    continue
+                if sb == b:
+                    send = send + 1
+                    break
+                send = send + 1
+            if send > tlen:
+                send = tlen
+            result = result ++ text.slice(pos as i64, send as i64)
+            pos = send
+            continue
+        if ci_is_ident_start(b):
+            var end = pos + 1
+            while end < tlen and ci_is_ident_char(text.byte_at(end as i64)):
+                end = end + 1
+            let ident = text.slice(pos as i64, end as i64)
+            if ci_macro_is_fn_like_name(session, ident) != 0:
+                var pk = end
+                while pk < tlen and (text.byte_at(pk as i64) == 32 or text.byte_at(pk as i64) == 9):
+                    pk = pk + 1
+                if pk < tlen and text.byte_at(pk as i64) == 40:
+                    return ""
+                result = result ++ ident
+                pos = end
+                continue
+            let val = ci_lookup_macro_value(session, ident)
+            if val.len() > 0:
+                let expanded = ci_expand_macros_in_text_depth(session, val, depth + 1)
+                if expanded.len() == 0 and ci_trim(val).len() > 0:
+                    return ""
+                result = result ++ expanded
+            else:
+                result = result ++ ident
+            pos = end
+        else:
+            result = result ++ text.slice(pos as i64, (pos + 1) as i64)
+            pos = pos + 1
+    result
+
 fn ci_macro_miss_contains(name: str) -> bool:
     var i: i64 = 0
     while i < g_migrate_macro_miss_names.len():
@@ -11913,62 +11988,14 @@ fn ci_string_sequence_at(s: str, start: i32) -> str:
         pos = end
     result
 
-fn ci_preprocessed_text_at_location(loc: str, raw_src: str) -> str:
-    if g_migrate_preprocessed_source.len() == 0 or raw_src.len() == 0 or loc.len() == 0:
-        return ""
-    let last_colon = ci_find_last_char(loc, 58)
-    if last_colon < 0:
-        return ""
-    let path_and_line = loc.slice(0, last_colon as i64)
-    let second_colon = ci_find_last_char(path_and_line, 58)
-    if second_colon < 0:
-        return ""
-    let target_file_raw = path_and_line.slice(0, second_colon as i64)
-    let target_file_real = ci_realpath_cached(target_file_raw)
-    let target_file = if target_file_real.len() > 0: target_file_real else: target_file_raw
-    let start_line = ci_parse_i64(path_and_line.slice((second_colon + 1) as i64, path_and_line.len())) as i32
-    if start_line <= 0:
-        return ""
-    let target_end_line = start_line + ci_count_substring(raw_src, "\n")
-
-    var collected_parts: Vec[str] = Vec.new()
-    var current_file = ""
-    var current_file_real = ""
-    var current_line = 1
-    var pos = 0
-    let plen = g_migrate_preprocessed_source.len() as i32
-    while pos <= plen:
-        var end = pos
-        while end < plen and g_migrate_preprocessed_source.byte_at(end as i64) != 10:
-            end = end + 1
-        let line = g_migrate_preprocessed_source.slice(pos as i64, end as i64)
-        let trimmed = ci_trim(line)
-        if trimmed.len() > 0 and trimmed.byte_at(0) == 35:
-            let marker_line = ci_parse_line_marker_number(trimmed)
-            let marker_file = ci_parse_line_marker_file(trimmed)
-            if marker_line > 0 and marker_file.len() > 0:
-                current_line = marker_line
-                current_file = marker_file
-                let marker_real = ci_realpath_cached(marker_file)
-                current_file_real = if marker_real.len() > 0: marker_real else: marker_file
-        else:
-            if (current_file == target_file or current_file_real == target_file) and current_line >= start_line and current_line <= target_end_line:
-                collected_parts.push(line)
-                collected_parts.push("\n")
-            current_line = current_line + 1
-        if end >= plen:
-            break
-        pos = end + 1
-    ci_trim(collected_parts.join(""))
-
 fn ci_preprocessed_text_for_cursor(session: i64, cursor: i32, raw_src: str) -> str:
-    let expansion = ci_preprocessed_text_at_location(with_ci_cursor_expansion_location(session, cursor), raw_src)
-    if expansion.len() > 0:
-        return expansion
-    let spelling = ci_preprocessed_text_at_location(with_ci_cursor_spelling_location(session, cursor), raw_src)
-    if spelling.len() > 0:
-        return spelling
-    ci_preprocessed_text_at_location(with_ci_cursor_location(session, cursor), raw_src)
+    // #348: the raw source of the construct is already in hand — expand its
+    // macro references directly from the session instead of slicing a cc -E
+    // dump by cursor location. (cursor retained for signature stability.)
+    let _ = cursor
+    if g_migrate_raw_source.len() == 0 or raw_src.len() == 0:
+        return ""
+    ci_expand_macros_in_text(session, raw_src)
 
 fn ci_preprocessed_string_sequence_for_cursor(session: i64, cursor: i32, raw_src: str) -> str:
     let preprocessed = ci_preprocessed_text_for_cursor(session, cursor, raw_src)
@@ -12198,37 +12225,6 @@ fn ci_extract_var_initializer_text(s: str) -> str:
         end = end - 1
     ci_trim(text.slice((eq_pos + 1) as i64, end as i64))
 
-fn ci_parse_line_marker_file(line: str) -> str:
-    let first_quote = ci_find_substr(line, "\"")
-    if first_quote < 0:
-        return ""
-    let rest = line.slice((first_quote + 1) as i64, line.len())
-    let second_quote = ci_find_substr(rest, "\"")
-    if second_quote < 0:
-        return ""
-    rest.slice(0, second_quote as i64)
-
-fn ci_parse_line_marker_number(line: str) -> i32:
-    var i = 0
-    let slen = line.len() as i32
-    while i < slen and ci_is_space(line.byte_at(i as i64)):
-        i = i + 1
-    if i < slen and line.byte_at(i as i64) == 35:
-        i = i + 1
-    while i < slen and ci_is_space(line.byte_at(i as i64)):
-        i = i + 1
-    if i + 4 <= slen and line.slice(i as i64, (i + 4) as i64) == "line":
-        i = i + 4
-    while i < slen and ci_is_space(line.byte_at(i as i64)):
-        i = i + 1
-    let start = i
-    while i < slen and line.byte_at(i as i64) >= 48 and line.byte_at(i as i64) <= 57:
-        i = i + 1
-    if i <= start:
-        return -1
-    let num_str = line.slice(start as i64, i as i64)
-    ci_parse_i64(num_str) as i32
-
 fn ci_array_element_type(ty: str) -> str:
     if ty.len() == 0 or ty.byte_at(0) != 91:
         return ""
@@ -12450,63 +12446,23 @@ fn ci_translate_c_initializer_for_cursor_type(session: i64, init_src: str, ty: s
     ""
 
 fn ci_preprocess_initializer_text(session: i64, var_cursor: i32, raw_decl_src: str) -> str:
-    if g_migrate_preprocessed_source.len() == 0 or g_migrate_current_input_path.len() == 0 or raw_decl_src.len() == 0:
+    // #348: expand the raw declaration text directly from the macro session
+    // instead of slicing a cc -E dump by cursor location.
+    let _ = var_cursor
+    if g_migrate_raw_source.len() == 0 or g_migrate_current_input_path.len() == 0 or raw_decl_src.len() == 0:
         return ""
-    var loc = with_ci_cursor_expansion_location(session, var_cursor)
-    if loc.len() == 0:
-        loc = with_ci_cursor_location(session, var_cursor)
-    let last_colon = ci_find_last_char(loc, 58)
-    if last_colon < 0:
+    let expanded_decl = ci_expand_macros_in_text(session, raw_decl_src)
+    if ci_trim(expanded_decl).len() == 0:
         return ""
-    let path_and_line = loc.slice(0, last_colon as i64)
-    let second_colon = ci_find_last_char(path_and_line, 58)
-    if second_colon < 0:
-        return ""
-    let target_file_raw = path_and_line.slice(0, second_colon as i64)
-    let target_file_real = ci_realpath_cached(target_file_raw)
-    let target_file = if target_file_real.len() > 0: target_file_real else: target_file_raw
-    let start_line = ci_parse_i64(path_and_line.slice((second_colon + 1) as i64, path_and_line.len())) as i32
-    if start_line <= 0:
-        return ""
-    let target_end_line = start_line + ci_count_substring(raw_decl_src, "\n")
-
-    var collected_parts: Vec[str] = Vec.new()
-    var current_file = ""
-    var current_file_real = ""
-    var current_line = 1
-    var pos = 0
-    let plen = g_migrate_preprocessed_source.len() as i32
-    while pos <= plen:
-        var end = pos
-        while end < plen and g_migrate_preprocessed_source.byte_at(end as i64) != 10:
-            end = end + 1
-        let line = g_migrate_preprocessed_source.slice(pos as i64, end as i64)
-        let trimmed = ci_trim(line)
-        if trimmed.len() > 0 and trimmed.byte_at(0) == 35:
-            let marker_line = ci_parse_line_marker_number(trimmed)
-            let marker_file = ci_parse_line_marker_file(trimmed)
-            if marker_line > 0 and marker_file.len() > 0:
-                current_line = marker_line
-                current_file = marker_file
-                let marker_real = ci_realpath_cached(marker_file)
-                current_file_real = if marker_real.len() > 0: marker_real else: marker_file
-        else:
-            if (current_file == target_file or current_file_real == target_file) and current_line >= start_line and current_line <= target_end_line:
-                collected_parts.push(line)
-                collected_parts.push("\n")
-            current_line = current_line + 1
-        if end >= plen:
-            break
-        pos = end + 1
-    let preprocessed_decl = ci_trim(collected_parts.join(""))
-    if preprocessed_decl.len() == 0:
-        return ""
-    ci_extract_var_initializer_text(preprocessed_decl)
+    ci_extract_var_initializer_text(ci_trim(expanded_decl))
 
 fn ci_preprocessed_var_initializer_by_name(var_name: str) -> str:
-    if g_migrate_preprocessed_source.len() == 0 or var_name.len() == 0:
+    // #348: scan the RAW migrate source for the declaration, then expand the
+    // extracted initializer from the macro session (was: scan the cc -E dump,
+    // already expanded).
+    if g_migrate_raw_source.len() == 0 or var_name.len() == 0:
         return ""
-    let s = g_migrate_preprocessed_source
+    let s = g_migrate_raw_source
     let slen = s.len() as i32
     let nlen = var_name.len() as i32
     var i = 0
@@ -12582,7 +12538,7 @@ fn ci_preprocessed_var_initializer_by_name(var_name: str) -> str:
                             end = end + 1
                             continue
                         if ch == 59 and paren_depth == 0 and bracket_depth == 0 and brace_depth == 0:
-                            return ci_trim(s.slice((eq_pos + 1) as i64, end as i64))
+                            return ci_trim(ci_expand_macros_in_text(g_migrate_macro_session, ci_trim(s.slice((eq_pos + 1) as i64, end as i64))))
                         if ch == 40: paren_depth = paren_depth + 1
                         if ch == 41 and paren_depth > 0: paren_depth = paren_depth - 1
                         if ch == 91: bracket_depth = bracket_depth + 1
@@ -12956,7 +12912,9 @@ fn ci_var_init_expr_for_type(session: i64, var_cursor: i32, scope: CiScope, targ
 var g_migrate_macro_values: str = ""
 var g_migrate_macro_miss_names: Vec[str] = Vec.new()
 var g_migrate_macro_session: i64 = 0
-var g_migrate_preprocessed_source: str = ""
+// #348: raw source of the file being migrated; macro expansion happens
+// on demand via ci_expand_macros_in_text (no cc -E dump).
+var g_migrate_raw_source: str = ""
 var g_migrate_current_input_path: str = ""
 var g_macro_type_names: str = ""
 var g_macro_type_aliases: str = ""
