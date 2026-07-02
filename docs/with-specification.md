@@ -3111,8 +3111,9 @@ Standard containers accept an optional allocator parameter.
 **Ephemeral virality with allocators:** If a container is initialized
 with a borrowed allocator (`&Arena`), the container stores the
 reference internally and becomes **ephemeral** (§5.2). This means
-it can only be used as a local variable — it cannot be stored in
-structs or returned from functions:
+it cannot be stored in structs, and returning it follows §5.2's
+ephemerality propagation (the caller's binding inherits the borrow;
+rejected if the allocator's lifetime cannot cover it):
 
 ```
 fn example(arena: &FrameArena):
