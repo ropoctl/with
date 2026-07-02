@@ -326,6 +326,14 @@ malformed. Users reach regex through `std.regex`, never through
 
 ## Self-Contained Toolchain (we build our own LLVM)
 
+**Not a single line of non-With code in this repo. We are 1000%
+self-hosted.** Inline/platform assembly (`.s`) is the only exception.
+No C, no C++, no glue files — external native libraries (libclang,
+LLVM) are reached through `extern fn` declarations in With, never
+through a shim written in another language. If a capability seems to
+require a C/C++ source file, the answer is a With-side implementation
+over the C API (or asm), or the capability waits.
+
 **After bootstrap the seed depends on nothing external from LLVM.** A
 hard invariant.
 
