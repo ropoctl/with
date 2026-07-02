@@ -38,8 +38,20 @@ Approved plan: `/Users/eric/.claude/plans/anything-windows-specific-waits-until-
   any CFTypeRef; per-ctor tables don't fit; consider a curated type-family
   table CFTypeRef→CFRelease with retain fns returning a second owned ref);
   increment 4 `@[owned]`/`consumes` annotation evidence surface (greenfield).
-- **Track 3b NOT STARTED** (#348 clang Preprocessor shim; golden tests first —
-  see plan).
+- **Track 3b ROUTE RULED, implementation next session (#348).** Plan's premise
+  was WRONG: clang_bridge.o is compiled from ClangBridge.w — the bridge is
+  pure With over libclang's C API; no C++ shim exists, and clang's
+  Preprocessor/-E is C++-only (not in the C API). Ruled route (c') on the
+  issue: a narrow With-side expander over the already-de-shelled
+  DetailedPreprocessingRecord covering the ACTUAL consumer inventory
+  (string-literal macro sequences + initializer text; consumers are
+  MIGRATE-ONLY — g_migrate_preprocessed_source set in ci_migrate_file);
+  function-like/## shapes fail loudly as untranslatable. Golden shapes
+  verified working today via `with migrate` (BANNER "== " NAME " ==" →
+  merged literal; k_tag initializer recovery). Order: golden .c fixtures in
+  test/migrate → expander → delete capture_command_stdout + cc -E, no
+  fallback. Note: test/migrate has no in-repo runner — check how goldens
+  gate before relying on them.
 - Run the bootstrap chain for `4a77a123`+ before or with the next increment.
 - Host rule: `WITH_MEMORY_LIMIT_BYTES=0` on every :test/:test-green/:last-green
   step; bootstrap as ONE chain, no commits mid-chain.
