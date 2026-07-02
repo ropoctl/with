@@ -1374,7 +1374,10 @@ fn Sema.collect_fn_decl(self: Sema, node: i32, is_local: i32, decl_index: i32):
         if is_local != 0:
             self.set_pretty_symbol(p_name_sym, self.extract_fn_param_name(node, pi))
         let p_type_node = self.ast.fn_param_type(param_start, pi)
+        // #604 stage 1: `[]mut T` is legal only here (signature param types).
+        self.in_param_type_position = self.in_param_type_position + 1
         let p_tid = self.resolve_type_expr(p_type_node)
+        self.in_param_type_position = self.in_param_type_position - 1
         if self.is_opaque_value_type(p_tid) != 0:
             self.emit_error("opaque types cannot be passed by value; use a pointer or reference", p_type_node)
         // Check for duplicate implicit parameter types (spec §F6)

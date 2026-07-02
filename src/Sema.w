@@ -679,6 +679,13 @@ type Sema {
     // Step fn 0 means builtin &/* deref; non-zero is a user Deref.deref fn.
     autoderef_step_starts: HashMap[i32, i32],
     autoderef_step_counts: HashMap[i32, i32],
+    // #604 stage 1: call-arg nodes coerced collection→slice (1=imm, 3=mut);
+    // consumed by MirLower.lower_call_arg to borrow the place instead of
+    // moving the collection.
+    slice_coerce_args: HashMap[i32, i32],
+    // #604 stage 1: >0 while resolving a function-signature parameter type —
+    // the only position where `[]mut T` is legal in this release.
+    in_param_type_position: i32,
     autoderef_step_fns: Vec[i32],
     autoderef_step_tys: Vec[i32],
     // Match value-pattern sidecar: pattern node → symbol compared by value.
@@ -1655,6 +1662,8 @@ fn sema_empty_state(pool: InternPool, diags: DiagnosticList, ast: AstPool) -> Se
         try_from_break_fns: sema_new_map_i32_i32(),
         autoderef_step_starts: sema_new_map_i32_i32(),
         autoderef_step_counts: sema_new_map_i32_i32(),
+        slice_coerce_args: sema_new_map_i32_i32(),
+        in_param_type_position: 0,
         autoderef_step_fns: Vec.new(),
         autoderef_step_tys: Vec.new(),
         pattern_value_syms: sema_new_map_i32_i32(),
@@ -4985,6 +4994,29 @@ fn Sema.types_compatible(self: Sema, expected: TypeId, actual: TypeId) -> i32:
     if exp_k == TypeKind.TY_REF:
         if self.get_type_d1(exp_r) == 0:
             if self.types_compatible(self.get_type_d0(exp_r), act_r):
+                return 1
+    0
+
+// #604 stage 1: a Vec[T] / [T; N] argument may coerce to a []T / []mut T
+// parameter — the first collection→slice coercion (slice→slice compat,
+// including the mut gate, stays in types_compatible). Element types must
+// match EXACTLY: a `[]mut` write goes back into the collection, so no
+// element widening is sound; the same exactness keeps the immutable case
+// symmetric.
+fn Sema.can_coerce_collection_to_slice(self: Sema, expected: TypeId, actual: TypeId) -> i32:
+    let exp_r = self.resolve_alias(expected)
+    if self.get_type_kind(exp_r) != TypeKind.TY_SLICE:
+        return 0
+    let want_elem = self.resolve_alias(self.get_type_d0(exp_r) as TypeId) as i32
+    let act_r = self.resolve_alias(actual)
+    let act_k = self.get_type_kind(act_r)
+    if act_k == TypeKind.TY_ARRAY:
+        if (self.resolve_alias(self.get_type_d0(act_r) as TypeId) as i32) == want_elem:
+            return 1
+        return 0
+    if act_k == TypeKind.TY_GENERIC_INST:
+        if self.get_type_d0(act_r) == self.syms.vec and self.get_generic_inst_arg_count(act_r as i32) > 0:
+            if (self.resolve_alias(self.get_generic_inst_arg(act_r as i32, 0) as TypeId) as i32) == want_elem:
                 return 1
     0
 

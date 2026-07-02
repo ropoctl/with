@@ -318,6 +318,103 @@ fn Sema.note_auto_ref_call_arg(self: Sema, expected: i32, actual: i32, arg_node:
         return
     self.check_borrow_create(arg_node, BorrowKind.SHARED, if err_node > 0: err_node else: arg_node)
 
+// #604 stage 1: a Vec/array argument coerces to a []T / []mut T parameter.
+// Returns 0 when the coercion does not apply (caller emits the ordinary
+// mismatch), 1 when handled as an immutable view, 2 when handled as a `[]mut`
+// view (caller collects it for the call-local exclusivity pass). The `[]mut`
+// case demands a mutable place — the split_at_mut receiver discipline — since
+// the callee writes into the caller's collection through the view.
+fn Sema.note_slice_coerce_call_arg(self: Sema, expected: i32, actual: i32, arg_node: i32, err_node: i32) -> i32:
+    if arg_node <= 0:
+        return 0
+    if self.can_coerce_collection_to_slice(expected as TypeId, actual as TypeId) == 0:
+        return 0
+    let sc_exp = self.resolve_alias(expected as TypeId)
+    let sc_is_mut = self.get_type_d1(sc_exp) != 0
+    let sc_packed = self.classify_place(arg_node)
+    if unpack_place_kind(sc_packed) == PlaceKind.PK_NotPlace:
+        self.emit_error("pass a named variable here: a temporary collection would be freed while the callee still uses it", err_node)
+        return 1
+    if sc_is_mut:
+        if unpack_place_mut(sc_packed) == PlaceMut.PM_ReadOnly or self.place_base_is_read_only_ref(arg_node) != 0:
+            self.emit_error("this argument is written in place ([]mut) and needs a mutable source", err_node)
+            return 1
+        self.check_mutation_against_views(arg_node, err_node)
+        self.slice_coerce_args.insert(arg_node, 3)
+        return 2
+    self.check_borrow_create(arg_node, BorrowKind.SHARED, if err_node > 0: err_node else: arg_node)
+    self.slice_coerce_args.insert(arg_node, 1)
+    1
+
+// Best-effort: does this expression read a binding rooted at `sym`? Used by
+// the call-local `[]mut` exclusivity pass. A miss here is an order-visibility
+// wart, not memory unsafety: a slice view cannot realloc or free its source,
+// so no dangling access is possible either way.
+fn Sema.expr_mentions_root_sym(self: Sema, node: i32, sym: i32) -> i32:
+    if node == 0 or sym == 0:
+        return 0
+    let kind = self.ast.kind(node)
+    if kind == NodeKind.NK_IDENT:
+        return if self.ast.get_data0(node) == sym: 1 else: 0
+    if kind == NodeKind.NK_CALL:
+        if self.expr_mentions_root_sym(self.ast.get_data0(node), sym) != 0:
+            return 1
+        let emc_start = self.ast.get_data1(node)
+        let emc_count = self.ast.get_data2(node)
+        for emi in 0..emc_count:
+            if self.expr_mentions_root_sym(self.ast.get_extra(emc_start + emi), sym) != 0:
+                return 1
+        return 0
+    if kind == NodeKind.NK_BINARY:
+        if self.expr_mentions_root_sym(self.ast.get_data1(node), sym) != 0:
+            return 1
+        return self.expr_mentions_root_sym(self.ast.get_data2(node), sym)
+    if kind == NodeKind.NK_UNARY:
+        return self.expr_mentions_root_sym(self.ast.get_data1(node), sym)
+    if kind == NodeKind.NK_FIELD_ACCESS or kind == NodeKind.NK_COMPUTED_FIELD_ACCESS or kind == NodeKind.NK_GROUPED or kind == NodeKind.NK_NO_SUSPEND or kind == NodeKind.NK_MOVE_ARG or kind == NodeKind.NK_COPY_ARG:
+        return self.expr_mentions_root_sym(self.ast.get_data0(node), sym)
+    if kind == NodeKind.NK_INDEX:
+        if self.expr_mentions_root_sym(self.ast.get_data0(node), sym) != 0:
+            return 1
+        return self.expr_mentions_root_sym(self.ast.get_data1(node), sym)
+    0
+
+// #604 / §21.1 call-local exclusivity: while a call writes through a `[]mut`
+// view of a place, no other argument of the same call may read or view an
+// overlapping part of that place. Diagnostics speak in terms of the user's
+// binding, not the type machinery.
+fn Sema.check_mut_slice_call_exclusivity(self: Sema, mut_args: Vec[i32], all_args: Vec[i32]):
+    for mi in 0..mut_args.len() as i32:
+        let m_node = mut_args.get(mi as i64)
+        let m_root = self.place_root_sym(m_node)
+        if m_root == 0:
+            continue
+        let m_name = self.pool_resolve(m_root)
+        let m_start = self.borrow_path_data.len() as i32
+        let m_count = self.borrow_collect_path(m_node)
+        var m_pos = -1
+        for pi in 0..all_args.len() as i32:
+            if all_args.get(pi as i64) == m_node:
+                m_pos = pi
+        for oi in 0..all_args.len() as i32:
+            let o_node = all_args.get(oi as i64)
+            if o_node == m_node or o_node == 0:
+                continue
+            var o_mut_coerced = 0
+            let o_entry = self.slice_coerce_args.get(o_node)
+            if o_entry.is_some() and o_entry.unwrap() >= 2:
+                o_mut_coerced = 1
+            if o_mut_coerced != 0:
+                // report each overlapping mut/mut pair once (from the earlier arg)
+                if oi > m_pos and self.place_root_sym(o_node) == m_root:
+                    let o_start = self.borrow_path_data.len() as i32
+                    let o_count = self.borrow_collect_path(o_node)
+                    if self.are_borrows_disjoint_paths(m_start, m_count, o_start, o_count) == 0:
+                        self.emit_error(f"`{m_name}` cannot be passed as `[]mut` twice in one call: the callee would hold two overlapping mutable views of it", o_node)
+                continue
+            if self.expr_mentions_root_sym(o_node, m_root) != 0:
+                self.emit_error(f"`{m_name}` cannot be read here while the callee is writing into it (`{m_name}` is passed as `[]mut`)", o_node)
+
 // ── Type expression resolution ───────────────────────────────────
 
 fn Sema.resolve_type_expr(self: Sema, node: i32) -> TypeId:
@@ -445,6 +542,11 @@ fn Sema.resolve_type_expr(self: Sema, node: i32) -> TypeId:
 
     if kind == NodeKind.NK_TYPE_SLICE:
         let elem = self.resolve_type_expr(self.ast.get_data0(node))
+        // #604 stage 1: `[]mut T` exists only as a function parameter type in
+        // this release — locals, returns, fields, and generic args would let
+        // the mutable view outlive its call-local exclusivity window.
+        if self.ast.get_data1(node) != 0 and self.in_param_type_position == 0:
+            self.emit_error("[]mut T can only be a function parameter type in this release; bind the collection itself here and pass it at the call site (#604)", node)
         return self.ensure_exact_type(TypeKind.TY_SLICE, elem as i32, self.ast.get_data1(node), 0)
 
     if kind == NodeKind.NK_TYPE_TUPLE:
@@ -12175,6 +12277,8 @@ fn Sema.check_call(self: Sema, node: i32) -> i32:
                         else:
                             self.emit_error(f"function '{fn_name}' expects {min_expected}-{expected} argument(s), found {actual}", node)
 
+        let sc_mut_args: Vec[i32] = Vec.new()
+        let sc_all_args: Vec[i32] = Vec.new()
         for ai in 0..resolved_arg_count:
             let param_i = ai + param_offset
             if param_i >= expected:
@@ -12186,11 +12290,17 @@ fn Sema.check_call(self: Sema, node: i32) -> i32:
                 if self.type_is_dyn_object(exp_resolved) == 0:
                     let err_arg_node = if has_resolved != 0: self.get_resolved_call_arg(node, ai) else: self.ast.get_extra(resolved_extra_start + ai)
                     if self.call_arg_type_compatible(expected_ty, arg_ty) == 0:
-                        if not (self.ci_syms.contains(fn_sym) and self.try_ci_coercion(fn_sym, arg_ty, expected_ty) != 0):
-                            self.emit_argument_type_mismatch(self.safe_symbol_text(fn_sym), fn_sym, ai, param_i, expected_ty, arg_ty, if err_arg_node > 0: err_arg_node else: node)
+                        // #604 stage 1: Vec/array → []T / []mut T call-site coercion.
+                        let sc_kind = self.note_slice_coerce_call_arg(expected_ty, arg_ty, err_arg_node, if err_arg_node > 0: err_arg_node else: node)
+                        if sc_kind == 2:
+                            sc_mut_args.push(err_arg_node)
+                        if sc_kind == 0:
+                            if not (self.ci_syms.contains(fn_sym) and self.try_ci_coercion(fn_sym, arg_ty, expected_ty) != 0):
+                                self.emit_argument_type_mismatch(self.safe_symbol_text(fn_sym), fn_sym, ai, param_i, expected_ty, arg_ty, if err_arg_node > 0: err_arg_node else: node)
                     else:
                         self.note_auto_ref_call_arg(expected_ty, arg_ty, err_arg_node, node)
             let eph_arg_node = if has_resolved != 0: self.get_resolved_call_arg(node, ai) else: self.ast.get_extra(resolved_extra_start + ai)
+            sc_all_args.push(eph_arg_node)
             self.check_ephemeral_task_arg_escape(eph_arg_node, expected_ty, if self.extern_fn_names.contains(fn_sym): 1 else: 0, fn_sym, param_i)
             // Effect enforcement: if the callee may consume/escape this arg, it must be explicitly moved or copied
             let param_eff = self.sig_param_effect(sig_idx, param_i)
@@ -12213,7 +12323,9 @@ fn Sema.check_call(self: Sema, node: i32) -> i32:
                             arg_consumed_by_value = 1
             if arg_consumed_by_value != 0 or (param_eff & (EFF_CONSUME | EFF_ESCAPE_VALUE)) != 0:
                 let eff_arg_nd = if has_resolved != 0: self.get_resolved_call_arg(node, ai) else: self.ast.get_extra(resolved_extra_start + ai)
-                if eff_arg_nd > 0:
+                // #604: a collection coerced to a slice view is BORROWED for the
+                // call, not moved — the caller's binding stays live and owning.
+                if eff_arg_nd > 0 and self.slice_coerce_args.contains(eff_arg_nd) == 0:
                     // Mark the arg as consumed so subsequent uses are caught.
                     self.mark_moved_if_consumed(eff_arg_nd)
             // escape_view: move/copy is forbidden because they invalidate the view's origin
@@ -12226,6 +12338,8 @@ fn Sema.check_call(self: Sema, node: i32) -> i32:
                     else if ev_kind == NodeKind.NK_COPY_ARG:
                         self.emit_error("cannot use 'copy' for argument when callee returns a view derived from it ('escape_view' effect)", ev_arg_nd)
 
+        if sc_mut_args.len() > 0:
+            self.check_mut_slice_call_exclusivity(sc_mut_args, sc_all_args)
         self.check_dyn_trait_call_compat(fn_sym, resolved_extra_start, arg_types, resolved_arg_count, param_offset)
         self.record_call_view_origins(node, sig_idx, param_offset, 0, resolved_extra_start, resolved_arg_count, has_resolved)
         self.record_generator_call_ref_origins(node, sig_idx, param_offset, resolved_extra_start, resolved_arg_count, has_resolved)

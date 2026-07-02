@@ -7792,6 +7792,24 @@ fn MirBuilder.lower_call_arg(self: MirBuilder, arg_node: i32, sig_idx: i32, call
     if autoderef_op >= 0:
         self.expected_type = saved_expected
         return autoderef_op
+    // #604 stage 1: a Vec/array arg coerced to a []T / []mut T param borrows
+    // the place into a fat-pointer view. Never materialize the collection —
+    // no header copy, no drop schedule (the lower_for_iter_ref discipline);
+    // the caller's binding keeps sole ownership across the call.
+    if self.sema.slice_coerce_args.contains(arg_node):
+        let sc_place = self.lower_expr_place(arg_node)
+        let sc_start = self.int_const_operand(0, self.sema.ty_i64)
+        let sc_len_local = self.new_temp(self.sema.ty_i64)
+        let sc_len_place = self.place_for_local(sc_len_local)
+        let sc_len_rv = self.body.new_rvalue(RvalueKind.RK_LEN, sc_place, 0, 0)
+        self.body.push_stmt(self.cur_bb, StmtKind.Assign, sc_len_place, sc_len_rv, self.ast.get_start(arg_node))
+        let sc_end = self.body.new_operand(OperandKind.OK_COPY, sc_len_place)
+        let sc_rv = self.body.new_rvalue(RvalueKind.RK_SLICE, sc_place, sc_start, sc_end)
+        let sc_local = self.new_temp(expected_ty)
+        let sc_slice_place = self.place_for_local(sc_local)
+        self.body.push_stmt(self.cur_bb, StmtKind.Assign, sc_slice_place, sc_rv, self.ast.get_start(arg_node))
+        self.expected_type = saved_expected
+        return self.body.new_operand(OperandKind.OK_COPY, sc_slice_place)
     let lowered = self.lower_expr(arg_node)
     self.expected_type = saved_expected
     self.consume_moved_operand(lowered)
