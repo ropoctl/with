@@ -15830,6 +15830,57 @@ fn Codegen.monomorphize_generic_call_core(self: Codegen, fn_sym: i32, fn_node: i
                 mg_arg_sema_tid = arg_sema_tys.get(pi as i64)
             if mg_arg_sema_tid == 0:
                 mg_arg_sema_tid = self.sema_type_of_node(arg_nodes.get(pi as i64))
+            // #595: structural unification of the param TYPE NODE against the
+            // arg SEMA type — binds type params at ANY nesting depth
+            // (Vec[Task[T]] vs Vec[Task[i32]] → T=i32). The passes below stay
+            // as fallbacks. Without this, the positional receiver pass
+            // mis-binds a nested param (T ← Task[i32]) and the mistyped mono
+            // body crashes codegen (null struct type at the await GEP).
+            if mg_arg_sema_tid > 0:
+                let uni_nodes: Vec[i32] = Vec.new()
+                let uni_semas: Vec[i32] = Vec.new()
+                uni_nodes.push(p_type_node)
+                uni_semas.push(mg_arg_sema_tid)
+                while uni_nodes.len() > 0:
+                    let u_node = uni_nodes.pop()
+                    let u_sema = uni_semas.pop()
+                    if u_node == 0 or u_sema == 0:
+                        continue
+                    let u_kind = self.pool.kind(u_node)
+                    var u_resolved = self.sema.resolve_alias(u_sema as TypeId)
+                    if u_kind == NodeKind.NK_TYPE_NAMED or u_kind == NodeKind.NK_IDENT:
+                        let u_sym = self.pool.get_data0(u_node)
+                        for uti in 0..tp_syms.len() as i32:
+                            let u_cand = tp_syms.get(uti as i64)
+                            if self.codegen_symbols_match(u_cand, u_sym):
+                                if self.codegen_binding_index(bind_syms, u_cand) < 0:
+                                    let u_llvm = self.sema_type_to_llvm(u_sema)
+                                    if u_llvm != 0:
+                                        bind_syms.push(u_cand)
+                                        bind_tys.push(u_llvm)
+                                        bind_sema_tys.push(u_sema)
+                        continue
+                    if u_kind == NodeKind.NK_TYPE_REF or u_kind == NodeKind.NK_TYPE_PTR:
+                        let u_rk = self.sema.get_type_kind(u_resolved)
+                        if u_rk == TypeKind.TY_REF or u_rk == TypeKind.TY_PTR:
+                            uni_nodes.push(self.pool.get_data0(u_node))
+                            uni_semas.push(self.sema.get_type_d0(u_resolved) as i32)
+                        continue
+                    if u_kind == NodeKind.NK_TYPE_GENERIC:
+                        let u_ak = self.sema.get_type_kind(u_resolved)
+                        if u_ak == TypeKind.TY_REF or u_ak == TypeKind.TY_PTR:
+                            u_resolved = self.sema.resolve_alias(self.sema.get_type_d0(u_resolved) as TypeId)
+                        if self.sema.get_type_kind(u_resolved) != TypeKind.TY_GENERIC_INST:
+                            continue
+                        if not self.codegen_symbols_match(self.pool.get_data0(u_node), self.sema.get_generic_inst_base(u_resolved as i32)):
+                            continue
+                        let u_start = self.pool.get_data1(u_node)
+                        let u_pc = self.pool.get_data2(u_node)
+                        let u_ac = self.sema.get_generic_inst_arg_count(u_resolved as i32)
+                        let u_n = if u_pc < u_ac: u_pc else: u_ac
+                        for ugi in 0..u_n:
+                            uni_nodes.push(self.pool.get_extra(u_start + ugi))
+                            uni_semas.push(self.sema.get_generic_inst_arg(u_resolved as i32, ugi))
             if mg_arg_sema_tid > 0 and self.sema.get_type_kind(mg_arg_sema_tid) == TypeKind.TY_GENERIC_INST:
                 var mg_sema_bound = true
                 for gi in 0..g_count:
