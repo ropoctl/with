@@ -7172,6 +7172,19 @@ fn MirBuilder.lower_pattern(self: MirBuilder, pat_node: i32, scrutinee_place: i3
 
     let pk = self.ast.kind(pat_node)
     if pk == NodeKind.NK_PAT_WILDCARD:
+        // A7 (#606): in a consuming pattern context `_` receives ownership of
+        // the value it discards — the destructure/match consume cancels (or
+        // partially degrades) the subject's drop, so an unbound Drop value
+        // would leak. Move it into an anonymous local that drops at scope
+        // exit, mirroring the NK_PAT_IDENT binding path. Borrowed subjects
+        // surface here as ref-typed places (no value drop) and are untouched.
+        let wc_ty = self.place_local_type(scrutinee_place)
+        if self.type_needs_value_drop(wc_ty) != 0:
+            let wc_local = self.body.new_local(wc_ty, 0, 0, 1)
+            self.body.push_stmt(self.cur_bb, StmtKind.StorageLive, wc_local, 0, self.ast.get_start(pat_node))
+            self.schedule_drop(wc_local, DropKind.DK_VALUE)
+            let wc_op = self.body.new_operand(OperandKind.OK_MOVE, scrutinee_place)
+            self.assign_operand_to_place(self.place_for_local(wc_local), wc_op, self.ast.get_start(pat_node))
         return out
 
     if pk == NodeKind.NK_PAT_IDENT:
@@ -7307,6 +7320,31 @@ fn MirBuilder.lower_pattern(self: MirBuilder, pat_node: i32, scrutinee_place: i3
                 self.assign_operand_to_place(self.place_for_local(local_id), src_op, self.ast.get_start(pat_node))
                 out.push(local_id)
                 out.push(child_place)
+        // A7 (#606): `..` discards every unmentioned field. In a consuming
+        // (by-value) destructure the pattern owns those fields, so any Drop
+        // field among them must move into an anonymous drop-scheduled local
+        // or it leaks — same obligation as the `_` wildcard above. Borrowed
+        // subjects keep ownership with the referent; skip them.
+        if self.ast.get_extra(s_start) != 0 and self.pattern_subject_ref_mutability(scrutinee_place) < 0:
+            let rest_subject_ty = self.sema.resolve_alias(self.place_local_type(struct_subject_place) as TypeId) as i32
+            let rest_field_count = self.sema.type_reflection_field_count(rest_subject_ty)
+            for fi in 0..rest_field_count:
+                let rest_fname = self.sema.type_reflection_field_name(rest_subject_ty, fi)
+                var rest_mentioned = 0
+                for si in 0..s_count:
+                    if self.ast.get_extra(s_start + 1 + si * 2) == rest_fname:
+                        rest_mentioned = 1
+                if rest_mentioned != 0:
+                    continue
+                let rest_fty = self.sema.type_reflection_field_type(rest_subject_ty, fi)
+                if self.type_needs_value_drop(rest_fty) == 0:
+                    continue
+                let rest_fplace = self.body.new_field_place(struct_subject_place, rest_fname, rest_fty)
+                let rest_local = self.body.new_local(rest_fty, 0, 0, 1)
+                self.body.push_stmt(self.cur_bb, StmtKind.StorageLive, rest_local, 0, self.ast.get_start(pat_node))
+                self.schedule_drop(rest_local, DropKind.DK_VALUE)
+                let rest_op = self.body.new_operand(OperandKind.OK_MOVE, rest_fplace)
+                self.assign_operand_to_place(self.place_for_local(rest_local), rest_op, self.ast.get_start(pat_node))
         return out
 
     if pk == NodeKind.NK_PAT_OR:
