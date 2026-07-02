@@ -123,12 +123,17 @@ installed. This file records what that means for the remaining slices.
   (ever_moved). Codegen: zero-const struct store memset extended to PROJECTED
   destinations (aggregate zeroinitializer left PADDING bytes unwritten →
   rt_value_is_zero saw nonzero → drop on blanked value → null deref; lldb
-  verified 0xff padding). REMAINING FOLLOW-UPS: (a) bootstrap/seed update not
-  done this session (seed still pre-A7/A8; run the chain when convenient);
-  (b) comment/close-retarget #605/#606 on GitHub with the A6/A7/A8 record;
-  (c) enum-payload wildcard probe (`.A(a, _)` — covered by the A7 fix via
-  recursion but no fixture pins nominal-enum payload discard) and payload-rest
-  (`.A(a, ..)` if the syntax exists) — small fixture follow-up.
+  verified 0xff padding). ALL FOLLOW-UPS CLOSED 2026-07-02: (a) enum-payload
+  discard probe found `.A(a, ..)` payload-rest LEAKED (NK_PAT_REST bare
+  `continue` in the variant binding path) — fixed + pinned in `60cc437f`
+  (`da_drop_enum_payload_discard`: `.A(a, _)`, `.A(a, ..)`, whole-`_` arm);
+  (b) #605 and #606 CLOSED on GitHub with the full record; (c) bootstrap done —
+  seed `src/main` + `~/.local/bin/with` (2026-07-02 01:04) carry A7/A8,
+  installed compiler smoke-tested green on the new fixtures. Host note: the
+  memory cap trips in `:test-green`/`:last-green` too — prefix EVERY bootstrap
+  step with `WITH_MEMORY_LIMIT_BYTES=0`, one chain, no commits mid-chain.
+  Untested edge noted: positional-struct-pattern rest (`P(x, ..)`) shares the
+  old NK_PAT_REST skip in its own path — probe when nearby.
 - **A8 SPLIT VERDICT.** Tuple partial extraction ALREADY per-element precise
   (`let a = t.0` → t.1 still drops; existing machinery: static field move + partial
   base drop). ARRAY index extraction LEAKS siblings (`let a = arr[0]` → arr[1]
