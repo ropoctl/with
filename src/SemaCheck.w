@@ -10632,18 +10632,10 @@ fn Sema.check_pattern(self: Sema, node: i32, subject_type: i32):
                     field_ty = self.type_extra.get((field_start + fi * 3 + 1) as i64)
                     break
             let binding_ty = self.pattern_child_subject_type(subject_type, field_ty)
-            // #607: destructuring a Vec[Drop] field out of a by-value struct moves it
-            // out (the binding owns the buffer while the struct still does) → double
-            // free. Reject pending real move semantics; matching a borrow (`match &h`)
-            // gives a `&Vec` binding_ty (TY_REF) and is exempt, as is a `_` wildcard
-            // (no move). Same Path C gate (type_needs_drop && !type_has_drop_impl).
-            let sp_is_wildcard = f_pat != 0 and self.ast.kind(f_pat) == NodeKind.NK_PAT_WILDCARD
-            if not sp_is_wildcard:
-                let sp_bt_res = self.resolve_alias(binding_ty as TypeId)
-                if self.get_type_kind(sp_bt_res) == TypeKind.TY_GENERIC_INST:
-                    let sp_bt_base = self.pool_resolve(self.get_type_d0(sp_bt_res))
-                    if sp_bt_base == "Vec" and self.type_needs_drop(binding_ty) != 0 and self.type_has_drop_impl(binding_ty) == 0:
-                        self.emit_error("moving a field that needs drop out of a struct by destructuring is not yet supported (#607); match a borrow (`match &x`) or move the whole struct", node)
+            // #607: destructuring a needs-drop field (incl. Vec[Drop]) out of a
+            // by-value struct is a move into the binding; the pattern-lowering
+            // consume machinery (A7) makes the binding the sole owner. A borrow
+            // subject (`match &h`) yields ref-typed bindings and never moves.
             if f_pat != 0:
                 self.check_pattern(f_pat, binding_ty)
             else:
@@ -18798,15 +18790,14 @@ fn Sema.mark_moved_if_consumed(self: Sema, node: i32):
                 else:
                     self.emit_error("partial move from Drop type", node)
             else:
-                if self.type_needs_drop(field_ty) != 0 and self.type_has_drop_impl(field_ty) == 0:
-                    self.emit_error("moving a field that needs drop out of a struct is not yet supported (#607); clone the field or move the whole struct instead", node)
-                else:
-                    // Slice E: conditional field moves are sound under the
-                    // field-place niche — MirLower.consume_moved_operand blanks
-                    // the moved field on the moving path, and the owner's guarded
-                    // per-field drop (rt_value_is_zero) skips the blanked field.
-                    // No static drop-state tracking is required.
-                    self.mark_field_moved(node)
+                // Slice E + #607: field moves out of a non-Drop struct are
+                // sound under the field-place niche — MirLower blanks the
+                // moved field (conditional moves on the moving path;
+                // unconditional moves stay statically moved with the owner's
+                // partial drop), and the owner's guarded per-field drop
+                // (rt_value_is_zero) skips a blanked field. This covers
+                // transitive-Drop fields (Vec[W]) as well as Drop-impl fields.
+                self.mark_field_moved(node)
         return
     if kind == NodeKind.NK_IDENT:
         let sym = self.ast.get_data0(node)
@@ -18851,10 +18842,14 @@ fn Sema.reject_returned_drop_field_move(self: Sema, expr: i32):
     let owner_sym = self.drop_owner_for_field_access(expr)
     if owner_sym != 0 and self.has_drop_method(owner_sym) != 0:
         return
+    // #607: return-tail field moves out of a non-Drop struct are permitted —
+    // MirLower consumes them like any other field move (static move + owner
+    // partial drop; the niche guard covers the rest). Mark moved so
+    // use-after-move diagnostics fire on the source.
     let field_ty_opt = self.typed_expr_types.get(expr)
     let field_ty = if field_ty_opt.is_some(): field_ty_opt.unwrap() else: self.field_access_type_no_diagnostic(expr)
-    if field_ty != 0 and self.is_copy(field_ty as TypeId) == 0 and self.type_needs_drop(field_ty) != 0 and self.type_has_drop_impl(field_ty) == 0:
-        self.emit_error("moving a field that needs drop out of a struct is not yet supported (#607); clone the field or move the whole struct instead", expr)
+    if field_ty != 0 and self.is_copy(field_ty as TypeId) == 0 and self.type_needs_drop(field_ty) != 0:
+        self.mark_field_moved(expr)
 
 fn Sema.drop_owner_for_fn_symbol(self: Sema, fn_sym: i32) -> i32:
     let text = self.pool_resolve(fn_sym)
