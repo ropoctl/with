@@ -10846,20 +10846,34 @@ fn MirBuilder.lower_expr(self: MirBuilder, node: i32) -> i32:
                 self.switch_to(ip_rd_next)
                 return self.body.new_operand(OperandKind.OK_COPY, ip_rd_place)
         let place = self.lower_index(self.ast.get_data0(node), self.ast.get_data1(node))
-        // #606: moving a non-Copy element out of an ARRAY by index consumes it from
-        // the source; consume the array base so its element-drop does not also free
-        // the extracted value. Conservative whole-base consume (a non-extracted Drop
-        // sibling leaks); precise per-element tracking is a follow-up. Tightly scoped
-        // to a plain array-local base — Vec/slice/map indexing is unaffected.
+        // A8 (#606): extracting a non-Copy element out of an ARRAY by index moves
+        // it out of the slot. Blank the slot at the statement boundary
+        // (reset-on-move, §2.5.1) and KEEP the array's scheduled drop with its
+        // niche guard: the per-element guarded drop skips the blanked slot and
+        // still frees the non-extracted siblings. (Replaces the whole-base
+        // consume, which cancelled the array's drop and leaked every sibling.)
+        // Tightly scoped to a plain array-local base — Vec/slice/map indexing is
+        // unaffected.
         let idx_val_ty = self.expr_type(node)
         if idx_val_ty != 0 and self.sema.is_copy(idx_val_ty as TypeId) == 0:
             let idx_base_local = self.place_base_local(place)
             if idx_base_local >= 0 and idx_base_local < self.body.local_type_ids.len() as i32:
                 let idx_base_ty = self.body.local_type_ids.get(idx_base_local as i64)
                 if idx_base_ty != 0 and self.sema.get_type_kind(self.sema.resolve_alias(idx_base_ty as TypeId)) == TypeKind.TY_ARRAY:
-                    self.mark_local_value_moved(idx_base_local)
-                    self.cancel_scheduled_value_drop_for_local(idx_base_local)
-                    self.cancel_stmt_temp_for_local(idx_base_local)
+                    // Materialize the element into a temp and blank the slot
+                    // IMMEDIATELY after the read (not via the pending-reset
+                    // list): a tail-position extraction is consumed after the
+                    // block's scope drops are emitted, so a deferred reset
+                    // would let the array's drop free the slot first.
+                    let a8_tmp = self.new_temp(idx_val_ty)
+                    let a8_tmp_place = self.place_for_local(a8_tmp)
+                    self.assign_operand_to_place(a8_tmp_place, self.body.new_operand(OperandKind.OK_MOVE, place), self.ast.get_start(node))
+                    let a8_zop = self.body.gen_zero_operand(idx_val_ty)
+                    let a8_zrv = self.body.new_rvalue(RvalueKind.RK_USE, a8_zop, 0, 0)
+                    self.body.push_stmt(self.cur_bb, StmtKind.Assign, place, a8_zrv, self.ast.get_start(node))
+                    self.body.mark_local_ever_moved(idx_base_local)
+                    self.register_stmt_temp(a8_tmp, idx_val_ty)
+                    return self.body.new_operand(OperandKind.OK_MOVE, a8_tmp_place)
         return self.body.new_operand(OperandKind.OK_COPY, place)
 
     if kind == NodeKind.NK_MULTI_INDEX:

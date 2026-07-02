@@ -4510,7 +4510,9 @@ fn Codegen.mir_emit_stmt(self: Codegen, body: &MirBody, stmt_id: i32) -> bool:
         // struct zero-init) must zero ALL bytes including padding so the guarded
         // drop's all-zero check recognizes the reset. memset instead of an
         // aggregate zeroinitializer store, which leaves inter-field padding unwritten.
-        if not has_projections and dst_ptr != 0 and dst_ty != 0 and wl_get_type_kind(dst_ty) == wl_struct_type_kind() and self.mir_rvalue_is_zero_const(body, d1):
+        // Applies to projected destinations too (A8 blanks an array slot through an
+        // index place; dst_ptr is already resolved through the projections).
+        if dst_ptr != 0 and dst_ty != 0 and wl_get_type_kind(dst_ty) == wl_struct_type_kind() and self.mir_rvalue_is_zero_const(body, d1):
             self.emit_memset_zero(dst_ptr, wl_abi_size_of(wl_get_module_data_layout(self.llmod), dst_ty))
             return true
         if d1 >= 0 and d1 < body.rval_kinds.len() as i32 and body.rval_kinds.get(d1 as i64) == RvalueKind.RK_ARRAY_FILL:
