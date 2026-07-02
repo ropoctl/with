@@ -8078,6 +8078,15 @@ fn MirBuilder.lower_static_enum_variant_call(self: MirBuilder, enum_ty: i32, var
     var result_ty = self.expr_type(node)
     if result_ty == 0 or result_ty == self.sema.ty_void:
         result_ty = enum_ty
+    // #566: a payloadless discriminant-enum variant constructed in CALL form
+    // (Color.Red()) materializes as its repr-backed int constant — matching the
+    // bare-ident and shorthand paths (lower_var). The RK_AGGREGATE d0=1 form
+    // below is for payload-bearing enums only; codegen's variant arm requires a
+    // struct repr and a payloadless disc enum lowers to a bare integer.
+    let sev_resolved = self.sema.resolve_alias(result_ty)
+    if self.sema.disc_repr_types.contains(sev_resolved as i32) and not self.sema.disc_has_payload.contains(sev_resolved as i32):
+        let sev_disc_val = self.enum_variant_discriminant_for_type(result_ty, variant_sym)
+        return self.int_const_operand(sev_disc_val as i64, result_ty)
     let payload_tys = self.sema.enum_variant_payload_types(result_ty, variant_sym)
     let has_resolved = self.sema.has_resolved_call_args(node)
     let count = if has_resolved != 0: self.sema.get_resolved_call_arg_count(node) else: arg_count
@@ -11393,9 +11402,32 @@ fn MirBuilder.lower_expr(self: MirBuilder, node: i32) -> i32:
                 return self.body.new_operand(OperandKind.OK_COPY, fill_place)
         let arr_fields: Vec[i32] = Vec.new()
         let arr_names: Vec[i32] = Vec.new()
+        // #586: elements lower under the ARRAY'S ELEMENT type, not the ambient
+        // expected type. Without the rebind, the array/let type leaked into
+        // enum-variant element temps (Some(1) inside [?i32] typed as the ARRAY
+        // type), failing codegen when annotated and silently corrupting the
+        // values when un-annotated. Mirrors the NK_TUPLE per-element rebind.
+        let arr_saved_expected = self.expected_type
+        var arr_elem_expected = 0
+        var arr_lit_ty = self.expr_type(node)
+        if arr_lit_ty == 0 or arr_lit_ty == self.sema.ty_void as i32:
+            // Annotated bindings (`let a: [?i32] = [...]`) type the literal via
+            // the annotation, not the node — take the array type from the
+            // ambient expectation instead.
+            arr_lit_ty = self.expected_type
+        if arr_lit_ty != 0:
+            let arr_lit_resolved = self.sema.resolve_alias(arr_lit_ty as TypeId)
+            let arr_lit_kind = self.sema.get_type_kind(arr_lit_resolved)
+            // `[?i32]` (length-less annotation) resolves as a slice; both
+            // array and slice carry the element type in d0.
+            if arr_lit_kind == TypeKind.TY_ARRAY or arr_lit_kind == TypeKind.TY_SLICE:
+                arr_elem_expected = self.sema.get_type_d0(arr_lit_resolved)
         for i in 0..elem_count:
             let elem_node = self.ast.get_extra(extra_start + i)
+            if arr_elem_expected != 0:
+                self.expected_type = arr_elem_expected
             let arr_elem_op = self.lower_expr(elem_node)
+            self.expected_type = arr_saved_expected
             arr_fields.push(arr_elem_op)
             arr_names.push(0)
             // #605/#606: move a Drop element into the array; consume the source so
