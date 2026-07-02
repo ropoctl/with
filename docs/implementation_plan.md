@@ -210,8 +210,8 @@ Discovered during Phase 8 (FFI safety substrate; part of this phase):
 
 ## Phase 9: Async, Fibers, Channels, and Concurrency Runtime
 
-Start with compiler-visible suspension and task observation, then channel
-ownership, then lock/scheduler work. Multi-OS-thread scheduling comes late.
+Status 2026-07-02: every item below is CLOSED except #369 (Windows, deferred
+until the revision after the next minor release).
 
 - `#354` Implement compiler-visible current-fiber suspension model
 - `#374` Add Task.was_cancelled() observation API
