@@ -166,6 +166,33 @@ fn link_stage_is_temp_archive_path(path: str) -> bool:
         i = i + 1
     false
 
+// #357: a `link:` entry of the form "framework:Name" links an Apple framework
+// (`-framework Name`) instead of a plain library (`-l<name>`). Darwin-only —
+// the caller guards other platforms. Returns "" for a non-framework entry.
+pub fn link_stage_framework_name(lib: str) -> str:
+    let prefix = "framework:"
+    if lib.len() as i32 > prefix.len() as i32 and lib.slice(0, prefix.len()) == prefix:
+        return lib.slice(prefix.len(), lib.len())
+    ""
+
+// The linker args for one `link:` entry. On Darwin a "framework:Name" entry
+// becomes `-framework Name` (two args); everything else `-l<lib>`. On a
+// non-Darwin target a framework entry is a loud error (frameworks are macOS)
+// and yields no args. (Returns a Vec because With has no safe mutable-ref
+// param to push through.)
+pub fn link_stage_lib_args(lib: str, is_darwin: i32) -> Vec[str]:
+    let out: Vec[str] = Vec.new()
+    let fw = link_stage_framework_name(lib)
+    if fw.len() > 0:
+        if is_darwin == 0:
+            with_eprint("error: link: \"" ++ lib ++ "\" — Apple frameworks are only available on macOS targets\n")
+            return out
+        out.push("-framework")
+        out.push(fw)
+        return out
+    out.push("-l" ++ lib)
+    out
+
 fn link_stage_collect_cleanup_files(extras: &Vec[str]) -> Vec[str]:
     let cleanup: Vec[str] = Vec.new()
     for i in 0..extras.len() as i32:
@@ -281,8 +308,11 @@ fn link_stage_make_link_command(linker: str, obj_path: str, bin_path: str, extra
     args.push("-o")
     args.push(bin_path)
     outputs.push(bin_path)
+    let cc_is_darwin = if runtime_sysinfo_os() == "Macos": 1 else: 0
     for i in 0..link_libs.len() as i32:
-        args.push("-l" ++ link_libs.get(i as i64))
+        let cc_la = link_stage_lib_args(link_libs.get(i as i64), cc_is_darwin)
+        for j in 0..cc_la.len() as i32:
+            args.push(cc_la.get(j as i64))
     for i in 0..link_args.len() as i32:
         args.push(link_args.get(i as i64))
     if runtime_sysinfo_os() == "Linux":
@@ -365,7 +395,9 @@ fn link_stage_make_darwin_llvm_link_command(llvm_ld: str, obj_path: str, bin_pat
         args.push(extra)
         inputs.push(extra)
     for i in 0..link_libs.len() as i32:
-        args.push("-l" ++ link_libs.get(i as i64))
+        let dw_la = link_stage_lib_args(link_libs.get(i as i64), 1)
+        for j in 0..dw_la.len() as i32:
+            args.push(dw_la.get(j as i64))
     for i in 0..link_args.len() as i32:
         args.push(link_args.get(i as i64))
     args.push("-lSystem")
@@ -422,12 +454,15 @@ fn link_stage_make_linux_llvm_link_command(llvm_ld: str, obj_path: str, bin_path
     args.push("-L/lib")
     for i in 0..link_libs.len() as i32:
         let lib = link_libs.get(i as i64)
-        let fallback_lib = link_stage_linux_system_lib_path(lib)
-        if fallback_lib.len() > 0:
-            args.push(fallback_lib)
-            inputs.push(fallback_lib)
+        if link_stage_framework_name(lib).len() > 0:
+            with_eprint("error: link: \"" ++ lib ++ "\" — Apple frameworks are only available on macOS targets\n")
         else:
-            args.push("-l" ++ lib)
+            let fallback_lib = link_stage_linux_system_lib_path(lib)
+            if fallback_lib.len() > 0:
+                args.push(fallback_lib)
+                inputs.push(fallback_lib)
+            else:
+                args.push("-l" ++ lib)
     for i in 0..link_args.len() as i32:
         args.push(link_args.get(i as i64))
     args.push("-lc")
