@@ -1100,6 +1100,53 @@ pub fn run_cli_selfhost_one_liner_action(ctx: ActionCtx) -> i32:
     rc = bs_assert_contains(ctx, diag_n.stderr, "<cli -n #1>:1:23", "one_liners")
     if rc != 0: return rc
 
+    // ── #513: one-liner edge cases (§18.5b) ────────────────────────────
+    // Multiple same-mode fragments accumulate, for -n and -p as well as -e.
+    var repeat_n: Vec[str] = Vec.new()
+    repeat_n |> push("-n")
+    repeat_n |> push("let u = line.upper()")
+    repeat_n |> push("-n")
+    repeat_n |> push("print(u)")
+    rc = bs_expect_cli_input_success_exact(ctx, compiler_path, "one-liner-repeat-n", repeat_n, "ab\ncd\n", "AB\nCD")
+    if rc != 0: return rc
+
+    var repeat_p: Vec[str] = Vec.new()
+    repeat_p |> push("-p")
+    repeat_p |> push("line = line.upper()")
+    repeat_p |> push("-p")
+    repeat_p |> push("line = line ++ \"!\"")
+    rc = bs_expect_cli_input_success_exact(ctx, compiler_path, "one-liner-repeat-p", repeat_p, "a\nb\n", "A!\nB!")
+    if rc != 0: return rc
+
+    // `!~` (non-match) with no capture bindings.
+    rc = bs_expect_cli_input_success_exact(ctx, compiler_path, "one-liner-not-match", bs_one_liner_args("-n", "if line !~ /err/: print(line)"), "err one\nkeep two\nerr x\nkeep four\n", "keep two\nkeep four")
+    if rc != 0: return rc
+
+    // Semicolons inside nested balanced delimiters are not statement splits (#462).
+    rc = bs_expect_cli_success_exact(ctx, compiler_path, "one-liner-semicolon-nested", bs_one_liner_args("-e", "let g: [[i32; 2]; 2] = [[1; 2]; 2]; print(f\"{g[1][0]}\")"), "1")
+    if rc != 0: return rc
+
+    // One-liner code combined with a source-file argument is rejected.
+    let src_mix = bs_join(output_dir, "one_liner_mix_src.w")
+    if fs.write_text(src_mix, "fn main: print(1)\n") != 0:
+        return bs_fail(ctx, "could not write one-liner source-mix fixture: " ++ src_mix)
+    var mix_args: Vec[str] = Vec.new()
+    mix_args |> push("-e")
+    mix_args |> push("print(\"x\")")
+    mix_args |> push(src_mix)
+    let mix = bs_run_cli_capture(ctx, compiler_path, "one-liner-source-file-mix", mix_args, 120000)
+    if mix.rc == 0:
+        return bs_fail(ctx, "one-liner combined with a source file unexpectedly succeeded")
+    rc = bs_assert_contains(ctx, mix.stderr, "cannot combine one-liner code with a source file", "one_liners")
+    if rc != 0: return rc
+
+    // Diagnostics from a malformed -p fragment map to <cli -p #N>.
+    let diag_p = bs_run_cli_capture_input(ctx, compiler_path, "one-liner-diag-p", bs_one_liner_args("-p", "line = "), "a\n", 120000)
+    if diag_p.rc == 0:
+        return bs_fail(ctx, "one-liner malformed -p unexpectedly succeeded")
+    rc = bs_assert_contains(ctx, diag_p.stderr, "<cli -p #1>", "one_liners")
+    if rc != 0: return rc
+
     let diag_capture = bs_run_cli_capture_input(ctx, compiler_path, "one-liner-diag-fstring-capture", bs_one_liner_args("-n", "if line =~ /(?<kind>error|warning) (\\d+)/: print(f\"{kind}\")"), "error 42\n", 120000)
     if diag_capture.rc == 0:
         return bs_fail(ctx, "one-liner f-string capture diagnostic unexpectedly succeeded")
