@@ -12434,6 +12434,13 @@ fn Sema.check_call(self: Sema, node: i32) -> i32:
         return ret
 
     if self.ast.kind(callee) != NodeKind.NK_IDENT:
+        // #598 (ruled: no turbofish): `f[i32](x)` on a free generic fn gets a
+        // teaching diagnostic, not "value is not callable".
+        if self.ast.kind(callee) == NodeKind.NK_INDEX:
+            let tf_base = self.ast.get_data0(callee)
+            if self.ast.kind(tf_base) == NodeKind.NK_IDENT and self.generic_fn_nodes.contains(self.ast.get_data0(tf_base)):
+                self.emit_error("explicit type arguments are not written at call sites; With infers them — annotate the result binding or let an argument carry the type", callee)
+                return 0
         self.emit_error("value is not callable", callee)
         return 0
 
@@ -12868,7 +12875,15 @@ fn Sema.check_generic_call(self: Sema, fn_sym: i32, fn_node: i32, arg_types: &Ve
         let where_start = self.ast.state.where_meta.get((where_idx + 1) as i64)
         let where_count = self.ast.state.where_meta.get((where_idx + 2) as i64)
         self.check_generic_trait_bounds(where_start, where_count, call_node)
+    let ege_before = self.diags.count_by_severity(DiagSeverity.Error)
     self.ensure_generic_substitutions(tp_start, tp_count, param_start, param_count, call_node)
+    // #598: an uninferable type param already got its one teaching
+    // diagnostic — don't cascade "unknown type 'T'" from body/return
+    // resolution below.
+    if self.diags.count_by_severity(DiagSeverity.Error) != ege_before:
+        self.generic_subst_param_syms = saved_generic_call_subst_syms
+        self.generic_subst_type_ids = saved_generic_call_subst_tys
+        return 0
 
     let spec_key = self.generic_specialization_key(fn_sym, tp_start, tp_count)
     if self.generic_specialization_cache.contains(spec_key):

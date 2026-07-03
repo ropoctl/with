@@ -2720,7 +2720,10 @@ fn Sema.ensure_generic_substitutions(self: Sema, tp_start: i32, tp_count: i32, p
             if self.type_param_mentions_any_param_type(tp_name, param_start, param_count) != 0:
                 self.put_generic_subst(tp_name, self.ty_i32, call_node)
             else:
-                self.emit_error("unknown type", call_node)
+                // #598 (ruled: no turbofish): teach the restructure instead of
+                // a bare "unknown type" cascade.
+                let ug_name = self.pool_resolve(tp_name)
+                self.emit_error(f"cannot infer type parameter '{ug_name}' for this call; annotate the result binding or pass an argument that mentions '{ug_name}'", call_node)
                 return
         pos = pos + 2 + bound_count
 
