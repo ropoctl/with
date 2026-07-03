@@ -12870,7 +12870,18 @@ fn tailrec_verify_recursive_edges(sema: &Sema, node: i32, scc: &Vec[i32], in_tai
         if body_violation.node != 0:
             return body_violation
         return tailrec_verify_recursive_edges(sema, sema.ast.get_data1(node), scc, 0, active_cleanup, active_drop)
-    if kind == NodeKind.NK_FOR or kind == NodeKind.NK_WHILE or kind == NodeKind.NK_LOOP:
+    // #530: the body field differs per loop kind — NK_FOR body is d2, but
+    // NK_WHILE body is d1 (d2=label) and NK_LOOP body is d0. Reading d2 for
+    // all three meant while/loop bodies were never traversed, so a bare
+    // recursive call inside a while/loop escaped the @[tailrec] verifier.
+    if kind == NodeKind.NK_WHILE:
+        let cond_violation = tailrec_verify_recursive_edges(sema, sema.ast.get_data0(node), scc, 0, active_cleanup, active_drop)
+        if cond_violation.node != 0:
+            return cond_violation
+        return tailrec_verify_recursive_edges(sema, sema.ast.get_data1(node), scc, 0, active_cleanup, active_drop)
+    if kind == NodeKind.NK_LOOP:
+        return tailrec_verify_recursive_edges(sema, sema.ast.get_data0(node), scc, 0, active_cleanup, active_drop)
+    if kind == NodeKind.NK_FOR:
         return tailrec_verify_recursive_edges(sema, sema.ast.get_data2(node), scc, 0, active_cleanup, active_drop)
     if kind == NodeKind.NK_LET_DECL or kind == NodeKind.NK_LET_BINDING:
         return tailrec_verify_recursive_edges(sema, sema.ast.get_data1(node), scc, 0, active_cleanup, active_drop)
