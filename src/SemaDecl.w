@@ -1283,6 +1283,23 @@ fn Sema.collect_fn_decl(self: Sema, node: i32, is_local: i32, decl_index: i32):
                 self.named_types.insert(self_sym, self_type_id)
             break
 
+    // #584: an impl method for a CONCRETE generic instantiation
+    // (impl Trait for Box[i32]) binds Self to the INSTANTIATION, not the
+    // generic base the dot-split found — the base's T-typed field tids are 0
+    // (spurious "unknown field") and its layout is wrong (by-ref receivers
+    // reading concrete fields returned ABI garbage).
+    if self_type_id != 0 and self.method_impl_nodes.contains(fn_name):
+        let sb_impl = self.method_impl_nodes.get(fn_name).unwrap()
+        if self.ast.find_impl_type_params(sb_impl) < 0 and self.impl_target_has_bare_type_params(sb_impl) == 0:
+            let sb_target = self.ast.find_impl_target_type_node(sb_impl as NodeId)
+            if sb_target != 0:
+                let sb_kind = self.ast.kind(sb_target)
+                if sb_kind == NodeKind.NK_INDEX or sb_kind == NodeKind.NK_TYPE_GENERIC:
+                    let sb_inst_tid = self.resolve_type_expr(sb_target)
+                    if sb_inst_tid != 0 and self.get_type_kind(self.resolve_alias(sb_inst_tid)) == TypeKind.TY_GENERIC_INST:
+                        self_type_id = sb_inst_tid as i32
+                        self.named_types.insert(self_sym, self_type_id)
+
     // Set up associated type bindings if inside a trait impl
     self.assoc_type_bindings.clear()
     if self.method_impl_nodes.contains(fn_name):

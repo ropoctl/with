@@ -9313,11 +9313,27 @@ fn Sema.check_map_literal(self: Sema, node: i32) -> i32:
     target_ty
 
 fn Sema.check_struct_literal(self: Sema, node: i32) -> i32:
-    let name = self.ast.get_data0(node)
+    var name = self.ast.get_data0(node)
     let extra_start = self.ast.get_data1(node)
     let field_count = self.ast.get_data2(node)
 
-    let tid = self.lookup_named_type_visible(name)
+    var tid = self.lookup_named_type_visible(name)
+    // #584: `Self { … }` in an impl body — the visible-type lookup misses
+    // (Self lives in named_types under syms.self_type, a different symbol),
+    // and the old code silently returned 0, leaving the literal UNTYPED
+    // (downstream field reads then failed or mislowered). Resolve Self from
+    // its binding; for a concrete generic instantiation rebind to the BASE
+    // struct name — the type args are re-inferred from the field values
+    // exactly as a hand-written `Box { … }` literal's are.
+    if tid == 0 and self.pool_resolve(name) == "Self":
+        let self_bound = self.named_types.get(self.syms.self_type)
+        if self_bound.is_some():
+            tid = self_bound.unwrap()
+    if tid != 0 and self.pool_resolve(name) == "Self":
+        let self_lit_res = self.resolve_alias(tid as TypeId)
+        if self.get_type_kind(self_lit_res) == TypeKind.TY_GENERIC_INST:
+            name = self.get_type_d0(self_lit_res)
+            tid = self.lookup_named_type_visible(name)
     if tid == 0:
         if self.private_symbol_path_from_current(name).len() > 0:
             self.emit_private_symbol_error(name, node)
