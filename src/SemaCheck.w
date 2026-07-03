@@ -4094,6 +4094,19 @@ fn Sema.expr_is_ephemeral_task(self: Sema, node: i32) -> i32:
 fn Sema.check_ephemeral_task_arg_escape(self: Sema, arg_node: i32, expected_ty: i32, is_extern_call: i32, callee_sym: i32, param_i: i32):
     if arg_node <= 0:
         return
+    // #600 (§5.1): an ephemeral VALUE cannot move by value into a heap-owning
+    // constructor (Box.new / Rc.new / Arc.new / std.ffi.box_ctx) — the heap
+    // copy would let the borrowed storage escape its origin's lifetime.
+    // Same unsafe lane as the task gate below. (Vec element virality per
+    // §5.2 is tracked separately.)
+    if self.expr_is_ephemeral_value(arg_node) != 0 and self.param_is_by_reference(expected_ty) == 0 and callee_sym != 0:
+        let ebx_path = self.fn_symbol_source_path(callee_sym)
+        if sema_path_is_std_box_module(ebx_path) != 0 or sema_path_is_std_rc_module(ebx_path) != 0 or self.safe_symbol_text(callee_sym) == "box_ctx":
+            if self.in_unsafe != 0:
+                self.note_unsafe_operation()
+            else:
+                self.emit_error("an ephemeral value cannot be stored on the heap: it borrows stack-scoped storage (§5.1); copy the data out (e.g. .to_owned()) or use a handle (§6) for a persistent relationship", arg_node)
+                return
     if self.expr_is_ephemeral_task(arg_node) == 0:
         return
     if self.param_is_by_reference(expected_ty) != 0:
@@ -12866,6 +12879,14 @@ fn Sema.check_generic_call(self: Sema, fn_sym: i32, fn_node: i32, arg_types: &Ve
         let p_type_node = self.ast.fn_param_type(param_start, pi)
         let arg_ty = arg_types.get(pi as i64)
         self.bind_type_params_from_type_expr(p_type_node, arg_ty, tp_start, tp_count, call_node)
+        // #600 (§5.1): generic calls (incl. static methods like Box.new) never
+        // reached the ephemeral arg gates — heap-owning constructors accepted
+        // ephemeral values by value. Route through the same gate; arg node
+        // from the call's extras (resolved args mirror them positionally).
+        if arg_ty != 0 and self.type_is_ephemeral_value(arg_ty as TypeId) != 0:
+            let eg_extra = self.ast.get_data1(call_node)
+            let eg_arg_node = if self.has_resolved_call_args(call_node) != 0: self.get_resolved_call_arg(call_node, pi) else: self.ast.get_extra(eg_extra + pi)
+            self.check_ephemeral_task_arg_escape(eg_arg_node, 0, 0, fn_sym, pi)
 
     // Obligation model: collect and solve trait bounds for each bound type parameter.
     self.check_generic_trait_bounds(tp_start, tp_count, call_node)
@@ -13923,6 +13944,15 @@ fn Sema.check_generic_method_call(self: Sema, owner_sym: i32, owner_type: i32, m
             if pi2 >= param_count:
                 break
             self.bind_type_params_from_type_expr(self.ast.fn_param_type(param_start, pi2), arg_types.get(ai2 as i64), fn_tp_start, fn_tp_count, node)
+    // #600 (§5.1): generic-METHOD calls (Box.new / Rc.new / Arc.new on generic
+    // owners) are a fourth checker lane that never reached the ephemeral arg
+    // gates. Route each ephemeral arg through the same escape check.
+    for egi in 0..arg_count:
+        if egi < arg_types.len() as i32 and arg_types.get(egi as i64) != 0 and self.type_is_ephemeral_value(arg_types.get(egi as i64) as TypeId) != 0:
+            let eg_extra = self.ast.get_data1(node)
+            let eg_arg = if self.has_resolved_call_args(node) != 0: self.get_resolved_call_arg(node, egi) else: self.ast.get_extra(eg_extra + egi)
+            if eg_arg > 0:
+                self.check_ephemeral_task_arg_escape(eg_arg, 0, 0, method_fn_sym, egi)
 
     var pos = owner_tp_start
     for ti in 0..owner_tp_count:
@@ -17013,6 +17043,13 @@ fn Sema.check_method_call_parts(self: Sema, expr: i32, field: i32, extra_start: 
                 return 0
             if method_fn_sym != 0:
                 self.comp_resolved.insert(node, method_fn_sym)
+            // #600 (§5.1): static method calls (Box.new / Rc.new / Arc.new)
+            // never reached the ephemeral arg gates — route each ephemeral
+            // arg through the same escape check as free-fn calls.
+            for egi in 0..mc_resolved_arg_count:
+                let eg_arg = if mc_has_resolved_args != 0: self.get_resolved_call_arg(node, egi) else: self.ast.get_extra(extra_start + egi)
+                if eg_arg > 0 and self.expr_is_ephemeral_value(eg_arg) != 0:
+                    self.check_ephemeral_task_arg_escape(eg_arg, 0, 0, method_fn_sym, egi)
             self.propagate_method_call_param_effects(node, sig_idx, 0, 0, extra_start, mc_resolved_arg_count, mc_has_resolved_args)
             return self.sig_return_type(sig_idx)
 
