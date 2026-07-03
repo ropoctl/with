@@ -2354,7 +2354,13 @@ fn ComptimeEvaluator.static_type_expr(self: ComptimeEvaluator, node: i32) -> i32
                 return 0
             args.push(arg2)
             arg_count = 2
-        return self.sema.find_generic_inst_type(base_sym, args, arg_count) as i32
+        // #589: CREATE the instantiation if missing (ensure_, not find_) — a
+        // comptime type receiver like Arc[Rc[i32]].implements(Send) must not
+        // depend on the exact instantiation happening to exist elsewhere in
+        // the program. Same create-on-demand this evaluator already uses for
+        // TypeInfo type args; no diagnostics (this probe is speculative —
+        // value receivers legitimately return 0 and fall through).
+        return self.sema.ensure_generic_inst_type(base_sym, args, arg_count) as i32
     0
 
 fn ComptimeEvaluator.static_receiver_type(self: ComptimeEvaluator, node: i32) -> i32:

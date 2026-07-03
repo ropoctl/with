@@ -1,4 +1,4 @@
-//! expect-check-fail: runtime value is not available at comptime
+//! expect-check-fail: missing key in comptime
 
 comptime fn remove_missing() -> i32:
     var m = HashMap[str, i32].new()
