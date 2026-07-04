@@ -154,14 +154,18 @@ fn Zcu.reset_import_state(self: Zcu):
     self.c_import_omitted_symbols = HashMap.new()
     self.next_file_id = 1
 
+// #592: import dedup compares CANONICAL keys, so different spellings of the
+// same file (root vs import-resolved, ./-prefixed, absolute, via ..) collapse
+// to one import and the loader never parses a file twice.
 fn Zcu.has_imported_path(self: Zcu, path: str) -> i32:
+    let key = resolve_canonical_module_key(path)
     for i in 0..self.imported_paths.len() as i32:
-        if self.imported_paths.get(i as i64) == path:
+        if self.imported_paths.get(i as i64) == key:
             return 1
     0
 
 fn Zcu.add_imported_path(self: Zcu, path: str) -> Unit:
-    self.imported_paths.push(zcu_owned_text(path))
+    self.imported_paths.push(zcu_owned_text(resolve_canonical_module_key(path)))
 
 fn Zcu.seed_decl_source_paths(self: Zcu, pool: AstPool, path: str, file_id: i32) -> Unit:
     self.decl_source_paths = Vec.new()

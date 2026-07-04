@@ -109,13 +109,20 @@ fn tracked_normalize_path(path: str) -> str:
         let at_end = i == path.len() as i32
         if at_end or path.byte_at(i as i64) == 47:
             if i > start:
+                // Flat decision (no inner chain ending in else-if): the seed
+                // compiler predates the #629 dangling-else fix and miscompiles
+                // that shape — the ordinary-segment push became dead code.
                 let part = path.slice(start as i64, i as i64)
+                var keep = true
+                if part == ".":
+                    keep = false
                 if part == "..":
+                    keep = false
                     if parts.len() > 0 and parts.get(parts.len() - 1) != "..":
                         parts.pop()
                     else if not is_abs:
                         parts.push(part)
-                else if part != ".":
+                if keep:
                     parts.push(part)
             start = i + 1
     if parts.len() == 0:

@@ -14,6 +14,7 @@ use compiler.Runtime
 
 extern fn with_fs_read_file(path: str) -> str
 extern fn with_write(s: str) -> Unit
+extern fn with_getenv_str(name: str) -> str
 
 fn resolve_owned_text(text: str) -> str:
     if text.len() == 0:
@@ -253,12 +254,16 @@ fn resolve_binding_key(scope_id: i32, symbol: i32) -> i64:
 
 fn ResolveState.reserve_module(self: ResolveState, path: str, source_dir: str, file_id_hint: i32) -> i32:
     let canon = resolve_normalize_path(path)
-    let existing = self.module_map.get(canon)
+    // Identity is keyed on the fully-canonical form so different spellings of
+    // the same file (root vs import-resolved, ./-prefixed, absolute) collapse
+    // to one module (#592). The stored path keeps the first-seen spelling.
+    let canon_key = resolve_canonical_module_key(canon)
+    let existing = self.module_map.get(canon_key)
     if existing.is_some():
         return existing.unwrap()
 
     let id = self.module_paths.len() as i32
-    self.module_map.insert(resolve_owned_text(canon), id)
+    self.module_map.insert(resolve_owned_text(canon_key), id)
 
     self.module_paths.push(resolve_owned_text(canon))
     self.module_dirs.push(resolve_owned_text(source_dir))
@@ -1148,6 +1153,53 @@ fn resolve_normalize_path(path: str) -> str:
         out = out ++ path.slice(i as i64, (i + 1) as i64)
         i = i + 1
 
+    if out.len() == 0:
+        return "."
+    out
+
+// #592: module IDENTITY key — every spelling of the same file (`src/X.w`,
+// `./src/X.w`, absolute, `a/../src/X.w`) must collapse to one key, or the
+// loader loads the file twice and sema reports its declarations as duplicates.
+// Relative paths are anchored to the working directory and '.'/'..' segments
+// collapse lexically. Embedded pseudo-paths (`<embedded-std>/...`) are already
+// canonical. Used only as the module_map key; stored module paths keep their
+// original spelling (downstream tier checks match on relative prefixes).
+pub fn resolve_canonical_module_key(path: str) -> str:
+    if path.len() == 0 or path.starts_with("<"):
+        return path
+    var p = path
+    if p[0] != 47:
+        let cwd = with_getenv_str("PWD")
+        if cwd.len() > 0:
+            p = cwd ++ "/" ++ p
+    let parts: Vec[str] = Vec.new()
+    let is_abs = p.len() > 0 and p[0] == 47
+    var start = 0
+    for i in 0..(p.len() as i32 + 1):
+        let at_end = i == p.len() as i32
+        if at_end or p[i as i64] == 47 or p[i as i64] == 92:
+            if i > start:
+                // Flat decision (no inner chain ending in else-if): the seed
+                // compiler predates the #629 dangling-else fix and miscompiles
+                // that shape — the ordinary-segment push became dead code.
+                let part = p.slice(start as i64, i as i64)
+                var keep = true
+                if part == ".":
+                    keep = false
+                if part == "..":
+                    keep = false
+                    if parts.len() > 0 and parts.get(parts.len() - 1) != "..":
+                        parts.pop()
+                    else if not is_abs:
+                        parts.push(part)
+                if keep:
+                    parts.push(part)
+            start = i + 1
+    var out = if is_abs: "/" else: ""
+    for pi in 0..parts.len() as i32:
+        if pi > 0:
+            out = out ++ "/"
+        out = out ++ parts.get(pi as i64)
     if out.len() == 0:
         return "."
     out

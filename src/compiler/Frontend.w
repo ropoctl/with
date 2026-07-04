@@ -1699,6 +1699,10 @@ fn Zcu.process_imports_frontend(self: Zcu, pool: AstPool) -> AstPool:
     // codegen never see the duplicate.
     var merged_pool = pool
     let initial_count = merged_pool.decl_count()
+    if initial_count > 0:
+        let root_src_path = self.decl_source_path_frontend(0)
+        if root_src_path.len() > 0 and self.has_imported_path(root_src_path) == 0:
+            self.add_imported_path(root_src_path)
     var prelude_ordered: Vec[i32] = Vec.new()
     var prelude_paths = frontend_new_vec_str()
     var prelude_file_ids: Vec[i32] = Vec.new()
