@@ -5011,26 +5011,38 @@ fn is_first_on_line(source: str, pos: i32) -> i32:
         p = p - 1
     1
 
-fn Parser.parse_if_else_body(self: Parser) -> NodeId:
+fn Parser.parse_if_else_body(self: Parser, chain_col: i32, chain_is_stmt: i32) -> NodeId:
     if self.peek() == TokenKind.TK_KW_IF:
-        return self.parse_if_expr()
+        return self.parse_if_chain_arm(chain_col, chain_is_stmt)
     self.parse_body()
 
 fn Parser.parse_if_expr(self: Parser) -> NodeId:
+    // Entry for a fresh if (statement or expression position). The whole
+    // if / else-if / else chain uses THIS if's column and statement-ness for the
+    // dangling-else check, so a later `else if` arm — whose own `if` token is not
+    // first-on-line and is column-shifted by the leading `else ` — does not
+    // greedily swallow an outer chain's `else`/`else if` at a different column
+    // (#629).
+    let start = self.current_start()
+    let chain_col = column_of(self.source, start)
+    let chain_is_stmt = if is_first_on_line(self.source, start) != 0: 1 else: 0
+    self.parse_if_chain_arm(chain_col, chain_is_stmt)
+
+fn Parser.parse_if_chain_arm(self: Parser, chain_col: i32, chain_is_stmt: i32) -> NodeId:
     let start = self.current_start()
     self.advance()  // consume if
     self.skip_newlines()
 
     if self.peek() == TokenKind.TK_KW_LET:
-        return self.parse_if_let(start)
+        return self.parse_if_let(start, chain_col, chain_is_stmt)
 
     let saved_sb = self.suppress_brace
     self.suppress_brace = 1
     let cond = self.parse_expr()
     self.suppress_brace = saved_sb
 
-    let if_col = column_of(self.source, start)
-    let is_stmt_if = is_first_on_line(self.source, start) != 0
+    let if_col = chain_col
+    let is_stmt_if = chain_is_stmt != 0
     let then_body = self.parse_body()
     var else_body: NodeId = 0 as NodeId
     let save = self.pos
@@ -5042,13 +5054,13 @@ fn Parser.parse_if_expr(self: Parser) -> NodeId:
             self.pos = save
         else:
             self.advance()
-            else_body = self.parse_if_else_body()
+            else_body = self.parse_if_else_body(chain_col, chain_is_stmt)
     else:
         self.pos = save
 
     self.pool.add_node(NodeKind.NK_IF_EXPR, start, self.prev_end(), cond, then_body, else_body)
 
-fn Parser.parse_if_let(self: Parser, start: i32) -> NodeId:
+fn Parser.parse_if_let(self: Parser, start: i32, chain_col: i32, chain_is_stmt: i32) -> NodeId:
     self.advance()  // consume first 'let'
     let pat = self.parse_pattern()
     if self.expect(TokenKind.TK_EQ) == 0:
@@ -5091,8 +5103,8 @@ fn Parser.parse_if_let(self: Parser, start: i32) -> NodeId:
             clauses.push(cond as i32)
             clauses.push(0)
 
-    let if_col = column_of(self.source, start)
-    let is_stmt_if = is_first_on_line(self.source, start) != 0
+    let if_col = chain_col
+    let is_stmt_if = chain_is_stmt != 0
     let then_body = self.parse_body()
 
     var else_body: NodeId = 0 as NodeId
@@ -5105,7 +5117,7 @@ fn Parser.parse_if_let(self: Parser, start: i32) -> NodeId:
             self.pos = save
         else:
             self.advance()
-            else_body = self.parse_if_else_body()
+            else_body = self.parse_if_else_body(chain_col, chain_is_stmt)
     else:
         self.pos = save
     if else_body == 0:
