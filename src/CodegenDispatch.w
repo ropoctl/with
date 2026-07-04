@@ -2624,6 +2624,13 @@ fn Codegen.gen_enum_payload_field_value(self: Codegen, enum_val: i64, enum_sema_
     0
 
 fn Codegen.coerce_val_to_str(self: Codegen, val: i64, str_ty: i64) -> i64:
+    self.coerce_val_to_str_ext(val, str_ty, false)
+
+// Like coerce_val_to_str, but formats integers as unsigned when is_unsigned is
+// set — routing to with_fmt_u32/with_fmt_u64 and zero-extending sub-width
+// values, so a u32/u64 prints its unsigned value rather than the signed
+// two's-complement reading of the bits (#639).
+fn Codegen.coerce_val_to_str_ext(self: Codegen, val: i64, str_ty: i64, is_unsigned: bool) -> i64:
     let val_ty = wl_type_of(val)
     let vk = wl_get_type_kind(val_ty)
     var fn_name = "with_fmt_i32"
@@ -2636,12 +2643,12 @@ fn Codegen.coerce_val_to_str(self: Codegen, val: i64, str_ty: i64) -> i64:
             fn_name = "with_fmt_bool"
             coerced = self.coerce_int_ext(val, wl_i32_type(self.context), false)
         else if bit_w <= 32:
-            fn_name = "with_fmt_i32"
-            coerced = self.coerce_int_ext(val, wl_i32_type(self.context), false)
+            fn_name = if is_unsigned: "with_fmt_u32" else: "with_fmt_i32"
+            coerced = self.coerce_int_ext(val, wl_i32_type(self.context), is_unsigned)
         else:
-            fn_name = "with_fmt_i64"
+            fn_name = if is_unsigned: "with_fmt_u64" else: "with_fmt_i64"
             arg_ty = wl_i64_type(self.context)
-            coerced = self.coerce_int_ext(val, arg_ty, false)
+            coerced = self.coerce_int_ext(val, arg_ty, is_unsigned)
     else:
         if vk == wl_float_type_kind() or vk == wl_double_type_kind():
             fn_name = "with_fmt_f64"
@@ -2749,7 +2756,7 @@ fn Codegen.coerce_typed_val_to_str(self: Codegen, val: i64, sema_ty: i32, str_ty
         return self.gen_display_enum(val, effective_sema_ty, str_ty)
     if tk == TypeKind.TY_GENERIC_INST and self.mir_enum_variant_count(effective_sema_ty) > 0:
         return self.gen_display_enum(val, effective_sema_ty, str_ty)
-    self.coerce_val_to_str(val, str_ty)
+    self.coerce_val_to_str_ext(val, str_ty, self.mir_sema_type_is_unsigned(effective_sema_ty))
 
 fn Codegen.gen_debug_format(self: Codegen, val: i64, sema_ty: i32, str_ty: i64) -> i64:
     // Generate debug formatting based on sema type.
@@ -9734,9 +9741,17 @@ fn Codegen.mir_emit_ext_numeric_intrinsic_call(self: Codegen, body: &MirBody, in
                 mm_args.push(mm_b)
                 result = wl_build_call(self.builder, mm_fnt, mm_func, vec_data_i64(&mm_args), 2)
         else:
-            // Integer min/max: icmp + select
+            // Integer min/max: icmp + select. Use unsigned comparison for
+            // unsigned operands so e.g. u32.min(1) is 1, not the value whose
+            // signed reading is smaller (#511).
+            let mm_start = body.call_arg_starts.get(args_id as i64)
+            let mm_op0 = body.call_arg_operands.get(mm_start as i64)
+            let mm_unsigned = self.mir_operand_is_unsigned(body, mm_op0)
             let mm_is_min = intrinsic == MirIntrinsic.MIN
-            let mm_pred = if mm_is_min: wl_int_slt() else: wl_int_sgt()
+            let mm_pred = if mm_is_min:
+                if mm_unsigned: wl_int_ult() else: wl_int_slt()
+            else:
+                if mm_unsigned: wl_int_ugt() else: wl_int_sgt()
             let mm_cmp = wl_build_icmp(self.builder, mm_pred, mm_a, mm_b)
             result = wl_build_select(self.builder, mm_cmp, mm_a, mm_b)
 
@@ -9765,11 +9780,18 @@ fn Codegen.mir_emit_ext_numeric_intrinsic_call(self: Codegen, body: &MirBody, in
                 abs_args.push(abs_val)
                 result = wl_build_call(self.builder, abs_fnt, abs_func, vec_data_i64(&abs_args), 1)
         else:
-            // Integer abs: negate + select on sign
-            let abs_zero = wl_const_int(abs_ty, 0, 0)
-            let abs_neg = wl_build_sub(self.builder, abs_zero, abs_val)
-            let abs_is_neg = wl_build_icmp(self.builder, wl_int_slt(), abs_val, abs_zero)
-            result = wl_build_select(self.builder, abs_is_neg, abs_neg, abs_val)
+            // Integer abs. For unsigned operands abs is the identity (§17.6a);
+            // negating would produce a wrong value (#511). For signed: negate
+            // + select on sign.
+            let abs_start = body.call_arg_starts.get(args_id as i64)
+            let abs_op0 = body.call_arg_operands.get(abs_start as i64)
+            if self.mir_operand_is_unsigned(body, abs_op0):
+                result = abs_val
+            else:
+                let abs_zero = wl_const_int(abs_ty, 0, 0)
+                let abs_neg = wl_build_sub(self.builder, abs_zero, abs_val)
+                let abs_is_neg = wl_build_icmp(self.builder, wl_int_slt(), abs_val, abs_zero)
+                result = wl_build_select(self.builder, abs_is_neg, abs_neg, abs_val)
 
     else if intrinsic == MirIntrinsic.FMA:
         let fma_a = self.mir_intrinsic_arg(body, args_id, 0)

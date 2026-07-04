@@ -15158,6 +15158,16 @@ fn Sema.method_expected_arg_type(self: Sema, recv_type: i32, field: i32, arg_ind
     if recv_type == 0:
         return 0
     let resolved = self.auto_deref_ref_ptr_type(self.resolve_alias(recv_type as TypeId))
+    // Numeric builtins require same-typed operands (§17.6a: "Both operands must
+    // be the same type"). Publish the receiver type as the expected argument
+    // type so a mixed-type call like u32.min(i32) is rejected by normal
+    // argument checking rather than silently accepted (#511).
+    let recv_tk = self.get_type_kind(resolved)
+    if recv_tk == TypeKind.TY_INT or recv_tk == TypeKind.TY_FLOAT:
+        if (field == self.syms.min or field == self.syms.max) and arg_index == 0:
+            return resolved as i32
+        if self.pool_resolve(field) == "mul_add" and (arg_index == 0 or arg_index == 1):
+            return resolved as i32
     var owner_sym = 0
     if self.get_type_kind(resolved) == TypeKind.TY_GENERIC_INST:
         owner_sym = self.get_generic_inst_base(resolved as i32)
@@ -16041,6 +16051,16 @@ fn Sema.check_method_call_parts(self: Sema, expr: i32, field: i32, extra_start: 
             mc_expected = mc_static_variant_payload_tys.get(ai as i64)
         let mc_arg_ty = if mc_expected != 0: self.check_expr_with_expected(mc_arg_node, mc_expected as TypeId) else: self.check_expr(mc_arg_node)
         arg_types.push(mc_arg_ty as i32)
+        // §17.6a: numeric min/max/mul_add require same-typed operands. A literal
+        // argument adapts to the receiver type (so mc_arg_ty already matches),
+        // but a concrete operand of a different width/signedness must be an
+        // explicit `as` cast — mirroring the let-binding narrowing rule (#511).
+        if mc_expected != 0 and mc_arg_ty != 0:
+            if field == self.syms.min or field == self.syms.max or self.pool_resolve(field) == "mul_add":
+                let mc_recv_num = self.auto_deref_ref_ptr_type(self.resolve_alias(obj_type))
+                let mc_recv_tk = self.get_type_kind(mc_recv_num)
+                if (mc_recv_tk == TypeKind.TY_INT or mc_recv_tk == TypeKind.TY_FLOAT) and self.int_narrowing_requires_cast(mc_expected as TypeId, mc_arg_ty as TypeId) != 0:
+                    self.emit_error("min/max operands must be the same type; use an explicit `as` cast", mc_arg_node)
         if self.method_arg_stores_value(obj_type as i32, field, ai) != 0:
             self.check_ephemeral_task_storage(mc_arg_node, "generic container")
         let mc_sender_elem_ty = self.sender_send_element_type(obj_type as i32, field, ai)
