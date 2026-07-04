@@ -3186,6 +3186,21 @@ Mission alignment: "exactly as safe as Rust" is met by construction
 check-time error) without adopting Rust's ceremony; the fix is invisible
 to app developers — `mut self` methods simply work on Drop types.
 
+### 55.4 The naked-drop footgun (std allocators)
+
+A method merely NAMED `drop` outside `impl Drop` is an ordinary method —
+the compiler never calls it (destructor recognition is
+`select_trait_impl(type, drop)` only). lib/std/alloc.w relied on naked
+`fn Type.drop(mut self)` for all six allocator types, so no allocator
+destructor ever ran (#641). They are now `impl Drop for T:
+fn drop(move self: Self)`; the composite owners (ArenaScope,
+PoolAllocator) use empty bodies and rely on transitive field glue — an
+explicit `self.field.drop()` in a drop body would double-free, because
+the field glue also visits the field (a body must CONSUME a field to
+take over its cleanup, per `drop_consumed_field`). Residual POD
+`Vec` backings intentionally leak under the narrow drop gate (#608,
+da_pod_vec) until the wide flip is scheduled.
+
 ---
 
 *The With Programming Language — End of implementation notes.*
