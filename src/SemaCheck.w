@@ -17233,6 +17233,13 @@ fn Sema.static_receiver_type_is_known(self: Sema, expr: i32) -> i32:
     let base_sym = self.static_receiver_base_sym(expr)
     if base_sym == 0:
         return 0
+    // A bare identifier that names a bound local/param is a VALUE receiver
+    // (instance method call), not a static type reference — the local wins in
+    // value position even if a type of the same name is visible (#628). Only
+    // NK_IDENT is ambiguous; NK_TYPE_NAMED/NK_TYPE_GENERIC/NK_INDEX are explicit
+    // type syntax and always denote the type.
+    if self.ast.kind(expr) == NodeKind.NK_IDENT and self.scope_lookup(base_sym) != -1:
+        return 0
     if self.primitive_type_by_sym(base_sym) != 0:
         return 1
     if self.has_named_type_visible(base_sym) != 0:
