@@ -1902,8 +1902,9 @@ fn run_build_command(options: BuildCommandOptions, graph_options: BuildGraphComm
             link_stage_cleanup_current_process_temp_archives()
             return 1
         with_eprint("emitted C: " ++ c_path)
-        with_eprint("compile with a C compiler (example):")
-        with_eprint("  cc -I runtime " ++ c_path ++ " runtime/with_runtime.c runtime/helpers.c runtime/fiber.c runtime/fiber_asm_<arch>.s -o <output>")
+        with_eprint("cross-compile: build the emitted C with `-I runtime`, then link it against the")
+        with_eprint("With runtime objects (rt/*.w compiled to objects) and the platform fiber asm")
+        with_eprint("(runtime/fiber_asm_aarch64.s on arm64, runtime/fiber_asm_x86_64.s on x86_64).")
         comp.print_warnings()
         link_stage_cleanup_current_process_temp_archives()
         return 0

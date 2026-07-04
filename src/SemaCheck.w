@@ -9408,6 +9408,39 @@ fn Sema.check_struct_literal(self: Sema, node: i32) -> i32:
                 if self.ast.kind(f_value) == NodeKind.NK_IDENT and self.type_needs_drop(val_ty as i32) != 0:
                     self.mark_moved_if_consumed(f_value)
                 val_types.push(val_ty as i32)
+            // #632: reject unknown and duplicate named fields (§4.3). A field
+            // name the struct does not declare, or one initialized twice, is a
+            // compile error. Unknown-field detection compares against the
+            // declared field names (stride-3 field triples, per SemaDecl), so it
+            // is correct for generic structs too (type params affect field types,
+            // not names). Positional initializers (cf_name == 0) are skipped.
+            if self.type_decl_nodes.contains(name):
+                let uf_td_node = self.type_decl_nodes.get(name).unwrap()
+                let uf_td_extra = self.ast.get_data1(uf_td_node)
+                let uf_td_packed = self.ast.get_data2(uf_td_node)
+                if type_decl_sub_kind(uf_td_packed) == TypeDeclKind.Struct:
+                    let uf_decl_count = self.ast.get_extra(uf_td_extra)
+                    let seen_lit_fields: Vec[i32] = Vec.new()
+                    for cfi in 0..field_count:
+                        let cf_name = self.ast.get_extra(extra_start + cfi * 2)
+                        if cf_name == 0:
+                            continue
+                        var cf_dup = false
+                        for sfi in 0..seen_lit_fields.len() as i32:
+                            if seen_lit_fields.get(sfi as i64) == cf_name:
+                                cf_dup = true
+                                break
+                        if cf_dup:
+                            self.emit_error("duplicate field '" ++ self.pool_resolve(cf_name) ++ "' in struct literal", node)
+                        else:
+                            seen_lit_fields.push(cf_name)
+                        var cf_known = false
+                        for dfi in 0..uf_decl_count:
+                            if self.ast.get_extra(uf_td_extra + 1 + dfi * 3) == cf_name:
+                                cf_known = true
+                                break
+                        if not cf_known:
+                            self.emit_error("unknown field '" ++ self.pool_resolve(cf_name) ++ "' for type '" ++ self.pool_resolve(name) ++ "'", node)
             if self.type_decl_nodes.contains(name):
                 let defaults_td_node = self.type_decl_nodes.get(name).unwrap()
                 let defaults_td_extra = self.ast.get_data1(defaults_td_node)
