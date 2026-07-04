@@ -2816,16 +2816,23 @@ fn ComptimeEvaluator.eval_pipeline_method_call(self: ComptimeEvaluator, lhs: i32
     let recv_signal = self.eval_expr(lhs)
     if recv_signal.kind != ComptimeControlKind.CTL_VALUE:
         return recv_signal
-    if recv_signal.value.kind == ComptimeValueKind.CV_VEC or recv_signal.value.kind == ComptimeValueKind.CV_BYTES:
-        if recv_signal.value.kind == ComptimeValueKind.CV_BYTES:
-            return self.eval_bytes_method_call(lhs, recv_signal.value, method, extra_start, arg_count, node)
-        return self.eval_vec_method_call(lhs, recv_signal.value, method, extra_start, arg_count, node)
-    if recv_signal.value.kind == ComptimeValueKind.CV_MAP:
-        return self.eval_map_method_call(lhs, recv_signal.value, method, extra_start, arg_count, node)
-    if self.is_string_builder_value(recv_signal.value):
-        return self.eval_string_builder_method_call(lhs, recv_signal.value, method, extra_start, arg_count, node)
-    if recv_signal.value.kind == ComptimeValueKind.CV_STR:
-        return self.eval_str_method_call(recv_signal.value, method, extra_start, arg_count, node)
+    self.eval_pipeline_method_value(lhs, recv_signal.value, method, extra_start, arg_count, node)
+
+fn ComptimeEvaluator.eval_pipeline_method_value(self: ComptimeEvaluator, lhs: i32, recv: ComptimeValue, method: i32, extra_start: i32, arg_count: i32, node: i32) -> ComptimeControl:
+    if recv.kind == ComptimeValueKind.CV_VEC or recv.kind == ComptimeValueKind.CV_BYTES:
+        if recv.kind == ComptimeValueKind.CV_BYTES:
+            return self.eval_bytes_method_call(lhs, recv, method, extra_start, arg_count, node)
+        return self.eval_vec_method_call(lhs, recv, method, extra_start, arg_count, node)
+    if recv.kind == ComptimeValueKind.CV_MAP:
+        return self.eval_map_method_call(lhs, recv, method, extra_start, arg_count, node)
+    if self.is_string_builder_value(recv):
+        return self.eval_string_builder_method_call(lhs, recv, method, extra_start, arg_count, node)
+    if recv.kind == ComptimeValueKind.CV_STR:
+        return self.eval_str_method_call(recv, method, extra_start, arg_count, node)
+    // §4.2.4 / #565: pipeline is method-call sugar, so integer receivers get the
+    // same intrinsic evaluation as the direct-method form.
+    if recv.kind == ComptimeValueKind.CV_INT:
+        return self.eval_int_method_call(recv, self.node_type_or(lhs, recv.type_id), method, extra_start, arg_count, node)
     self.fail(node, "pipeline method '" ++ self.pool.resolve(method) ++ "' is not comptime-evaluable yet")
 
 fn ComptimeEvaluator.eval_pipeline(self: ComptimeEvaluator, node: i32) -> ComptimeControl:
@@ -2846,6 +2853,16 @@ fn ComptimeEvaluator.eval_pipeline(self: ComptimeEvaluator, node: i32) -> Compti
     if lhs_signal.kind != ComptimeControlKind.CTL_VALUE:
         return lhs_signal
     let fn_sym = self.ast.get_data0(callee)
+    // #565: top-level `comptime` initializers are folded by the transform pass
+    // BEFORE sema types their expressions, so pipeline_method_calls cannot be
+    // populated for them. Resolve the method-call sugar here, the same way
+    // check_pipeline would: if the receiver's type has this pipeline method,
+    // dispatch it as a method; otherwise fall through to the free-fn path.
+    var lhs_tid = self.node_type_or(lhs, lhs_signal.value.type_id)
+    if lhs_tid == 0 and lhs_signal.value.kind == ComptimeValueKind.CV_STR:
+        lhs_tid = self.sema.ty_str as i32
+    if lhs_tid != 0 and self.sema.pipeline_method_exists(lhs_tid, fn_sym) != 0:
+        return self.eval_pipeline_method_value(lhs, lhs_signal.value, fn_sym, args_start, arg_count, node)
     let args: Vec[ComptimeValue] = Vec.new()
     args.push(lhs_signal.value)
     for i in 0..arg_count:
