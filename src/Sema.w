@@ -4711,6 +4711,7 @@ fn Sema.check_module(self: Sema):
     self.prepare_for_comptime_transform()
     self.validate_no_std_requirements()
     self.check_top_level_let_values()
+    self.check_type_decl_field_defaults()
     self.check_bodies()
     self.check_reachable_comptime_errors()
 

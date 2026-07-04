@@ -9325,6 +9325,44 @@ fn Sema.check_map_literal(self: Sema, node: i32) -> i32:
     self.typed_expr_types.insert(node, target_ty)
     target_ty
 
+// #632 (§4.3): validate struct field DEFAULT expressions against their field
+// types at declaration time — `type P { x: i32 = "no" }` must be a compile
+// error, not a silently-materialized zero when the field is omitted. Generic
+// type decls are skipped (their field types can reference unbound params);
+// their defaults are still checked at instantiation/literal sites.
+fn Sema.check_type_decl_field_defaults(self: Sema):
+    if self.diags.has_errors():
+        return
+    for di in 0..self.ast.decl_count():
+        self.update_decl_source_context(di)
+        let decl = self.ast.get_decl(di)
+        if self.ast.kind(decl) != NodeKind.NK_TYPE_DECL:
+            continue
+        if type_decl_sub_kind(self.ast.get_data2(decl)) != TypeDeclKind.Struct:
+            continue
+        let extra_start = self.ast.get_data1(decl)
+        let field_count = self.ast.get_extra(extra_start)
+        let tp_after = extra_start + 1 + field_count * 4
+        if self.ast.get_extra(tp_after + 2) > 0:
+            continue
+        for fi in 0..field_count:
+            let base = extra_start + 1 + fi * 3
+            let f_name = self.ast.get_extra(base)
+            let f_type_node = self.ast.get_extra(base + 1)
+            let f_default = self.ast.get_extra(base + 2)
+            if f_default == 0:
+                continue
+            let f_ty = self.resolve_type_expr(f_type_node)
+            if f_ty == 0 or self.get_type_kind(self.resolve_alias(f_ty)) == TypeKind.TY_ERR:
+                continue
+            let d_ty = self.check_expr_with_expected(f_default, f_ty)
+            if d_ty == 0:
+                continue
+            if self.int_narrowing_requires_cast(f_ty, d_ty) != 0:
+                self.emit_error("field default type mismatch for '" ++ self.pool_resolve(f_name) ++ "'; use an explicit `as` cast", f_default)
+            else if self.types_compatible(f_ty as i32, d_ty as i32) == 0 and self.arithmetic_result_type(f_ty, d_ty) == 0:
+                self.emit_error("field default type mismatch for '" ++ self.pool_resolve(f_name) ++ "'", f_default)
+
 fn Sema.check_struct_literal(self: Sema, node: i32) -> i32:
     var name = self.ast.get_data0(node)
     let extra_start = self.ast.get_data1(node)
