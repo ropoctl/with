@@ -1266,6 +1266,14 @@ fn Sema.collect_fn_decl(self: Sema, node: i32, is_local: i32, decl_index: i32):
                     let p0_ty_sym = self.ast.get_data0(p0_type)
                     if self.pool_resolve(p0_ty_sym) == "Self":
                         self.emit_error("method receiver requires an explicit mode: use 'self: &Self', 'mut self: Self', or 'move self: Self'", node)
+            // §2.4/#642: a destructor always consumes — Drop.drop must take
+            // `move self: Self`. Catch other forms here at check time (they
+            // previously died in codegen with no source location).
+            let decl_name_for_drop = self.pool_resolve(fn_name)
+            if fn_param_is_move_self(p0_flags) == 0 and (decl_name_for_drop == "drop" or decl_name_for_drop.ends_with(".drop")):
+                let encl_impl = self.impl_node_for_method_decl(node)
+                if encl_impl != 0 and self.pool_resolve(self.ast.get_data2(encl_impl)) == "Drop":
+                    self.emit_error("Drop.drop receiver must be 'move self: Self' — a destructor always consumes (§2.4)", node)
 
     // Bind Self to method owner type for dot-name methods
     let self_sym = self.syms.self_type

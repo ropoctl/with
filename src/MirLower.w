@@ -7665,6 +7665,13 @@ fn MirBuilder.lower_call_redirected(self: MirBuilder, fn_op: i32, fn_sym: i32, a
 // pool.extra. This avoids mutating the shared AstPool (which would trigger
 // Vec realloc and invalidate other copies' pointers — use-after-free).
 fn MirBuilder.lower_call_with_arg_nodes(self: MirBuilder, fn_op: i32, callee_sym: i32, arg_node_vec: Vec[i32], ret_type_id: i32, node: i32) -> i32:
+    self.lower_call_with_arg_nodes_recv(fn_op, callee_sym, -1, arg_node_vec, ret_type_id, node)
+
+// Variant taking a pre-lowered receiver operand (recv_op >= 0): used by the
+// non-generic method path for `mut self` callees, where the receiver must be
+// an OK_COPY borrow of the caller's place rather than an OK_MOVE consumed
+// argument (§9.5/#641a). Remaining arg nodes shift to sig positions 1..n.
+fn MirBuilder.lower_call_with_arg_nodes_recv(self: MirBuilder, fn_op: i32, callee_sym: i32, recv_op: i32, arg_node_vec: Vec[i32], ret_type_id: i32, node: i32) -> i32:
     let sig_idx = self.call_sig_for_sym(callee_sym)
     var actual_ret_type_id = ret_type_id
     if (actual_ret_type_id == 0 or actual_ret_type_id == self.sema.ty_void as i32) and sig_idx >= 0:
@@ -7672,12 +7679,16 @@ fn MirBuilder.lower_call_with_arg_nodes(self: MirBuilder, fn_op: i32, callee_sym
         if sig_ret != 0:
             actual_ret_type_id = sig_ret
     let args: Vec[i32] = Vec.new()
+    var arg_pos = 0
+    if recv_op >= 0:
+        args.push(recv_op)
+        arg_pos = 1
     for i in 0..arg_node_vec.len() as i32:
         let arg_node = arg_node_vec.get(i as i64)
         if arg_node < 0:
             args.push(self.lower_var(0 - arg_node, 0, 0))
         else:
-            args.push(self.lower_call_arg(arg_node, sig_idx, 0, i))
+            args.push(self.lower_call_arg(arg_node, sig_idx, 0, i + arg_pos))
     let args_id = self.body.new_call_args(args)
     self.body.set_call_ast_node(args_id, node)
     if self.sym_is_generic_fn(callee_sym):
@@ -7698,11 +7709,18 @@ fn MirBuilder.lower_std_drop_call(self: MirBuilder, node: i32) -> i32:
     if arg_count != 1:
         return self.unit_operand()
     let arg_node = self.ast.get_extra(args_start)
-    let place = self.lower_expr_place(arg_node)
-    self.emit_drop_stmt(place, "std.drop", self.ast.get_start(arg_node))
-    let local_id = mir_place_plain_local(&self.body, place)
-    if local_id >= 0:
-        self.cancel_scheduled_value_drop_for_local(local_id)
+    self.lower_drop_glue_and_consume(arg_node, "std.drop", node)
+
+// §2.4/#641b: an explicit destructor call is identical to the scope-exit drop,
+// just earlier — the same StmtKind.Drop glue (guarded user drop + field glue +
+// drop_consumed_field skips), then the binding is consumed via the move
+// discipline (moved-mark + reset-on-move) so the scope-exit drop guard-skips
+// and a later reassign re-arms cleanly.
+fn MirBuilder.lower_drop_glue_and_consume(self: MirBuilder, recv_node: i32, origin: str, node: i32) -> i32:
+    let place = self.lower_expr_place(recv_node)
+    self.emit_drop_stmt(place, origin, self.ast.get_start(recv_node))
+    let mv = self.body.new_operand(OperandKind.OK_MOVE, place)
+    self.consume_moved_operand(mv)
     self.unit_operand()
 
 fn MirBuilder.call_sig_for_sym(self: MirBuilder, sym: i32) -> i32:
@@ -7757,6 +7775,23 @@ fn MirBuilder.callee_has_move_self(self: MirBuilder, fn_sym: i32) -> bool:
         return false
     let ps = self.ast.fn_meta_param_start(meta)
     fn_param_is_move_self(self.ast.fn_param_flags(ps, 0)) != 0
+
+// §9.5/#641a: a `mut self: Self` receiver is a non-consuming mutable borrow of
+// the caller's place; the caller must pass it as OK_COPY of the place, never
+// OK_MOVE + consume.
+fn MirBuilder.callee_has_mut_self(self: MirBuilder, fn_sym: i32) -> bool:
+    var fn_node = 0
+    if self.sema.fn_decl_nodes.contains(fn_sym):
+        fn_node = self.sema.fn_decl_nodes.get(fn_sym).unwrap()
+    else:
+        fn_node = self.generic_fn_node_for_sym(fn_sym)
+        if fn_node == 0:
+            return false
+    let meta = self.ast.find_fn_meta(fn_node)
+    if meta < 0 or self.ast.fn_meta_param_count(meta) == 0:
+        return false
+    let ps = self.ast.fn_meta_param_start(meta)
+    fn_param_is_mut_self(self.ast.fn_param_flags(ps, 0)) != 0
 
 fn MirBuilder.call_sig_for_expr(self: MirBuilder, fn_expr: i32) -> i32:
     if fn_expr == 0:
@@ -8458,6 +8493,14 @@ fn MirBuilder.lower_method_call(self: MirBuilder, self_expr: i32, method_sym: i3
     if enum_accessor_variant != 0:
         return self.lower_enum_accessor_call(self_expr, method_sym, node)
 
+    // §2.4/#641b: an explicit `x.drop()` on a Drop type routes through the
+    // scope-exit drop glue (destructor body + field glue) and consumes the
+    // binding — never a plain method call, which would skip field drops.
+    // Naked `drop` methods on non-Drop types stay ordinary method calls.
+    if method_name == "drop" and arg_count == 0 and self.receiver_is_static_type_expr(self_expr) == 0:
+        if enum_accessor_recv_type != 0 and self.sema.type_has_drop_impl(enum_accessor_recv_type) != 0:
+            return self.lower_drop_glue_and_consume(self_expr, "explicit.drop", node)
+
     if self.is_option_type(enum_accessor_recv_type) != 0 and (method_name == "map" or method_name == "and_then" or method_name == "or_else" or method_name == "inspect" or method_name == "cloned"):
         return self.lower_option_combinator_method(self_expr, method_name, arg_start, arg_count, node)
 
@@ -8632,15 +8675,23 @@ fn MirBuilder.lower_method_call(self: MirBuilder, self_expr: i32, method_sym: i3
             let recv_sym = self.ast.get_data0(idx_base)
             if self.lookup_local(recv_sym) < 0 and self.sema.named_types.contains(recv_sym):
                 is_static_call = true
+    // §9.5/#641a: a `mut self` callee borrows the receiver — pass OK_COPY of
+    // the caller's place (via the same autoderef discipline the GENERIC_CALL
+    // path uses) instead of OK_MOVE + consume. Consuming receivers (`move
+    // self` and legacy unflagged `self: T`) keep the plain-arg move path.
+    var recv_op = -1
     if not is_static_call:
-        arg_nodes.push(self_expr)
+        if self.callee_has_mut_self(callee_sym):
+            recv_op = self.lower_receiver_with_method_autoderef_for_method(self_expr, method_sym)
+        else:
+            arg_nodes.push(self_expr)
     let has_resolved_method_args = self.sema.has_resolved_call_args(node)
     let method_arg_count = if has_resolved_method_args != 0: self.sema.get_resolved_call_arg_count(node) else: arg_count
     for i in 0..method_arg_count:
         let method_arg = if has_resolved_method_args != 0: self.sema.get_resolved_call_arg(node, i) else: self.ast.get_extra(arg_start + i)
         arg_nodes.push(method_arg)
 
-    self.lower_call_with_arg_nodes(fn_op, callee_sym, arg_nodes, self.expr_type(node), node)
+    self.lower_call_with_arg_nodes_recv(fn_op, callee_sym, recv_op, arg_nodes, self.expr_type(node), node)
 
 fn MirBuilder.lower_intrinsic_call(self: MirBuilder, intrinsic: MirIntrinsic, self_expr: i32, method_sym: i32, arg_start: i32, arg_count: i32, node: i32) -> i32:
     // Emit a call terminator with a ConstKind.CK_FN operand and intrinsic tag.
@@ -11874,7 +11925,13 @@ fn lower_fn_with_sig(builder: MirBuilder, fn_node: i32, sig_idx: i32) -> MirBody
             if builder.local_type_is_str(local_id) != 0:
                 builder.set_string_local_flags(local_id, 1)
             let drop_receiver_self = drop_body != 0 and i == 0 and builder.symbol_text(p_name) == "self"
-            if builder.sema.is_copy(p_ty) == 0 and drop_receiver_self == 0:
+            // §9.5/#641a: `mut self`/`&self` receivers are BORROWS of the
+            // caller's place — the callee does not own them and must not drop
+            // them at scope exit. Only consuming receivers (`move self`, and
+            // the legacy unflagged `self: ConcreteType` form) are owned here.
+            let recv_flags = builder.ast.fn_param_flags(param_start, i)
+            let borrowed_receiver = i == 0 and (fn_param_is_mut_self(recv_flags) != 0 or fn_param_is_ref_self(recv_flags) != 0)
+            if builder.sema.is_copy(p_ty) == 0 and drop_receiver_self == 0 and not borrowed_receiver:
                 builder.schedule_drop(local_id, DropKind.DK_VALUE)
             param_locals.push(local_id)
         builder.body.n_params = param_count
@@ -11975,7 +12032,13 @@ fn lower_fn_clause_dispatcher(sema: &Sema, ast_pool: AstPool, pool: InternPool, 
         builder.body.push_stmt(builder.cur_bb, StmtKind.StorageLive, local_id, 0, if first_clause != 0: ast_pool.get_start(first_clause) else: 0)
         if builder.local_type_is_str(local_id) != 0:
             builder.set_string_local_flags(local_id, 1)
-        if sema.is_copy(p_ty) == 0:
+        // §9.5/#641a parity with lower_fn_with_sig: borrow-mode receivers are
+        // not owned by the callee — no scope-exit drop.
+        var clause_borrowed_receiver = false
+        if pi == 0 and first_meta >= 0 and 0 < ast_pool.fn_meta_param_count(first_meta):
+            let clause_recv_flags = ast_pool.fn_param_flags(ast_pool.fn_meta_param_start(first_meta), 0)
+            clause_borrowed_receiver = fn_param_is_mut_self(clause_recv_flags) != 0 or fn_param_is_ref_self(clause_recv_flags) != 0
+        if sema.is_copy(p_ty) == 0 and not clause_borrowed_receiver:
             builder.schedule_drop(local_id, DropKind.DK_VALUE)
         param_locals.push(local_id)
     builder.body.n_params = param_count

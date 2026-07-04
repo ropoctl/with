@@ -3124,4 +3124,68 @@ Sema type tables are immutable after type-checking:
 
 ---
 
+## 55. Receiver-Mode Drop Discipline and Explicit Destructor Calls (spec §2.4, §9.5)
+
+### 55.1 The rule
+
+Receiver modes carry the ownership contract (spec §9.5): `self: &Self`
+borrows, `mut self: Self` mutably borrows the caller's place (in-place
+mutation, NON-consuming — including for `Drop` types), and only
+`move self: Self` consumes. The lowering must agree with sema on both
+sides of every call:
+
+- Callee side (`MirLower.lower_fn_with_sig`): a scope-exit `DK_VALUE`
+  drop is scheduled for a by-value non-Copy param ONLY when it is
+  actually owned by the callee. For param 0, `mut self`/`&self`
+  receivers (FN_PARAM_FLAG_MUT_SELF / REF_SELF) are borrows and must
+  NOT be scheduled; `move self` and legacy unflagged `self: ConcreteType`
+  receivers keep the consuming discipline.
+- Caller side (`MirLower.lower_method_call`, non-generic path): the
+  receiver operand is OK_COPY of the (autoderef'd) place for borrow-mode
+  receivers and OK_MOVE + consume only for consuming receivers —
+  `lower_receiver_with_method_autoderef_for_method` is the single
+  decision point; the GENERIC_CALL path already used it, and the
+  non-generic path now routes through it for mut-self callees.
+
+Why this was invisible for years: for non-`impl Drop` types the
+mistakenly-scheduled callee drop is a silent no-op (no destructor, and
+`type_needs_drop` is shallow-managed), so the whole compiler's
+`mut self` receivers worked by accident. The moment a type gained
+`impl Drop`, every mut-self method call destroyed the receiver mid-call
+(#641: `arena.alloc()` freed the arena).
+
+### 55.2 Explicit destructor calls (Higher RAII)
+
+`x.drop()` on a `Drop` type is NOT an ordinary method call: it lowers
+through the same `StmtKind.Drop` glue the scope-exit path uses (guarded
+user drop + field glue + `drop_consumed_field` skips), then consumes the
+binding via the move discipline (moved-mark + reset-on-move), so the
+scope-exit drop guard-skips and `x = fresh` re-arms cleanly. `drop(x)`
+(the std free function) lowers through the same glue. This makes an
+explicit drop byte-for-byte identical to the scope-exit drop, just
+earlier — the §2.4 ruling.
+
+### 55.3 References and deviations
+
+- **Vale** (design compass): destructors are ordinary consuming
+  functions and explicit destructor calls are a feature (Higher RAII,
+  DropFree.md "Discard… will call the destructor"). Adopted: `move
+  self` destructors, legal explicit `.drop()`.
+- **Rust**: `Drop::drop(&mut self)` with compiler-owned drop glue and a
+  ban on explicit destructor calls (E0040). Rejected: it is the Rust
+  idiom (compiler-only drops); With keeps consuming destructors and
+  makes the explicit call *correct* instead of forbidden.
+- **Zig**: no destructors; `deinit()` + `defer` conventions, allocators
+  take pointer receivers. The pointer-receiver discipline agrees with
+  our borrow-mode lowering; the no-automatic-drops model is rejected
+  (With owns cleanup).
+- **Go**: GC + finalizers; not applicable.
+
+Mission alignment: "exactly as safe as Rust" is met by construction
+(no premature drop, no double drop, use-after-explicit-drop is a
+check-time error) without adopting Rust's ceremony; the fix is invisible
+to app developers — `mut self` methods simply work on Drop types.
+
+---
+
 *The With Programming Language — End of implementation notes.*

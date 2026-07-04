@@ -562,10 +562,10 @@ Generated coverage: 3114 normative requirements plus 52 informative Section 30 t
   - Requirement: Types may implement a `Drop` trait whose `drop` method is called when the value goes out of scope.
   - Source: `§2.4 L383-L385`
   - Related spec refs: none
-- [x] `2.4.1.2` **The drop method takes self by value — the value is consumed:**
-  - Requirement: The `drop` method takes `self` **by value** — the value is consumed:
-  - Source: `§2.4 L383-L385`
-  - Related spec refs: none
+- [x] `2.4.1.2` **The drop method takes `move self: Self` — the value is consumed:**
+  - Requirement: The `drop` method takes the consuming receiver `move self: Self` — the value is consumed (BDFL ruling 2026-07-04, #642).
+  - Source: `§2.4 L383-L385, L419-L421`
+  - Related spec refs: `§9.5`
 - [x] `2.4.1.3` **Because drop consumes self, there is no need to defensively null out fields...**
   - Requirement: Because `drop` consumes `self`, there is no need to defensively null out fields to prevent double-free — the value ceases to exist after `drop` returns.
   - Source: `§2.4 L393-L397`
@@ -654,6 +654,14 @@ Generated coverage: 3114 normative requirements plus 52 informative Section 30 t
   - Requirement: When a value is conditionally moved, its destructor runs on exactly the paths where it still owns a value and is skipped on the paths where it was moved; the compiler arranges this automatically with no programmer annotations.
   - Source: `§2.4 L450-L456`
   - Related spec refs: `§2.2`, `§21.1 Rule 9`
+- [x] `2.4.1.25` **The canonical destructor receiver is `move self: Self`; other receiver forms in a Drop impl are a compile-time error with a fix-it.**
+  - Requirement: `move self: Self` is the only legal `Drop::drop` receiver; `fn drop(self)` / `fn drop(mut self)` in a `Drop` impl are rejected at check time with a fix-it.
+  - Source: `§2.4 L419-L421`
+  - Related spec refs: `§9.5`
+- [x] `2.4.1.26` **Explicit destructor calls are legal (Higher RAII): `x.drop()` runs the destructor body AND the field drop glue, then the binding is consumed — identical to the scope-exit drop, just earlier.**
+  - Requirement: An explicit `x.drop()` on a `Drop` type is an ordinary consuming call equivalent to the scope-exit drop (body + field glue, exactly once); `drop(x)` remains available as a no-op-body consume.
+  - Source: `§2.4 L421-L426`
+  - Related spec refs: `§2.5`
 
 ## 3. References and Borrowing
 
