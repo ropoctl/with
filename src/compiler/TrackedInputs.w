@@ -87,8 +87,47 @@ fn tracked_inside_root(path: str, root: str) -> bool:
         return true
     if path == root:
         return true
+    // Root "." contains every relative path (normalization strips the "./"
+    // prefix from the path, so the prefix comparison below would miss).
+    if root == "." and path.len() > 0 and path.byte_at(0) != 47:
+        return true
     let prefix = if root.ends_with("/"): root else: root ++ "/"
     path.starts_with(prefix)
+
+// Lexically collapse '.' and '..' segments so containment is checked against
+// the path a read would actually touch (#585). A '..' that would climb above
+// the start of a relative path is kept (it escapes the resolution base and the
+// caller's containment/parent-segment checks reject it); on an absolute path a
+// leading '..' is dropped (cannot go above '/').
+fn tracked_normalize_path(path: str) -> str:
+    if path.len() == 0:
+        return path
+    let is_abs = path.len() > 0 and path.byte_at(0) == 47
+    let parts: Vec[str] = Vec.new()
+    var start = 0
+    for i in 0..(path.len() as i32 + 1):
+        let at_end = i == path.len() as i32
+        if at_end or path.byte_at(i as i64) == 47:
+            if i > start:
+                let part = path.slice(start as i64, i as i64)
+                if part == "..":
+                    if parts.len() > 0 and parts.get(parts.len() - 1) != "..":
+                        parts.pop()
+                    else if not is_abs:
+                        parts.push(part)
+                else if part != ".":
+                    parts.push(part)
+            start = i + 1
+    if parts.len() == 0:
+        if is_abs:
+            return "/"
+        return "."
+    var result = if is_abs: "/" else: ""
+    for pi in 0..parts.len() as i32:
+        if pi > 0:
+            result = result ++ "/"
+        result = result ++ parts.get(pi as i64)
+    result
 
 fn tracked_authorized_root(source_path: str, package_root: str) -> str:
     if package_root.len() > 0:
@@ -102,13 +141,26 @@ pub fn tracked_embed_resolve(source_path: str, raw_path: str) -> str:
     tracked_resolve_source_relative(source_path, raw_path)
 
 pub fn tracked_embed_read(source_path: str, raw_path: str, package_root: str) -> TrackedReadResult:
-    let resolved = tracked_embed_resolve(source_path, raw_path)
-    let root = tracked_authorized_root(source_path, package_root)
-    if tracked_path_has_parent_segment(raw_path):
+    // #585: resolve relative to the source file, NORMALIZE, then enforce that
+    // the normalized path stays inside the authorized root — so an internal
+    // '..' that resolves back inside the package (src/main.w embedding
+    // ../resources/x) is legal, while true escapes are still rejected. After
+    // normalization an in-root path has no remaining parent segments; any
+    // leftover '..' (or a rootless path with parent segments) escapes.
+    var resolved = tracked_normalize_path(tracked_embed_resolve(source_path, raw_path))
+    let root = tracked_normalize_path(tracked_authorized_root(source_path, package_root))
+    // The project root is absolute (with.toml discovery absolutizes it) while a
+    // CLI-relative source path resolves to a relative embed path; anchor the
+    // relative path to the working directory so containment compares like with
+    // like. Leading '..' segments collapse against the cwd here, turning a true
+    // escape into an absolute path outside the root.
+    if root.len() > 0 and tracked_path_is_absolute(root) and not tracked_path_is_absolute(resolved):
+        let cwd = runtime_getenv("PWD")
+        if cwd.len() > 0:
+            resolved = tracked_normalize_path(cwd ++ "/" ++ resolved)
+    if tracked_path_has_parent_segment(resolved) or (root.len() > 0 and not tracked_inside_root(resolved, root)):
         let display_root = if root.len() > 0: root else: tracked_dirname(source_path)
         return tracked_read_error(resolved, "embed_file: '" ++ resolved ++ "' is outside the package root '" ++ display_root ++ "'; embed_file reads only tracked inputs inside the package (broader access requires an explicit build capability)")
-    if root.len() > 0 and not tracked_inside_root(resolved, root):
-        return tracked_read_error(resolved, "embed_file: '" ++ resolved ++ "' is outside the package root '" ++ root ++ "'; embed_file reads only tracked inputs inside the package (broader access requires an explicit build capability)")
     if runtime_file_exists(resolved) == 0:
         return tracked_read_error(resolved, "embed_file: could not read '" ++ resolved ++ "'")
     tracked_read_ok(resolved, runtime_read_file(resolved))
