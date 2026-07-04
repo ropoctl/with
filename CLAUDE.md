@@ -119,6 +119,18 @@ infer, or that has no consequence?* If yes, don't add it. A
 diagnostic earns its place only by catching a real mistake the
 compiler cannot otherwise resolve — not by enforcing ritual.
 
+**Vale, not Rust, is the closest reference for the ownership model.**
+We take the best parts of Vale (single ownership, consuming
+destructors / Higher RAII, generational references, regions) and
+ditch the worst parts. The mission's "exactly as safe as Rust" is a
+safety *bar*, not a design compass — we are allergic to Rust's
+tiresome syntax and the burden it puts on the dev-user. When a Rust
+idiom is adopted because we absolutely must, it is confined to the
+library-maintainer tier ("only library maintainers will ever have to
+do this, never app developers"). When weighing ownership/drop/
+lifetime semantics, check `.reference/Vale` first; reach for Rust
+only when Vale's answer cannot meet the safety bar.
+
 ---
 
 ## No Silent Fallbacks

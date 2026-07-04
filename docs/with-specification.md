@@ -412,9 +412,18 @@ impl Copy for Buffer                      // ERROR: field `data` is not Copy
 
 type File { fd: i32 }
 impl Drop for File:
-    fn drop(self): ...
+    fn drop(move self: Self): ...
 impl Copy for File                        // ERROR: Copy + Drop is forbidden
 ```
+
+The canonical destructor receiver is `move self: Self` — a destructor
+always consumes. Other receiver forms in a `Drop` impl are a
+compile-time error with a fix-it. Explicit destructor calls are legal
+(Higher RAII): `x.drop()` is an ordinary consuming call that runs the
+destructor body AND the field drop glue, after which the binding is
+consumed — identical to the scope-exit drop, just earlier. The free
+function `drop(x)` remains available as a no-op-body consume.
+(BDFL rulings 2026-07-04, #641/#642.)
 
 These rules guarantee that `Copy` is always safe in safe code — it
 cannot cause double-free, use-after-free, or resource leaks.
@@ -433,7 +442,7 @@ value** — the value is consumed:
 
 ```
 impl Drop for Database:
-    fn drop(self: Self):
+    fn drop(move self: Self):
         sqlite3_close(self.handle)
 ```
 
@@ -448,7 +457,7 @@ No recursion, no leaks, no ceremony:
 
 ```
 impl Drop for Database:
-    fn drop(self: Self):
+    fn drop(move self: Self):
         sqlite3_close(self.handle)
         // self.handle was consumed by the close call
         // compiler drops remaining fields automatically
@@ -492,7 +501,7 @@ error:
 ```
 type FileWrapper { fd: File, name: String }
 impl Drop for FileWrapper:
-    fn drop(self: Self): close_file(self.fd)
+    fn drop(move self: Self): close_file(self.fd)
 
 let w1 = FileWrapper { fd: open_file(), name: "A" }
 let w2 = { w1 with name: "B" }   // ERROR: partial move from Drop type
@@ -2437,13 +2446,19 @@ heap containers, global storage, or escaping closures.
 
 ### 5.2 Propagation
 
-Ephemerality propagates through type constructors:
+Ephemerality propagates through VALUE constructors:
 
-- If `T` is ephemeral, then `Option[T]`, `Result[T, E]`, `(T, U)`,
-  and any generic `F[T]` are ephemeral.
+- If `T` is ephemeral, then `Option[T]`, `Result[T, E]`, and `(T, U)`
+  are ephemeral. This applies to value wrappers only.
 - If any field of a struct is ephemeral, the struct is ephemeral. A
   struct definition with ephemeral fields is rejected unless the
   struct itself is marked `ephemeral`.
+- Heap containers (`Vec`, `HashMap`, `HashSet`, `Box`, `Rc`, `Arc`,
+  and any other heap-owning generic) do NOT propagate: an ephemeral
+  element type is a compile error, per §5.1. The idiom for batch
+  references is indices or ranges into the owning collection, not
+  stored views. (BDFL ruling 2026-07-04, #625: safe by construction
+  beats viral tracking; revisit only on demonstrated library need.)
 
 ### 5.3 Canonical Ephemeral Types
 
