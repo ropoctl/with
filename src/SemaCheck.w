@@ -12309,6 +12309,18 @@ fn Sema.check_call(self: Sema, node: i32) -> i32:
         if expected_ty != 0 and self.sema_type_is_c_char_pointer(expected_ty) != 0 and (self.extern_fn_names.contains(fn_sym) or self.ci_syms.contains(fn_sym)):
             if self.string_literal_has_interior_nul(arg_node) != 0:
                 self.emit_error("string literal has an interior NUL byte and cannot coerce to a C string (`*const c_char`); the conversion would truncate at the NUL (§16.3c)", arg_node)
+            // #602 (§16.3c): a param that RETAINS the pointer past the call must
+            // not receive a call-scoped `str` temporary (freed on return →
+            // dangling). A `str`/`&str` argument coerces to a call-scoped C
+            // string; require caller-owned storage instead. An owned CString /
+            // &CStr / raw pointer arg is not a str value/view and passes.
+            if self.param_is_retained(fn_sym, ai) != 0:
+                let r_arg = self.resolve_alias(arg_ty as TypeId)
+                let r_is_str = if self.get_type_kind(r_arg) == TypeKind.TY_STR: 1
+                    else if self.get_type_kind(r_arg) == TypeKind.TY_REF and self.get_type_kind(self.resolve_alias(self.get_type_d0(r_arg) as TypeId)) == TypeKind.TY_STR: 1
+                    else: 0
+                if r_is_str != 0:
+                    self.emit_error("this parameter retains the C-string pointer past the call, but a `str` coerces to a call-scoped temporary that is freed on return (§16.3c); pass a pointer into caller-owned storage instead, e.g. `let c = s.to_cstring()?` then the argument `c.as_cstr().ptr()`", arg_node)
         if sig_idx >= 0 and self.extern_fn_names.contains(fn_sym) and expected_ty != 0:
             let callback_expected = self.resolve_alias(expected_ty as TypeId)
             if self.get_type_kind(callback_expected) == TypeKind.TY_EXTERN_FN:

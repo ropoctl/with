@@ -115,6 +115,8 @@ fn Sema.collect_declarations(self: Sema):
             self.collect_extern_fn(decl, is_local)
         if kind == NodeKind.NK_EXTERN_VAR:
             self.collect_extern_var(decl, is_local)
+        if kind == NodeKind.NK_C_IMPORT:
+            self.read_c_import_retentions(decl)
         if kind == NodeKind.NK_LET_DECL:
             self.collect_let_decl(decl, is_local)
 
@@ -562,9 +564,12 @@ fn Sema.ci_function_requires_raw_abi(self: Sema, fn_sym: i32) -> i32:
     for pi in 0..param_count:
         let pty = self.sig_param_type(sig_idx, pi)
         if self.ci_type_requires_raw_contract(pty) != 0:
-            // A pointer parameter is modeled only when the curated overlay
-            // vouches for it as a `cstr_in` const char*. No evidence -> raw.
-            if pi < cstr_n and self.ci_type_is_const_c_string_input(pty) != 0:
+            // A pointer parameter is modeled as a C-string input (`cstr_in`)
+            // only when the curated overlay vouches for it, OR (#602) when a
+            // `retains:` annotation vouches for it: a retained `const char*`
+            // param is a modeled C-string input whose retention is enforced at
+            // the call site. No evidence -> raw.
+            if (pi < cstr_n or self.param_is_retained(fn_sym, pi) != 0) and self.ci_type_is_const_c_string_input(pty) != 0:
                 continue
             return 1
     0

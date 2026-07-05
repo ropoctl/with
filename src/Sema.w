@@ -390,6 +390,11 @@ type Sema {
 
     // Extern fn names
     extern_fn_names: HashMap[i32, i32],
+    // #602: c_import/extern params that RETAIN a passed C-string pointer past
+    // the call (§16.3c). Keyed by fn name sym → bitmask of retained param
+    // indices. Such a param is modeled as a C-string input (cstr_in) but
+    // rejects a call-scoped `str` temporary — the caller must own the storage.
+    retained_extern_params: HashMap[i32, i32],
     // Function AST node indices by name
     fn_decl_nodes: HashMap[i32, i32],
     // Function declaration node -> semantic symbol. Most declarations use
@@ -1355,6 +1360,7 @@ fn sema_empty_state(pool: InternPool, diags: DiagnosticList, ast: AstPool) -> Se
     let pretty_symbol_names = sema_new_map_i32_str()
     let sig_lookup = sema_new_map_i32_i32()
     let extern_fn_names = sema_new_map_i32_i32()
+    let retained_extern_params = sema_new_map_i32_i32()
     let fn_decl_nodes = sema_new_map_i32_i32()
     let fn_decl_effective_syms = sema_new_map_i32_i32()
     let fn_decl_effective_indices = sema_new_map_i32_i32()
@@ -1450,6 +1456,7 @@ fn sema_empty_state(pool: InternPool, diags: DiagnosticList, ast: AstPool) -> Se
         sig_param_eff_starts: Vec.new(),
         sig_value_ref_abi_params: Vec.new(),
         extern_fn_names,
+        retained_extern_params,
         fn_decl_nodes,
         fn_decl_effective_syms,
         fn_decl_effective_indices,
@@ -1794,6 +1801,89 @@ fn sema_empty_state(pool: InternPool, diags: DiagnosticList, ast: AstPool) -> Se
 
 fn Sema.placeholder(pool: InternPool, diags: DiagnosticList, ast: AstPool) -> Sema:
     return sema_empty_state(pool, diags, ast)
+
+// #602: mark param `idx` of extern/c_import fn `name_sym` as retaining its ptr.
+fn Sema.mark_param_retained(mut self: Sema, name_sym: i32, idx: i32):
+    if name_sym == 0 or idx < 0 or idx >= 31:
+        return
+    let existing = if self.retained_extern_params.contains(name_sym): self.retained_extern_params.get(name_sym).unwrap() else: 0
+    self.retained_extern_params.insert(name_sym, existing | (1 << (idx as u32)))
+
+fn Sema.param_is_retained(self: Sema, name_sym: i32, idx: i32) -> i32:
+    if name_sym == 0 or idx < 0 or idx >= 31:
+        return 0
+    if not self.retained_extern_params.contains(name_sym):
+        return 0
+    let mask = self.retained_extern_params.get(name_sym).unwrap()
+    if (mask & (1 << (idx as u32))) != 0: 1 else: 0
+
+// #602: parse a `retains:` entry of the form "fnname(idx)" and register it.
+fn Sema.register_retains_entry(mut self: Sema, entry_sym: i32):
+    let text = self.pool_resolve_symbol(entry_sym)
+    let n = text.len() as i32
+    var paren = -1
+    for i in 0..n:
+        if text.byte_at(i as i64) == 40:
+            paren = i
+            break
+    if paren <= 0:
+        return
+    let fn_name = text.slice(0, paren as i64)
+    var idx = 0
+    var got = 0
+    var j = paren + 1
+    while j < n:
+        let c = text.byte_at(j as i64)
+        if c >= 48 and c <= 57:
+            idx = idx * 10 + (c - 48)
+            got = 1
+            j = j + 1
+        else:
+            break
+    if got == 0:
+        return
+    let fn_sym = self.pool_intern(fn_name)
+    self.mark_param_retained(fn_sym, idx)
+
+// #602: read a c_import node's `retains:` record (appended after the #357
+// ownership record) and register each entry. Layout after extra_start:
+// links, allow, no_methods (packed counts), then strict(1), only_count(1),
+// only..., owns_count(1), owns..., borrows_count(1), borrows...,
+// retains_count(1), retains...
+fn Sema.read_c_import_retentions(mut self: Sema, c_import_node: i32):
+    let extra_start = self.ast.get_data1(c_import_node)
+    let packed = self.ast.get_data2(c_import_node)
+    let extra_len = self.ast.extra_len()
+    var ep = extra_start + c_import_link_count(packed) + c_import_allow_count(packed) + c_import_no_methods_count(packed)
+    ep = ep + 1
+    if ep < 0 or ep >= extra_len:
+        return
+    let only_count = self.ast.get_extra(ep)
+    if only_count < 0 or only_count > 65536:
+        return
+    ep = ep + 1 + only_count
+    if ep < 0 or ep >= extra_len:
+        return
+    let owns_count = self.ast.get_extra(ep)
+    if owns_count < 0 or owns_count > 65536:
+        return
+    ep = ep + 1 + owns_count
+    if ep < 0 or ep >= extra_len:
+        return
+    let borrows_count = self.ast.get_extra(ep)
+    if borrows_count < 0 or borrows_count > 65536:
+        return
+    ep = ep + 1 + borrows_count
+    if ep < 0 or ep >= extra_len:
+        return
+    let retains_count = self.ast.get_extra(ep)
+    if retains_count <= 0 or retains_count > 65536:
+        return
+    ep = ep + 1
+    if ep + retains_count > extra_len:
+        return
+    for i in 0..retains_count:
+        self.register_retains_entry(self.ast.get_extra(ep + i))
 
 fn Sema.init(pool: InternPool, diags: DiagnosticList, ast: AstPool) -> Sema:
     var s = sema_empty_state(pool, diags, ast)

@@ -8690,6 +8690,17 @@ prove already lives in valid NUL-terminated storage, the compiler may
 pass it directly. Otherwise it generates a call-scoped
 NUL-terminated temporary and frees it when the call returns.
 
+**Retention (`retains:`).** Parameters are borrowed by default. A
+`c_import` contract may annotate a parameter as retaining the pointer:
+`use c_import("…", retains: ["fn(idx)"])` declares that `fn`'s parameter
+`idx` keeps the C-string pointer past the call (violating condition 3
+above). Such a parameter is still a modeled C-string input — it is
+callable without `unsafe` and accepts a pointer into caller-owned
+storage — but a `str` (which would coerce to a call-scoped temporary
+freed on return) is a compile error. The caller must pass a pointer into
+storage it keeps alive, e.g. `let c = s.to_cstring()?` then
+`fn(c.as_cstr().ptr())`. (#602.)
+
 Interior NUL is never silently truncated. A proven interior NUL is a
 compile error; a dynamic interior NUL is checked at runtime and
 reported according to the binding's error model. The conversion passes

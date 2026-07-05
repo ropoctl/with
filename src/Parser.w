@@ -2450,6 +2450,7 @@ fn Parser.parse_c_import(self: Parser, start: i32) -> NodeId:
     var strict_flag = 0
     let owns_entries: Vec[i32] = Vec.new()
     let borrows_entries: Vec[i32] = Vec.new()
+    let retains_entries: Vec[i32] = Vec.new()
 
     while self.peek() == TokenKind.TK_COMMA:
         self.advance()
@@ -2570,11 +2571,12 @@ fn Parser.parse_c_import(self: Parser, start: i32) -> NodeId:
                 self.advance()
             else:
                 self.emit_error("expected true or false for strict")
-        else if key == "owns" or key == "borrows":
-            // #357: ownership annotations — owns: ["ctor -> dtor"],
-            // borrows: ["fn(pi) -> ctor"]. String or string array. (Two
-            // branches on push, not an aliased Vec binding: a copied Vec
-            // header would take the pushes and leave the original stale.)
+        else if key == "owns" or key == "borrows" or key == "retains":
+            // #357/#602: ownership annotations — owns: ["ctor -> dtor"],
+            // borrows: ["fn(pi) -> ctor"], retains: ["fn(pi)"]. String or
+            // string array. (Two branches on push, not an aliased Vec binding:
+            // a copied Vec header would take the pushes and leave the original
+            // stale.)
             if self.peek() == TokenKind.TK_L_BRACKET:
                 self.advance()
                 self.skip_newlines()
@@ -2585,6 +2587,8 @@ fn Parser.parse_c_import(self: Parser, start: i32) -> NodeId:
                         let ob_sym = self.intern.intern(self.source.slice((obs + 1) as i64, (obe - 1) as i64))
                         if key == "owns":
                             owns_entries.push(ob_sym)
+                        else if key == "retains":
+                            retains_entries.push(ob_sym)
                         else:
                             borrows_entries.push(ob_sym)
                         self.advance()
@@ -2602,6 +2606,8 @@ fn Parser.parse_c_import(self: Parser, start: i32) -> NodeId:
                 let ob_sym = self.intern.intern(self.source.slice((obs + 1) as i64, (obe - 1) as i64))
                 if key == "owns":
                     owns_entries.push(ob_sym)
+                else if key == "retains":
+                    retains_entries.push(ob_sym)
                 else:
                     borrows_entries.push(ob_sym)
                 self.advance()
@@ -2636,6 +2642,10 @@ fn Parser.parse_c_import(self: Parser, start: i32) -> NodeId:
     self.pool.add_extra(borrows_entries.len() as i32)
     for i in 0..borrows_entries.len() as i32:
         self.pool.add_extra(borrows_entries.get(i as i64))
+    // #602 retention record, appended after the #357 ownership record.
+    self.pool.add_extra(retains_entries.len() as i32)
+    for i in 0..retains_entries.len() as i32:
+        self.pool.add_extra(retains_entries.get(i as i64))
     self.pool.add_node(NodeKind.NK_C_IMPORT, start, self.prev_end(), header_sym, extra_start, pack_c_import_counts_ex(links.len() as i32, allow_untranslated.len() as i32, no_methods_types.len() as i32, no_methods_all))
 
 // ── let decl ─────────────────────────────────────────────────────

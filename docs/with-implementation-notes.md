@@ -3411,6 +3411,37 @@ writes; single-level (`behav_bitpacked_single`) unaffected.
 References: Zig packed-struct fields compose against one backing integer with
 accumulated offsets — the same model. Rust/Go/Vale have no native bitfields.
 
+## 62. Retained C-String Params (`retains:`) (spec §16.3c; #602)
+
+A c_import contract may carry `retains: ["fn(idx)"]`, meaning fn's param idx
+keeps the passed C-string pointer past the call. Implementation:
+
+- **Store.** `Sema.retained_extern_params` maps a fn name sym to a bitmask of
+  retained param indices (`mark_param_retained` / `param_is_retained`).
+- **Parser.** `retains:` is a c_import option parallel to `owns:`/`borrows:`
+  (Parser.w), serialized after the #357 ownership record in the NK_C_IMPORT
+  extra.
+- **Reader.** `read_c_import_retentions` (run in the decl-collect loop) walks the
+  extra past the packed counts + strict/only + owns/borrows records to the
+  retains record and registers each `"fn(idx)"` entry.
+- **Modeling.** `ci_function_requires_raw_abi` (SemaDecl) treats a retained
+  `const char*` param as a modeled `cstr_in` input — so the function is callable
+  without `unsafe` and an owned pointer argument is accepted. Without this the
+  param would import raw (str would not coerce and the retention error could
+  never fire — the "unreachable" trap, see decisions.md D4).
+- **Enforcement.** At the C-char coercion site (SemaCheck, beside the interior-
+  NUL check), a retained param given a `str`/`&str` argument is a compile error
+  directing the caller to `to_cstring()?.as_cstr().ptr()`. An owned pointer
+  (`CStr.ptr()` → `*const i8`) is not a str value/view and passes.
+
+Debug teeth: `WITH_DEBUG_ALLOC_SCRIBBLE` / `dbg_scribble` (rt_core.w) poisons
+freed allocations with `0xDE`, so a retained-then-freed pointer reads poison at
+runtime — a dynamic backstop for any retention the static check cannot see.
+
+References: Go's cgo pointer contract + `cgocheck` dynamic enforcement (adopted:
+contract + debug-mode teeth); Rust unsafe-docs-only and Zig manual (rejected: no
+guardrail). See decisions.md D4.
+
 ---
 
 *The With Programming Language — End of implementation notes.*
