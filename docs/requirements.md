@@ -2276,14 +2276,18 @@ Generated coverage: 3114 normative requirements plus 52 informative Section 30 t
   - Requirement: Ephemerality propagates through type constructors:
   - Source: `§5.2 L2251`
   - Related spec refs: none
-- [x] `5.2.1.2` **If T is ephemeral, then Option[T], Result[T, E], (T, U), and any generic F[...**
-  - Requirement: If `T` is ephemeral, then `Option[T]`, `Result[T, E]`, `(T, U)`, and any generic `F[T]` are ephemeral.
-  - Source: `§5.2 L2253-L2254`
-  - Related spec refs: none
+- [x] `5.2.1.2` **If T is ephemeral, then Option[T], Result[T, E], (T, U), and any generic F[T] (including heap containers) are ephemeral.**
+  - Requirement: Ephemerality propagates through type constructors: if `T` is ephemeral, then `Option[T]`, `Result[T, E]`, `(T, U)`, and any generic `F[T]` — including `Vec[T]`, `HashMap[K, T]`, `Box[T]`, `Rc[T]`, `Arc[T]` — are ephemeral. (BDFL ruling 2026-07-04, revised after reference review, #625; see `docs/decisions.md` D2.)
+  - Source: `§5.2 L2253-L2256`
+  - Related spec refs: `§5.1`
 - [x] `5.2.1.3` **If any field of a struct is ephemeral, the struct is ephemeral. A struct de...**
   - Requirement: If any field of a struct is ephemeral, the struct is ephemeral. A struct definition with ephemeral fields is rejected unless the struct itself is marked `ephemeral`.
-  - Source: `§5.2 L2255-L2257`
+  - Source: `§5.2 L2257-L2259`
   - Related spec refs: none
+- [x] `5.2.1.4` **A container of an ephemeral element is itself ephemeral: valid as a local/by-value param, but its ESCAPE (return to non-ephemeral position, heap-store, box) is a compile error.**
+  - Requirement: A container of an ephemeral element (`Vec[T]`, `HashMap[K, T]`, `Box[T]`, …) is itself ephemeral and obeys §5.1: it is a valid local or by-value parameter, but may not escape its origin's scope. Returning it where the return type is not ephemeral, storing it in a heap container or a non-ephemeral struct field, or boxing it is a compile error, enforced by borrow-origin tracking (a container that borrows only owned/param values is unrestricted; one that borrows a stack local it would outlive is rejected). Matches Rust lifetimes / Vale regions. (BDFL ruling 2026-07-04, revised after reference review, #625; see `docs/decisions.md` D2.)
+  - Source: `§5.2 L2260-L2270`
+  - Related spec refs: `§5.1`, `§5.4`
 
 ### §5.3 Canonical Ephemeral Types
 

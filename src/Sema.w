@@ -3962,6 +3962,24 @@ fn Sema.set_binding_view_deps(self: Sema, sym: i32, param_mask: i32, deps: Vec[i
             provenance.poisoned_binding_node = 0
             slot.set(provenance)
 
+// #625 (viral-escape): union additional view origins into a binding that
+// already exists — used when a store (Vec.push / HashMap.insert) adds the
+// pushed element's borrow origins to the container binding, so a later escape
+// of the container is caught by the ephemeral-escape checks.
+fn Sema.add_binding_view_deps(self: Sema, sym: i32, param_mask: i32, deps: Vec[i32]):
+    if sym == 0:
+        return
+    if param_mask == 0 and deps.len() == 0:
+        return
+    var merged: Vec[i32] = Vec.new()
+    let existing = self.binding_view_dep_count(sym)
+    for i in 0..existing:
+        merged = self.push_unique_i32(merged, self.binding_view_dep_at(sym, i))
+    for i in 0..deps.len() as i32:
+        merged = self.push_unique_i32(merged, deps.get(i as i64))
+    let merged_mask = self.binding_view_origin_mask(sym) | param_mask
+    self.set_binding_view_deps(sym, merged_mask, merged)
+
 fn Sema.binding_view_origin_mask(self: Sema, sym: i32) -> i32:
     let opt = self.scope_name_map.get(sym)
     if opt.is_some():

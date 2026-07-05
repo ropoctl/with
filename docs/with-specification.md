@@ -2446,19 +2446,26 @@ heap containers, global storage, or escaping closures.
 
 ### 5.2 Propagation
 
-Ephemerality propagates through VALUE constructors:
+Ephemerality propagates through type constructors:
 
-- If `T` is ephemeral, then `Option[T]`, `Result[T, E]`, and `(T, U)`
-  are ephemeral. This applies to value wrappers only.
+- If `T` is ephemeral, then `Option[T]`, `Result[T, E]`, `(T, U)`, and
+  any generic `F[T]` — including heap containers such as `Vec[T]`,
+  `HashMap[K, T]`, `Box[T]`, `Rc[T]`, `Arc[T]` — are ephemeral.
 - If any field of a struct is ephemeral, the struct is ephemeral. A
   struct definition with ephemeral fields is rejected unless the
   struct itself is marked `ephemeral`.
-- Heap containers (`Vec`, `HashMap`, `HashSet`, `Box`, `Rc`, `Arc`,
-  and any other heap-owning generic) do NOT propagate: an ephemeral
-  element type is a compile error, per §5.1. The idiom for batch
-  references is indices or ranges into the owning collection, not
-  stored views. (BDFL ruling 2026-07-04, #625: safe by construction
-  beats viral tracking; revisit only on demonstrated library need.)
+- A container of an ephemeral element is therefore itself ephemeral,
+  and obeys §5.1 like any other ephemeral value: it is a valid local
+  or by-value parameter, but it may not **escape** its origin's scope.
+  Returning it where the return type is not ephemeral, storing it in a
+  heap container or a non-ephemeral struct field, or boxing it is a
+  compile error — enforced by borrow-origin tracking, so a container
+  that borrows a live outer value (e.g. a batch of handles whose fields
+  are all owned, like `Vec[Workspace]`) is unrestricted, while one that
+  borrows a stack local it would outlive is rejected. (BDFL ruling
+  2026-07-04, revised after reference-implementation review, #625: this
+  is the model of Rust lifetimes and Vale regions — control the escape,
+  not the container. See `docs/decisions.md` D2.)
 
 ### 5.3 Canonical Ephemeral Types
 

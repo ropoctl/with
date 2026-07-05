@@ -4153,6 +4153,10 @@ fn Sema.expr_is_ephemeral_value(self: Sema, node: i32) -> i32:
         return 1
     if kind == NodeKind.NK_CALL:
         return self.expr_is_ephemeral_task(node)
+    // #625 (decisions.md D2): a container/struct literal of an ephemeral type is
+    // an ephemeral value — needed so Box.new(View{…}) / heap-escape gates fire.
+    if kind == NodeKind.NK_STRUCT_LIT or kind == NodeKind.NK_ARRAY_LIT or kind == NodeKind.NK_MAP_LIT:
+        return self.type_is_ephemeral_value(self.cached_or_checked_expr_type(node))
     0
 
 fn Sema.scope_body_tail_is_method_call(self: Sema, node: i32, scope_sym: i32, method_sym: i32) -> i32:
@@ -7315,6 +7319,13 @@ fn Sema.check_block(self: Sema, node: i32) -> i32:
         let tail_kind = self.get_type_kind(self.resolve_alias(tail_type))
         if tail_kind == TypeKind.TY_REF:
             self.check_returned_view_origins(tail, tail)
+        else if self.type_is_ephemeral_value(tail_type as i32) != 0 and tail_is_value != 0 and self.stmt_pos_depth == 0 and self.current_return_type != 0 and self.current_return_type != self.ty_void:
+            // #625 (decisions.md D2): a tail-position return of an ephemeral value
+            // (struct or container) is escape-checked HERE, in-scope, while the
+            // block's binding view-deps are still live. The body-level check
+            // (check_returned_ephemeral_value_origins after check_expr) runs post
+            // scope-teardown, so it cannot see a container binding's origins.
+            self.check_returned_ephemeral_value_origins(tail, tail)
     self.expire_dead_borrows_in_block(extra_start, stmt_count, stmt_count, 0)
 
     self.current_block_extra_start = saved_block_extra
@@ -7688,6 +7699,21 @@ fn Sema.collect_expr_view_deps(self: Sema, node: i32, out0: Vec[i32]) -> Vec[i32
         let field_count = self.ast.get_data2(node)
         for fi in 0..field_count:
             out = self.collect_expr_view_deps(self.ast.get_extra(extra_start + fi * 2 + 1), out)
+        return out
+    // #625 (decisions.md D2): a container literal carries the borrow origins of
+    // its elements, so an escape of the container is caught.
+    if kind == NodeKind.NK_ARRAY_LIT:
+        let arr_start = self.ast.get_data0(node)
+        let arr_count = self.ast.get_data1(node)
+        for ai in 0..arr_count:
+            out = self.collect_expr_view_deps(self.ast.get_extra(arr_start + ai), out)
+        return out
+    if kind == NodeKind.NK_MAP_LIT:
+        let map_start = self.ast.get_data0(node)
+        let pair_count = self.ast.get_data1(node)
+        for pi in 0..pair_count:
+            out = self.collect_expr_view_deps(self.ast.get_extra(map_start + pi * 2), out)
+            out = self.collect_expr_view_deps(self.ast.get_extra(map_start + pi * 2 + 1), out)
         return out
     let dep_count = self.expr_view_dep_count(node)
     if dep_count > 0:
@@ -15386,9 +15412,19 @@ fn Sema.method_arg_stores_value(self: Sema, recv_type: i32, field: i32, arg_inde
         return 0
     var resolved = self.resolve_alias(recv_type as TypeId)
     resolved = self.auto_deref_ref_ptr_type(resolved) as TypeId
-    if self.get_type_kind(resolved) != TypeKind.TY_GENERIC_INST:
+    let rtk = self.get_type_kind(resolved)
+    // A container receiver may be a full GENERIC_INST (Vec[View]) or a bare /
+    // element-erased container type (an inferred `var v = Vec.new()` before its
+    // element binds). Extract the base symbol from either — the storing-method
+    // classification only needs the base, not the element type.
+    let owner_sym = if rtk == TypeKind.TY_GENERIC_INST:
+        self.get_generic_inst_base(resolved as i32)
+    else if rtk == TypeKind.TY_STRUCT:
+        self.get_type_d0(resolved)
+    else:
+        0
+    if owner_sym == 0:
         return 0
-    let owner_sym = self.get_generic_inst_base(resolved as i32)
     let method_name = self.pool_resolve(field)
     if owner_sym == self.syms.vec:
         if field == self.syms.push and arg_index == 0:
@@ -16134,6 +16170,19 @@ fn Sema.check_method_call_parts(self: Sema, expr: i32, field: i32, extra_start: 
                     self.emit_error("min/max operands must be the same type; use an explicit `as` cast", mc_arg_node)
         if self.method_arg_stores_value(obj_type as i32, field, ai) != 0:
             self.check_ephemeral_task_storage(mc_arg_node, "generic container")
+            // #625 (viral-escape, decisions.md D2): storing an ephemeral
+            // element propagates its stack view-origins onto the container
+            // binding, so a later escape (return / heap-store / box) of the
+            // container is caught by the existing ephemeral-escape checks.
+            // Owned-field "linear" ephemerals (e.g. Workspace{token: str})
+            // carry no view origin, so they stay freely containerizable.
+            if mc_arg_ty as i32 != 0 and self.type_is_ephemeral_value(mc_arg_ty as i32) != 0:
+                if self.ast.kind(expr) == NodeKind.NK_IDENT:
+                    let mc_recv_sym = self.ast.get_data0(expr)
+                    var mc_store_deps: Vec[i32] = Vec.new()
+                    mc_store_deps = self.collect_expr_view_deps(mc_arg_node, mc_store_deps)
+                    let mc_store_mask = self.compute_expr_view_origin_mask(mc_arg_node)
+                    self.add_binding_view_deps(mc_recv_sym, mc_store_mask, mc_store_deps)
         let mc_sender_elem_ty = self.sender_send_element_type(obj_type as i32, field, ai)
         if mc_sender_elem_ty != 0:
             if mc_arg_ty as i32 != 0 and self.types_compatible(mc_sender_elem_ty, mc_arg_ty as i32) == 0 and self.arithmetic_result_type(mc_sender_elem_ty, mc_arg_ty as i32) == 0:

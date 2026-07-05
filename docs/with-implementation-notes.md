@@ -3201,6 +3201,79 @@ take over its cleanup, per `drop_consumed_field`). Residual POD
 `Vec` backings intentionally leak under the narrow drop gate (#608,
 da_pod_vec) until the wide flip is scheduled.
 
+## 56. Containers of Ephemerals: Viral-Escape, Not a Ban (spec §5.1, §5.2)
+
+**What was ruled** (BDFL, 2026-07-04, revised after reference review,
+#625; full rationale in `docs/decisions.md` D2): a container of an
+ephemeral element is *itself* ephemeral (§5.2 full virality — restoring
+the original "any generic `F[T]`" and reverting the 6f9160e3 narrowing).
+It is a valid **local** or **by-value parameter**; the **escape** is
+what is rejected — returning it where the return type is not ephemeral,
+storing it in a heap container or a non-ephemeral struct field, or
+boxing it. This is the model of Rust lifetimes and Vale regions:
+control the escape, not the container.
+
+**Why not the blanket ban.** The first implementation banned an ephemeral
+element type at every annotation/push/literal. It broke the stdlib's own
+`parallel(workspaces: Vec[Workspace])` — the only container-of-ephemeral
+in the whole stdlib — even though `Workspace{token: str, id: i32}` is
+all-owned and memory-safe to batch. And it could not distinguish a
+dangling `StrView{ptr: *const u8, …}` from a safe `Workspace`: both are
+raw-pointer/owned-field structs, so a structural refinement would let the
+actual freed-memory type slip through. The distinguishing signal is not
+the `ephemeral` keyword but *whether the value carries a live stack
+view-origin* — exactly what borrow-origin tracking already computes.
+
+**How implemented (origin tracking, not a type ban).**
+- **Stores propagate origins.** At the `method_arg_stores_value` site
+  (SemaCheck.w), `v.push(elem)` / `m.insert(k, elem)` on a local unions
+  the element's view-origins onto the container binding via
+  `add_binding_view_deps` (Sema.w). `Vec.new()` receivers that are
+  element-erased (not a full `GENERIC_INST`) are recognized by extending
+  the base-symbol extraction in `method_arg_stores_value` to bare
+  container structs.
+- **Container literals carry element origins.** `collect_expr_view_deps`
+  (SemaCheck.w) recurses `NK_ARRAY_LIT` elements and `NK_MAP_LIT`
+  key/value pairs (it already recursed struct-literal fields).
+- **Tail-position escape check runs in-scope.** The body-level ephemeral
+  escape check (after `check_expr(body)`) runs *after* the block scope is
+  torn down, so a container binding's origins are already cleared — which
+  is why tail-position ephemeral returns (containers *and* bare structs)
+  silently leaked before. The block checker now runs
+  `check_returned_ephemeral_value_origins` on a return-position tail
+  in-scope, right beside the existing `TY_REF` view check.
+- **Heap-escape (box) gate.** `expr_is_ephemeral_value` now classifies a
+  struct/array/map literal of an ephemeral type as ephemeral, so the
+  existing #600 heap-boxing gate (`check_ephemeral_task_arg_escape`)
+  fires on `Box.new(View{…})`.
+
+A container that borrows only owned or parameter values (`Vec[Workspace]`,
+`fn f(src: &i32) -> Vec[View]: … v.push(View{p: src}); v`) carries no
+stack-local origin and is unrestricted; one that borrows a stack local it
+would outlive is a compile error ("returned ephemeral value may outlive
+its origin 'x'").
+
+**References.**
+- **Rust:** `Vec<&str>` / `Vec<&[&str]>` are ordinary types (they appear
+  in the stdlib docs); the lifetime parameter bounds the container and the
+  errors are all escape errors (E0515 return-ref-to-local, E0521
+  borrow-escapes, E0716 temp-dropped-while-borrowed). Adopted — this *is*
+  the viral-escape model, minus the written lifetime (With infers it).
+- **Vale** (design compass): containers of region refs are allowed;
+  regions (static) + generational references (runtime) control escape.
+  Adopted in spirit — With's static origin tracking is the compile-time
+  analogue.
+- **Zig:** `ArrayList(*T)` compiles; dangling is UB, the programmer's job.
+  Rejected: unsafe by our bar.
+- **Go:** GC + escape analysis; no borrow concept — n/a.
+
+**Mission alignment.** "Exactly as safe as Rust" is a *bar*, and here we
+meet it with Rust's *own* model — while the app developer writes no
+lifetime and a memory-safe batch of owned handles (`Vec[Workspace]`) is
+never rejected. Banning safe code would be "ceremony for something that
+doesn't matter," which the mission forbids; Vale, the design compass,
+points the same way.
+
 ---
 
 *The With Programming Language — End of implementation notes.*
