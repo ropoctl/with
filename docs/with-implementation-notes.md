@@ -3338,6 +3338,28 @@ Go's nil-map half-validity is explicitly rejected here, which is exactly the
 bug). Rust `Default` (same "usable empty" intent, no implicit return). n/a for
 Zig/Vale.
 
+## 59. Coerced-Borrow View Origins (spec §5.2; #626)
+
+`check_returned_ephemeral_value_origins` rejects a returned/stored view whose
+origin is a dying stack local, using `collect_expr_view_deps` to find origins.
+That collector recorded a dep only for TY_REF-typed idents and explicit `&`
+borrows — so a struct literal that coerces an OWNED local into a `&T` field
+(`View { s: owned }`, field `s: &str`, `owned: str`) produced no origin, and the
+returned view dangled with the check passing.
+
+Fix: in `check_struct_literal`'s field loop, when the field's expected type is a
+reference and the value's type is not (an owned→`&T` coercion), record the
+value's place root (`place_root_sym`) as a borrow origin on the struct-literal
+node (`set_expr_view_deps`). `collect_expr_view_deps`'s `NK_STRUCT_LIT` branch
+now also surfaces the node's recorded origins. The existing escape check filters
+params and statics via `view_origin_is_stack_local`, so `View { s: some_param }`
+and `View { s: "literal" }` stay legal — only a coercion of a dying local is
+rejected.
+
+References: Rust E0515/E0106 — the borrow of a temporary/local must not outlive
+it; adopted as the diagnostic bar. The message names the origin
+("may outlive its origin 'owned'").
+
 ---
 
 *The With Programming Language — End of implementation notes.*

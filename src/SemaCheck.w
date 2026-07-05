@@ -7699,6 +7699,11 @@ fn Sema.collect_expr_view_deps(self: Sema, node: i32, out0: Vec[i32]) -> Vec[i32
         let field_count = self.ast.get_data2(node)
         for fi in 0..field_count:
             out = self.collect_expr_view_deps(self.ast.get_extra(extra_start + fi * 2 + 1), out)
+        // #626: owned locals coerced into `&T` fields (recorded on the node by
+        // check_struct_literal) are borrow origins of this struct.
+        let sl_dep_count = self.expr_view_dep_count(node)
+        for sdi in 0..sl_dep_count:
+            out = self.push_unique_i32(out, self.expr_view_dep_at(node, sdi))
         return out
     // #625 (decisions.md D2): a container literal carries the borrow origins of
     // its elements, so an escape of the container is caught.
@@ -9448,6 +9453,9 @@ fn Sema.check_struct_literal(self: Sema, node: i32) -> i32:
                     expected_struct_ty = resolved
             // Check field initializers and collect value types
             let val_types: Vec[i32] = Vec.new()
+            // #626: origins of owned locals coerced into `&T` fields — this
+            // struct borrows them, so a returned/stored view must be caught.
+            let coerce_borrow_origins: Vec[i32] = Vec.new()
             for fi in 0..field_count:
                 let f_name = self.ast.get_extra(extra_start + fi * 2)
                 let f_value = self.ast.get_extra(extra_start + fi * 2 + 1)
@@ -9471,7 +9479,22 @@ fn Sema.check_struct_literal(self: Sema, node: i32) -> i32:
                 // the actual drop suppression for all forms.
                 if self.ast.kind(f_value) == NodeKind.NK_IDENT and self.type_needs_drop(val_ty as i32) != 0:
                     self.mark_moved_if_consumed(f_value)
+                // #626: an owned value coerced into a `&T` field (field is a
+                // reference, value is not) makes the struct borrow the value's
+                // origin. Record it; the ephemeral-escape check filters params
+                // and statics via view_origin_is_stack_local.
+                if field_expected != 0 and val_ty != 0:
+                    let fe_res = self.resolve_alias(field_expected as TypeId)
+                    let vt_res = self.resolve_alias(val_ty as TypeId)
+                    if self.get_type_kind(fe_res) == TypeKind.TY_REF and self.get_type_kind(vt_res) != TypeKind.TY_REF:
+                        let coerce_origin = self.place_root_sym(f_value)
+                        if coerce_origin != 0:
+                            coerce_borrow_origins.push(coerce_origin)
                 val_types.push(val_ty as i32)
+            // #626: record the coerced-borrow origins on the struct-literal node
+            // so collect_expr_view_deps surfaces them for the escape check.
+            if coerce_borrow_origins.len() > 0:
+                self.set_expr_view_deps(node, 0, coerce_borrow_origins)
             // #632: reject unknown and duplicate named fields (§4.3). A field
             // name the struct does not declare, or one initialized twice, is a
             // compile error. Unknown-field detection compares against the
