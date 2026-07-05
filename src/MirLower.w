@@ -5152,10 +5152,23 @@ fn MirBuilder.lower_block_mode(self: MirBuilder, node: i32, want_result: i32) ->
 
     self.pop_scope_inline()
     if block_label != 0:
+        // #640: a labeled block used in value/tail position yields its tail
+        // value (§29.13). Materialize the tail value into a stable place before
+        // the goto so it is valid in labeled_after_bb (the value was computed in
+        // the pre-goto block). Statement-position labeled blocks (want_result
+        // == 0) still yield unit.
+        var labeled_result = self.unit_operand()
+        if want_result != 0:
+            let lr_ty = self.operand_type(result)
+            if lr_ty != 0 and lr_ty != self.sema.ty_void as i32:
+                let lr_tmp = self.new_temp(lr_ty)
+                let lr_place = self.place_for_local(lr_tmp)
+                self.assign_operand_to_place(lr_place, result, self.ast.get_start(node))
+                labeled_result = self.body.new_operand(OperandKind.OK_COPY, lr_place)
         self.terminate(TermKind.TK_GOTO, labeled_after_bb, 0, 0, 0)
         self.pop_control_target()
         self.switch_to(labeled_after_bb)
-        return self.unit_operand()
+        return labeled_result
     if want_result != 0: result else: self.unit_operand()
 
 fn MirBuilder.lower_if(self: MirBuilder, cond_expr: i32, then_expr: i32, else_expr_opt: i32, node: i32, want_result: i32) -> i32:

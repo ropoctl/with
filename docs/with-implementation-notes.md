@@ -3360,6 +3360,38 @@ References: Rust E0515/E0106 — the borrow of a temporary/local must not outliv
 it; adopted as the diagnostic bar. The message names the origin
 ("may outlive its origin 'owned'").
 
+## 60. Labeled Block Tail Value (spec §29.13, §13.5b; #640)
+
+A `'label:` colon-form wraps its body in an `NK_BLOCK` carrying a block-meta
+label (`finish_labeled_block`), and `parse_block_or_expr` makes that `NK_LABEL`
+the enclosing block's tail. The tail typed correctly (`check_expr(NK_LABEL)`
+descends into the body) but `lower_block_mode` discarded the value: a block with
+a block-meta label unconditionally `return self.unit_operand()` at its exit
+(MirLower.w ~5158), so `lower_label` returned unit, the fn-level implicit-default
+condition (`body_can_fall_through and operand_type(body_result) == void`) fired,
+and the function returned the type default (0 / "").
+
+Fix (MIR-only, one site): when a labeled block is in value position
+(`want_result != 0`), materialize its computed tail value into a fresh temp
+before the goto to `labeled_after_bb` (so it survives the block-scope teardown
+and the basic-block switch), and return that operand instead of unit. Statement-
+position labeled blocks (`want_result == 0`) still yield unit. The value is
+copied out of a dead temp, so non-Copy/Drop values drop exactly once (verified:
+`drops=1`) and heap values match a plain return's leak profile (the #608 POD
+backing, not a regression).
+
+**Self-host note:** this changes tail-value semantics, which mandates a flip
+sweep — but `src/`, `lib/`, and `build/` contain ZERO labeled statements (only
+test fixtures use them), so the compiler sources cannot flip and fixpoint holds
+by construction. The type side (`check_expr` NK_LABEL 4923, `tail_is_value`
+7308) was already correct; `body_can_fall_through` has no NK_LABEL case but does
+not need one once the MIR value is non-void.
+
+References: Zig labeled blocks ARE value expressions (`blk: { ...; break :blk v }`)
+— With composes §29.13 tail-value with labels for the same result, minus the
+explicit break-value (rejected by §13.5a). Go/Rust labels are loop/flow-only
+(n/a).
+
 ---
 
 *The With Programming Language — End of implementation notes.*

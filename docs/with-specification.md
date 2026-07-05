@@ -5744,6 +5744,9 @@ explicit `&`.
 
 ### 13.5a Labels, Labeled Break, and Continue
 
+
+**A trailing labeled statement yields its tail value.** When a `'label:` statement is the last element of a block and its body ends in a value expression, that expression is the block's value (§29.13 composes with labels). A labeled block does not otherwise carry a value (there is no `break 'label value`); the value comes only from fall-through of its tail. (#640.)
+
 Labels provide named control-flow targets within a function. A label
 declaration is an identifier prefixed with a single quote:
 
