@@ -3276,4 +3276,44 @@ points the same way.
 
 ---
 
+## 57. Transparent-Box `&self` Receiver Passing (spec §3.7, §8; #627)
+
+`Box[T] { ptr: *mut T }`, `Rc[T]`, and `Arc[T]` are single-field structs
+that codegen represents **transparently** as their inner pointer
+(`mir_sema_type_is_box` / `mir_sema_type_refcount_kind`). A transparent
+box VALUE local therefore stores a `T*` (the box), not a reference to
+itself.
+
+`Box.as_ref`/`as_ptr`/`deref` recover the payload with the
+representation hack `*(self as *const *const T) as &T`, which is correct
+only when `self` is `&Box` (`T**`). The auto-deref path (`b.n`, `*b`)
+passes the receiver as `&Box` and works; an explicit generic `&self`
+call (`b.as_ref()`) passed it **one indirection too shallow** — the box
+value `T*` — so `*(self as **T)` dereferenced the heap pointer and read
+the payload as an address (SIGSEGV at the payload value; confirmed under
+lldb: fault at `0x2a` for `Box.new(42)`).
+
+Root cause: `mir_try_place_ptr_for_ref`'s no-projection branch, seeing
+the box slot's allocated type is a pointer, **loads** it — returning the
+box value instead of the slot address. That load is *correct* for other
+callers (e.g. `Box.new(v) as *mut c_void` in `std.ffi.box_ctx` casts the
+box to its heap pointer via the same helper), so it must not be changed
+globally.
+
+Fix (`mir_operand_place_addr`, applied only at the two generic-method
+receiver-passing sites — the struct-method `_sm` path and the generic-fn
+`gc_gf` path in `mir_gen_call`): when the receiver is a transparent
+box/rc/arc and param 0 uses the value-ref ABI (`&self`/`mut self`), pass
+the slot ADDRESS (`mir_place_ptr`, no load) so the callee receives
+`&Box` (`T**`). Ordinary structs are unaffected (their address flows
+through the aggregate ABI already); the cast path keeps the load.
+
+References: not a language-design question — a representation/ABI bug.
+The transparent single-pointer box is the Rust `#[repr(transparent)]`
+newtype-over-pointer idea; the fix is the same discipline Rust/LLVM use
+(a `&self` on a transparent newtype still passes a pointer *to* the
+newtype slot, not the wrapped pointer).
+
+---
+
 *The With Programming Language — End of implementation notes.*

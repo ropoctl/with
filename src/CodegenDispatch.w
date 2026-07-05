@@ -4816,6 +4816,20 @@ fn Codegen.mir_try_place_ptr_for_ref(self: Codegen, body: &MirBody, operand_id: 
         return ptr
     0
 
+// #627: the ADDRESS of a receiver operand's place, without the
+// `mir_try_place_ptr_for_ref` load heuristic. A transparent single-pointer
+// receiver (Box/Rc/Arc) stores the box VALUE (T*); a `&self` param needs the
+// local's address (T**). Casts still want the loaded value, so this is applied
+// only at the receiver-passing sites, not in mir_try_place_ptr_for_ref.
+fn Codegen.mir_operand_place_addr(self: Codegen, body: &MirBody, operand_id: i32) -> i64:
+    if operand_id < 0 or operand_id >= body.operand_kinds.len() as i32:
+        return 0
+    let ok = body.operand_kinds.get(operand_id as i64)
+    let od = body.operand_d0.get(operand_id as i64)
+    if (ok == OperandKind.OK_COPY or ok == OperandKind.OK_MOVE) and od >= 0 and od < body.place_locals.len() as i32:
+        return self.mir_place_ptr(body, od, false, 0)
+    0
+
 // #568: a bare place over a pointer-ABI'd aggregate parameter (struct
 // `self` and indirect-value params) stores the struct POINTER in its
 // slot. A reference to such a place is that pointer, not the slot
@@ -12765,7 +12779,11 @@ fn Codegen.mir_emit_call_term(self: Codegen, body: &MirBody, callee_operand: i32
                         if gc_method_name_sm.len() > 0:
                             let gc_recv_val_sm = self.mir_eval_operand(body, gc_recv_op_sm, 0)
                             let gc_recv_ty_sm = wl_type_of(gc_recv_val_sm)
-                            let gc_recv_ref_sm = self.mir_try_place_ptr_for_ref(body, gc_recv_op_sm)
+                            // #627: a transparent box/rc/arc receiver needs the
+                            // local's address (T**) for a `&self` param, not the
+                            // loaded box value (T*).
+                            let gc_recv_transparent_sm = self.mir_sema_type_is_box(gc_recv_sema_sm) or self.mir_sema_type_refcount_kind(gc_recv_sema_sm) != 0
+                            let gc_recv_ref_sm = if gc_recv_transparent_sm: self.mir_operand_place_addr(body, gc_recv_op_sm) else: self.mir_try_place_ptr_for_ref(body, gc_recv_op_sm)
                             let gc_pre_args_sm: Vec[i64] = Vec.new()
                             for gc_sm_ai in 1..gc_mir_count_sm:
                                 let gc_sm_arg_op = body.call_arg_operands.get((gc_mir_start_sm + gc_sm_ai) as i64)
@@ -12859,8 +12877,15 @@ fn Codegen.mir_emit_call_term(self: Codegen, body: &MirBody, callee_operand: i32
                         let gc_raw_val = self.mir_eval_operand(body, gc_op, 0)
                         var gc_val = gc_raw_val
                         if gc_ai == 0 and gc_ref_abi_param0:
-                            if wl_get_type_kind(wl_type_of(gc_raw_val)) != wl_pointer_type_kind():
-                                let gc_ref_ptr = self.mir_try_place_ptr_for_ref(body, gc_op)
+                            // #627: a transparent single-pointer receiver (Box/Rc/Arc)
+                            // loads as a bare pointer T*, but a `&self` param needs the
+                            // ADDRESS of the receiver place (T**). The plain
+                            // "not-already-a-pointer" guard skips it, so pass the place
+                            // pointer explicitly for these types.
+                            let gc_recv_sema0 = self.mir_operand_sema_type(body, gc_op)
+                            let gc_recv_transparent = self.mir_sema_type_is_box(gc_recv_sema0) or self.mir_sema_type_refcount_kind(gc_recv_sema0) != 0
+                            if gc_recv_transparent or wl_get_type_kind(wl_type_of(gc_raw_val)) != wl_pointer_type_kind():
+                                let gc_ref_ptr = if gc_recv_transparent: self.mir_operand_place_addr(body, gc_op) else: self.mir_try_place_ptr_for_ref(body, gc_op)
                                 if gc_ref_ptr != 0:
                                     gc_val = gc_ref_ptr
                         gc_arg_vals.push(gc_val)
