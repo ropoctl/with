@@ -2751,13 +2751,11 @@ fn Sema.primitive_type_by_sym(self: Sema, sym: i32) -> i32:
     if with_str_eq(name, "i16") != 0: return self.ty_i16 as i32
     if with_str_eq(name, "i32") != 0: return self.ty_i32 as i32
     if with_str_eq(name, "i64") != 0: return self.ty_i64 as i32
-    if with_str_eq(name, "Int") != 0: return self.ty_i64 as i32
     if with_str_eq(name, "i128") != 0: return self.ty_i128 as i32
     if with_str_eq(name, "u8") != 0: return self.ty_u8 as i32
     if with_str_eq(name, "u16") != 0: return self.ty_u16 as i32
     if with_str_eq(name, "u32") != 0: return self.ty_u32 as i32
     if with_str_eq(name, "u64") != 0: return self.ty_u64 as i32
-    if with_str_eq(name, "UInt") != 0: return self.ty_u64 as i32
     if with_str_eq(name, "u128") != 0: return self.ty_u128 as i32
     if with_str_eq(name, "f32") != 0: return self.ty_f32 as i32
     if with_str_eq(name, "f64") != 0: return self.ty_f64 as i32
@@ -2765,9 +2763,13 @@ fn Sema.primitive_type_by_sym(self: Sema, sym: i32) -> i32:
     if with_str_eq(name, "Unit") != 0: return self.ty_void as i32
     if with_str_eq(name, "Never") != 0: return self.ty_never as i32
     if with_str_eq(name, "str") != 0: return self.ty_str as i32
-    if with_str_eq(name, "String") != 0: return self.ty_str as i32
-    if with_str_eq(name, "StrView") != 0: return self.ty_str_view as i32
     if with_str_eq(name, "usize") != 0: return self.ty_usize as i32
+    // #627 (option D, split ruling 2026-07-05): Int/UInt/String/StrView are
+    // NOT resolution-first here — they resolve via their register_prim
+    // (empty-path, prelude-tier) named-type entries when unshadowed, but a user
+    // declaration of the same name shadows them (lookup_named_type_visible
+    // returns the visible user type first). CStr is likewise a plain named
+    // type. Unit/Never stay compiler-reserved (core types, ~331 uses).
     if with_str_eq(name, "isize") != 0: return self.ty_isize as i32
     // Sub-byte and non-standard integer widths: u1-u7, i1-i7, u12, u21, u24
     let nlen = name.len()

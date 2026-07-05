@@ -968,6 +968,18 @@ Unit: `Unit` (zero-sized)
 `Int` is an alias for `i64`. `UInt` is an alias for `u64`. Always
 64-bit, never platform-dependent.
 
+**Friendly aliases are prelude-scoped and shadowable.** `Int`, `UInt`,
+`String` (= `str`), `StrView` (= `&str`), and `CStr` are convenience
+aliases declared at prelude scope. A user `type` declaration of the same
+name shadows the alias by ordinary scoping (the visible user declaration
+wins), so `type StrView { … }` in your module means *your* `StrView`.
+The core lexical primitives — `i8`…`i128`, `u8`…`u128`, `f32`/`f64`,
+`bool`, `str`, `usize`, `isize` — and the core types `Unit` and `Never`
+are compiler-reserved and are not shadowable (they are woven through
+every function signature and the type system's foundations). See §29.8.
+(BDFL ruling 2026-07-05, #627; `Unit`/`Never` deliberately excluded from
+demotion — see `docs/decisions.md` D3.)
+
 **Compile-time types:** At compile time, `type` is a first-class
 value (see §17.3). `comptime` functions can accept `T: type` as a
 parameter, enabling type-generic metaprogramming. `type` is not a
