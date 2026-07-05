@@ -3314,6 +3314,30 @@ newtype-over-pointer idea; the fix is the same discipline Rust/LLVM use
 (a `&self` on a transparent newtype still passes a pointer *to* the
 newtype slot, not the wrapped pointer).
 
+## 58. Implicit Default of Heap Containers = `.new()` (spec §4.10; #633)
+
+`lower_implicit_default_value` (MirLower.w) emits real values for void /
+Option (`.None`) / Result (`.Ok(default)`) and fell to `CK_UNIT` (a zeroed
+struct) for everything else. For `HashMap`/`HashSet` that zeroed struct has
+null buckets and SEGFAULTs on the first use of the defaulted value (§4.10
+promises a usable default). A zeroed `Vec` happens to work (push grows from
+null/0-cap) but has `elem_size = 0`, so it is not byte-identical to
+`Vec.new()`.
+
+Fix: for a `HashMap`/`HashSet` generic-inst default, emit `MAP_NEW`
+(`emit_map_new_into` — both map and set lower `new` to `MAP_NEW`); for `Vec`,
+emit `VEC_NEW` (`emit_vec_new_into`). The implicit default now equals `.new()`.
+`str`/`int`/`float`/`bool`/`ptr` keep the zeroed default — it is their
+canonical value (empty `str` is `{null, 0}`, verified usable; there is no
+`str.new()` to match). Audited against `type_has_default_value`
+(SemaCheck.w): every generic-inst it blesses (Option/Result/Vec/HashMap/
+HashSet) now produces a valid value.
+
+References: Go zero values (spirit adopted — a default must be fully usable;
+Go's nil-map half-validity is explicitly rejected here, which is exactly the
+bug). Rust `Default` (same "usable empty" intent, no implicit return). n/a for
+Zig/Vale.
+
 ---
 
 *The With Programming Language — End of implementation notes.*

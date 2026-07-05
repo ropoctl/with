@@ -10444,6 +10444,20 @@ fn MirBuilder.lower_implicit_default_value(self: MirBuilder, type_id: i32, span:
             fields.push(ok_value)
             self.assign_enum_variant_to_place(place, type_id, self.sema.syms.ok, fields, span)
             return self.body.new_operand(OperandKind.OK_COPY, place)
+        // #633 (§4.10): the implicit default of a heap container must equal
+        // `.new()`'s value, not a zeroed struct. A zeroed HashMap/HashSet has
+        // null buckets and SEGFAULTs on use; a zeroed Vec happens to work but
+        // has elem_size=0, differing from Vec.new(). Emit the real constructor.
+        if base == self.sema.syms.hashmap or base == self.sema.syms.hashset:
+            let map_tmp = self.new_temp(type_id)
+            let map_place = self.place_for_local(map_tmp)
+            self.emit_map_new_into(map_place, span)
+            return self.body.new_operand(OperandKind.OK_COPY, map_place)
+        if base == self.sema.syms.vec:
+            let vec_tmp = self.new_temp(type_id)
+            let vec_place = self.place_for_local(vec_tmp)
+            self.emit_vec_new_into(vec_place, span)
+            return self.body.new_operand(OperandKind.OK_COPY, vec_place)
     self.const_operand(ConstKind.CK_UNIT, 0, type_id)
 
 fn MirBuilder.lower_implicit_default_return(self: MirBuilder, type_id: i32, span: i32) -> i32:
