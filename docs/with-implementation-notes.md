@@ -3392,6 +3392,25 @@ References: Zig labeled blocks ARE value expressions (`blk: { ...; break :blk v 
 explicit break-value (rejected by §13.5a). Go/Rust labels are loop/flow-only
 (n/a).
 
+## 61. Nested Bitpacked Field Projection (spec §4.3b; #635)
+
+A nested `@[bitpacked]` chained read (`o.inner.a`) projects twice against the
+SAME backing integer: `o.inner` (the inner field within the outer backing) then
+`.a` (a within the inner). `mir_place_ptr`'s bitpacked branch recorded each
+field's `bit_offset`/`width` into `bitpacked_place_proj[place]`, but the second
+projection OVERWROTE the first — losing the outer offset, so the shift/mask read
+the wrong bits (`o.inner.a` returned 3 instead of 2).
+
+Fix: the second and subsequent bitpacked projections ACCUMULATE the bit offset
+(`existing_offset + this_offset`) and keep the innermost width. Offsets are
+MSB-first from the shared backing integer, so they add directly. The field-store
+RMW path reads the same `bitpacked_place_proj`, so writes (`o.inner.a = v`) are
+fixed by the same change. Verified for two- and three-level nesting, reads and
+writes; single-level (`behav_bitpacked_single`) unaffected.
+
+References: Zig packed-struct fields compose against one backing integer with
+accumulated offsets — the same model. Rust/Go/Vale have no native bitfields.
+
 ---
 
 *The With Programming Language — End of implementation notes.*

@@ -1366,7 +1366,18 @@ fn Codegen.mir_place_ptr(self: Codegen, body: &MirBody, place_id: i32, create_ba
                 // cur_ptr stays pointing to the backing iN, cur_ty stays as iN.
                 let bp_info = self.get_bitpacked_field_info(cur_ty, fi)
                 if bp_info >= 0:
-                    self.bitpacked_place_proj.insert(place_id, bp_info)
+                    // #635: a nested bitpacked read (o.inner.a) projects twice
+                    // against the SAME backing integer. The outer field (inner)
+                    // and the inner field (a) offsets must ACCUMULATE, not
+                    // overwrite — the innermost width wins. Offsets are MSB-first
+                    // from the shared backing, so they add directly.
+                    let bp_this_offset = bp_info / 65536
+                    let bp_this_width = bp_info % 65536
+                    var bp_combined_offset = bp_this_offset
+                    let bp_existing = self.bitpacked_place_proj.get(place_id)
+                    if bp_existing.is_some():
+                        bp_combined_offset = (bp_existing.unwrap() as i32) / 65536 + bp_this_offset
+                    self.bitpacked_place_proj.insert(place_id, bp_combined_offset * 65536 + bp_this_width)
                 // cur_ty becomes the field's type (for subsequent use)
                 let bp_bit_width = bp_info % 65536
                 cur_ty = wl_int_type_n(self.context, bp_bit_width)
