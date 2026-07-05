@@ -474,6 +474,19 @@ not silently work around it. File an issue with:
 
 ---
 
+## Decision Log
+
+`docs/decisions.md` records non-obvious design/architecture decisions and
+**why** we made them (context, alternatives weighed, reasoning, and what would
+reopen the call). When you make or reverse a judgment call that a future
+maintainer or agent might re-litigate — an ownership/safety semantics ruling, a
+deviation from the reference implementations, a spec amendment that reverses an
+earlier one — append an entry (newest first) and cross-link superseded ones.
+Consult it before reopening a settled question. Keep it terse; it is reasoning,
+not a changelog.
+
+---
+
 ## Editing Protocol
 
 ### Before editing
