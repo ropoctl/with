@@ -4855,17 +4855,41 @@ fn Codegen.mir_operand_place_addr(self: Codegen, body: &MirBody, operand_id: i32
 // This is the extracted canonical form of the concrete call path's per-param ref
 // block. Every arg-building loop routes ref params through this one routine so
 // the value-vs-address decision has a single home (the cathedral).
-fn Codegen.mir_ref_arg_ptr(self: Codegen, body: &MirBody, operand_id: i32) -> i64:
-    let val = self.mir_eval_operand(body, operand_id, 0)
-    let val_ty = wl_type_of(val)
+// #D6 canonical marshalling for a PassMode::IndirectPlace argument, given its
+// ALREADY-EVALUATED value (so pre-computing call sites don't re-evaluate the
+// operand and break fixpoint). One policy for every call path — the single
+// source of truth for "how does the address of a ref/share-place argument get
+// passed", so the paths cannot diverge (this is what retires the transparent
+// T*/T** bug). Cases, in order:
+//   1. transparent single-pointer (Box/Rc/Arc): the value loads as a bare T*,
+//      but the callee's ref param wants the SLOT address T** — pass the place
+//      address (`mir_operand_place_addr`).
+//   2. the value is already a pointer (an explicit `&T` is already `T*`): pass
+//      it through unwrapped (#568).
+//   3. the value is a place: pass the place's address (share-place — the callee
+//      operates on the caller's place).
+//   4. the value is an rvalue: materialize an entry-block temp and pass its
+//      address (a ref param must receive a pointer, never a bare value).
+fn Codegen.marshal_ref_addr(self: Codegen, body: &MirBody, operand_id: i32, raw_val: i64) -> i64:
+    let sema = self.mir_operand_sema_type(body, operand_id)
+    let transparent = self.mir_sema_type_is_box(sema) or self.mir_sema_type_refcount_kind(sema) != 0
+    if transparent:
+        let slot = self.mir_operand_place_addr(body, operand_id)
+        return if slot != 0: slot else: raw_val
+    let val_ty = wl_type_of(raw_val)
     if wl_get_type_kind(val_ty) == wl_pointer_type_kind():
-        return val
+        return raw_val
     let place_ptr = self.mir_try_place_ptr_for_ref(body, operand_id)
     if place_ptr != 0:
         return place_ptr
     let tmp = self.create_entry_alloca(val_ty)
-    wl_build_store(self.builder, val, tmp)
+    wl_build_store(self.builder, raw_val, tmp)
     tmp
+
+// Evaluating wrapper for call paths that have not pre-computed the value.
+fn Codegen.mir_ref_arg_ptr(self: Codegen, body: &MirBody, operand_id: i32) -> i64:
+    let val = self.mir_eval_operand(body, operand_id, 0)
+    self.marshal_ref_addr(body, operand_id, val)
 
 // #568: a bare place over a pointer-ABI'd aggregate parameter (struct
 // `self` and indirect-value params) stores the struct POINTER in its
@@ -12914,17 +12938,11 @@ fn Codegen.mir_emit_call_term(self: Codegen, body: &MirBody, callee_operand: i32
                         let gc_raw_val = self.mir_eval_operand(body, gc_op, 0)
                         var gc_val = gc_raw_val
                         if gc_ai == 0 and gc_ref_abi_param0:
-                            // #627: a transparent single-pointer receiver (Box/Rc/Arc)
-                            // loads as a bare pointer T*, but a `&self` param needs the
-                            // ADDRESS of the receiver place (T**). The plain
-                            // "not-already-a-pointer" guard skips it, so pass the place
-                            // pointer explicitly for these types.
-                            let gc_recv_sema0 = self.mir_operand_sema_type(body, gc_op)
-                            let gc_recv_transparent = self.mir_sema_type_is_box(gc_recv_sema0) or self.mir_sema_type_refcount_kind(gc_recv_sema0) != 0
-                            if gc_recv_transparent or wl_get_type_kind(wl_type_of(gc_raw_val)) != wl_pointer_type_kind():
-                                let gc_ref_ptr = if gc_recv_transparent: self.mir_operand_place_addr(body, gc_op) else: self.mir_try_place_ptr_for_ref(body, gc_op)
-                                if gc_ref_ptr != 0:
-                                    gc_val = gc_ref_ptr
+                            // #D6: the IndirectPlace receiver marshals through the one
+                            // canonical policy (transparent Box/Rc/Arc → slot T**, else
+                            // already-ptr/place/rvalue-temp) — shared with the concrete
+                            // path via marshal_ref_addr, so they cannot diverge.
+                            gc_val = self.marshal_ref_addr(body, gc_op, gc_raw_val)
                         gc_arg_vals.push(gc_val)
                         gc_arg_tys.push(wl_type_of(gc_raw_val))
                         var gc_arg_sema = self.mir_operand_sema_type(body, gc_op)
