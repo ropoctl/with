@@ -115,6 +115,51 @@ committed pre-pass the convention can depend on.
   `:test` → author doc-example fixtures (share-place write, escape needs move,
   read keeps binding, borrow conflict) → full gate → bootstrap seed.
 
+## P1 codegen findings (traced; ready to execute)
+
+The callee side is a one-flag change; the caller side is the real work.
+
+- **Callee (easy).** `value_ref_abi` on a param makes `declare_function_from_sig`
+  emit a plain `ptr` (NOT byval) + `record_ref_param` (Codegen.w:4094-4098), so
+  the callee body operates on the *pointed-to caller place* = share-place. A
+  non-value_ref_abi non-Copy struct instead goes byval-indirect
+  (`internal_abi_needs_indirect_param`, Codegen.w:4115) = callee gets a COPY.
+  So: **setting value_ref_abi for a share-place param flips the callee to
+  share-place.** Drive it from the final effect, in a pass right after
+  `fixpoint_effect_flow`: for each sig param that is non-Copy, by-value (not
+  ref/ptr/slice), and whose effect excludes CONSUME|ESCAPE_VALUE, call
+  `set_sig_param_value_ref_abi(sig, pi, 1)`.
+- **Callee drop.** MirLower.w:11961 + clause path 12068: generalize the
+  `borrowed_receiver` exemption — skip `schedule_drop(DK_VALUE)` for any param
+  whose effect is share-place (equivalently, whose value_ref_abi is set). Only
+  CONSUME|ESCAPE_VALUE params (and move/copy args) are owned + dropped.
+- **Caller (the work).** The caller passes an address for a ref param via
+  `is_ref_param(fn_sym, pi)` + `mir_try_place_ptr_for_ref` /
+  `get_mutable_receiver_ptr`, but this is done **per-call-path for the receiver
+  (param 0)** — e.g. CodegenDispatch.w:5887 (multi-index), 12797/12899 (generic),
+  13392 — NOT in one general marshalling loop. To generalize: every call path
+  that pushes arguments must, for each arg `pi`, check `is_ref_param(fn_sym, pi)`
+  and push `mir_operand_place_addr`/`mir_try_place_ptr_for_ref` (address of the
+  caller's place) instead of the value. For an rvalue/temp argument to a
+  share-place param, materialize a temp, pass its address, and drop the temp in
+  the caller scope after the call. Enumerate the call-lowering paths first
+  (`build_call_fn_value` and every builder of `call_args`) — this is the bulk of
+  P1 and the highest miscompile risk; verify byval and sret interactions.
+- **Call-site consume (Sema).** SemaCheck.w:12470-12483: stop the unconditional
+  `arg_consumed_by_value` for non-Copy; mark-moved only for explicit
+  NK_MOVE_ARG/NK_COPY_ARG. Add a POST-fixpoint validation pass over recorded call
+  sites emitting "requires move/copy" for a plain non-Copy binding passed to a
+  CONSUME|ESCAPE_VALUE param (needs call sites recorded like the effect edges).
+- **Vestige lints.** Remove `emit_by_value_param_returned_view_error` (1459-1460)
+  and `should_warn_by_value_read_only_param` (1469-1471) as part of the flip.
+- **Generic mono.** CodegenDispatch.w:12882, 16225 recompute value_ref_abi
+  structurally (`fn_param_uses_value_ref_abi`) — make them honor the effect-driven
+  flag too (read the sig flag, or extend the structural check to share-place).
+
+Estimated: P1 is the large unit; P2 (self-host migration) blast radius is unknown
+until share-place stage1 runs `check src/main.w`. Both need fresh context; the P0
+foundation they build on is committed and green.
+
 ## Self-host note
 
 The seed is move-semantics. `move x` compiles under BOTH move and share-place, so
