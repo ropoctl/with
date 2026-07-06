@@ -4841,6 +4841,32 @@ fn Codegen.mir_operand_place_addr(self: Codegen, body: &MirBody, operand_id: i32
         return self.mir_place_ptr(body, od, false, 0)
     0
 
+// #D5 cathedral: the single ref-param address policy. Given a call-argument
+// operand for a parameter passed by pointer-to-place (a `value_ref_abi` value
+// param, a `mut self`/owner receiver, or an explicit `&T`), produce the pointer
+// to pass. Three cases, in order:
+//   1. the operand's value is ALREADY a pointer (an explicit `&T` is already
+//      `T*`) — pass it through unwrapped (#568: taking its place-addr would hand
+//      the callee `T**`).
+//   2. the operand is a place — pass the place's address, so the callee operates
+//      on the CALLER's place (share-place).
+//   3. the operand is an rvalue — materialize it into an entry-block temp and
+//      pass that temp's address.
+// This is the extracted canonical form of the concrete call path's per-param ref
+// block. Every arg-building loop routes ref params through this one routine so
+// the value-vs-address decision has a single home (the cathedral).
+fn Codegen.mir_ref_arg_ptr(self: Codegen, body: &MirBody, operand_id: i32) -> i64:
+    let val = self.mir_eval_operand(body, operand_id, 0)
+    let val_ty = wl_type_of(val)
+    if wl_get_type_kind(val_ty) == wl_pointer_type_kind():
+        return val
+    let place_ptr = self.mir_try_place_ptr_for_ref(body, operand_id)
+    if place_ptr != 0:
+        return place_ptr
+    let tmp = self.create_entry_alloca(val_ty)
+    wl_build_store(self.builder, val, tmp)
+    tmp
+
 // #568: a bare place over a pointer-ABI'd aggregate parameter (struct
 // `self` and indirect-value params) stores the struct POINTER in its
 // slot. A reference to such a place is that pointer, not the slot
@@ -14114,21 +14140,8 @@ fn Codegen.mir_emit_call_term(self: Codegen, body: &MirBody, callee_operand: i32
             dyn_trait_sym = self.get_raw_fn_dyn_param_trait(callee_raw_fn_sym, ai)
         var arg_val: i64 = 0
         if needs_ref:
-            // Evaluate first to check if operand is already a pointer.
-            // Ref params (&T) are already pointers — don't wrap them again.
-            let val = self.mir_eval_operand(body, operand_id, 0)
-            let val_ty = wl_type_of(val)
-            if wl_get_type_kind(val_ty) == wl_pointer_type_kind():
-                // Already a pointer — pass directly
-                arg_val = val
-            else:
-                // Struct value needs pointer-passing. Try place ptr first.
-                arg_val = self.mir_try_place_ptr_for_ref(body, operand_id)
-                if arg_val == 0:
-                    // Fallback: alloca in entry block, store, pass ptr
-                    let tmp = self.create_entry_alloca(val_ty)
-                    wl_build_store(self.builder, val, tmp)
-                    arg_val = tmp
+            // #D5 cathedral: single ref-param address policy (extracted).
+            arg_val = self.mir_ref_arg_ptr(body, operand_id)
         else if dyn_trait_sym != 0:
             // Evaluate without coercion so we get the raw concrete value.
             arg_val = self.mir_eval_operand(body, operand_id, 0)
