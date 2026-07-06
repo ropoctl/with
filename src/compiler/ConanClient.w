@@ -760,10 +760,10 @@ fn conan_package_has_table_link_metadata(name: str, version: str) -> bool:
 
 fn conan_link_metadata_with_recipe(name: str, version: str, libs: Vec[str], link_args: Vec[str], recipe: str) -> ConanLibraryScan:
     if conan_package_has_table_link_metadata(name, version):
-        return conan_known_link_metadata(name, version, libs, link_args)
+        return conan_known_link_metadata(name, version, move libs, move link_args)
     if recipe.len() == 0:
         runtime_eprint("warning: no recipe metadata for " ++ name ++ "/" ++ version ++ "; system link requirements may be incomplete")
-        return conan_known_link_metadata(name, version, libs, link_args)
+        return conan_known_link_metadata(name, version, move libs, move link_args)
     let extracted = conan_extract_recipe_link_metadata(recipe, conan_detect_os())
     var out_libs = libs
     var out_args = link_args
@@ -848,7 +848,7 @@ pub fn conan_write_known_system_package(name: str, version: str, project_root: s
     var link_args: Vec[str] = Vec.new()
     if name == "opengl" and conan_detect_os() == "Macos":
         defines = conan_sorted_insert_unique(move defines, "GL_SILENCE_DEPRECATION=1")
-    let known = conan_known_link_metadata(name, version, libs, link_args)
+    let known = conan_known_link_metadata(name, version, move libs, move link_args)
     let known_libs = known.libs
     let known_link_args = known.lib_paths
     let requires: Vec[str] = Vec.new()
@@ -882,7 +882,7 @@ fn conan_write_binary_metadata(name: str, version: str, recipe_rev: str, package
             lib_paths.push("lib")
     let defines: Vec[str] = Vec.new()
     let link_args: Vec[str] = Vec.new()
-    let known = conan_link_metadata_with_recipe(name, version, libs, link_args, conan_fetch_recipe_text(name, version))
+    let known = conan_link_metadata_with_recipe(name, version, move libs, move link_args, conan_fetch_recipe_text(name, version))
     conan_write_metadata(dep_dir, name, version, recipe_rev, package_id, package_rev, include_paths, lib_paths, known.libs, defines, known.lib_paths, requirements)
 
 pub fn conan_restore_locked_binary_package(name: str, version: str, recipe_rev: str, package_id: str, package_rev: str, expected_sha256: str, project_root: str) -> bool:
@@ -1118,7 +1118,7 @@ fn conan_install_source_fallback(name: str, version: str, project_root: str) -> 
     libs.push(name)
     let defines: Vec[str] = Vec.new()
     let link_args: Vec[str] = Vec.new()
-    let known = conan_link_metadata_with_recipe(name, version, libs, link_args, recipe)
+    let known = conan_link_metadata_with_recipe(name, version, move libs, move link_args, recipe)
     let requires: Vec[str] = Vec.new()
     if conan_write_metadata(dep_dir, name, version, "source", "source", "source", include_paths, lib_paths, known.libs, defines, known.lib_paths, requires) != 0:
         runtime_eprint("error: failed to write metadata for " ++ name ++ "/" ++ version)

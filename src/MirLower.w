@@ -7860,7 +7860,17 @@ fn MirBuilder.lower_call_arg(self: MirBuilder, arg_node: i32, sig_idx: i32, call
         return self.body.new_operand(OperandKind.OK_COPY, sc_slice_place)
     let lowered = self.lower_expr(arg_node)
     self.expected_type = saved_expected
-    self.consume_moved_operand(lowered)
+    // #D5/P1: a PLAIN argument to a share-place (value_ref_abi / IndirectPlace)
+    // parameter is a borrow — the caller keeps ownership and drops it in its own
+    // scope, so DO NOT cancel the caller's drop. Only an explicit `move`/`copy`,
+    // or an owned/extern parameter, consumes the operand. (Plain args to owned
+    // params are already rejected at check time, so a plain arg reaching here for
+    // a non-share-place param is extern/copy — keep the existing behavior.)
+    let arg_kind = self.ast.kind(arg_node)
+    let arg_is_plain = arg_kind != NodeKind.NK_MOVE_ARG and arg_kind != NodeKind.NK_COPY_ARG
+    let callee_share_place = sig_idx >= 0 and arg_i >= 0 and self.sema.sig_param_uses_value_ref_abi(sig_idx, arg_i) != 0
+    if not (arg_is_plain and callee_share_place):
+        self.consume_moved_operand(lowered)
     // #606: a by-value `xs.push(a)` arg carries the receiver's buffer; cancel the
     // receiver's drop so it isn't double-freed with the callee's. Gated to NK_CALL
     // args so the receiver-cancel only flows through self-aliasing push chains —
@@ -11888,7 +11898,7 @@ fn lower_fn(builder: MirBuilder, fn_node: i32) -> MirBody:
             let sema_type_sym = builder.sema.pool_lookup_symbol(type_part)
             let sema_method_sym = builder.sema.pool_lookup_symbol(method_part)
             sig_idx = builder.sema.lookup_method_sig(sema_type_sym, sema_method_sym)
-    lower_fn_with_sig(builder, fn_node, sig_idx)
+    lower_fn_with_sig(move builder, fn_node, sig_idx)
 
 fn mir_symbol_for_pool(sema: &Sema, pool: InternPool, sym: i32) -> i32:
     if sym == 0:
@@ -11958,7 +11968,13 @@ fn lower_fn_with_sig(builder: MirBuilder, fn_node: i32, sig_idx: i32) -> MirBody
             // the legacy unflagged `self: ConcreteType` form) are owned here.
             let recv_flags = builder.ast.fn_param_flags(param_start, i)
             let borrowed_receiver = i == 0 and (fn_param_is_mut_self(recv_flags) != 0 or fn_param_is_ref_self(recv_flags) != 0)
-            if builder.sema.is_copy(p_ty) == 0 and drop_receiver_self == 0 and not borrowed_receiver:
+            // #D5/P1: a share-place param (PassMode::IndirectPlace / value_ref_abi)
+            // is a BORROW of the caller's place — the callee mutates it but does
+            // NOT own it, so it is dropped in the caller's scope, not here. Only
+            // owned params (consume/escape_value → not value_ref_abi) are dropped
+            // by the callee.
+            let share_place_param = sig_idx >= 0 and builder.sema.sig_param_uses_value_ref_abi(sig_idx, i) != 0
+            if builder.sema.is_copy(p_ty) == 0 and drop_receiver_self == 0 and not borrowed_receiver and not share_place_param:
                 builder.schedule_drop(local_id, DropKind.DK_VALUE)
             param_locals.push(local_id)
         builder.body.n_params = param_count
@@ -12065,7 +12081,9 @@ fn lower_fn_clause_dispatcher(sema: &Sema, ast_pool: AstPool, pool: InternPool, 
         if pi == 0 and first_meta >= 0 and 0 < ast_pool.fn_meta_param_count(first_meta):
             let clause_recv_flags = ast_pool.fn_param_flags(ast_pool.fn_meta_param_start(first_meta), 0)
             clause_borrowed_receiver = fn_param_is_mut_self(clause_recv_flags) != 0 or fn_param_is_ref_self(clause_recv_flags) != 0
-        if sema.is_copy(p_ty) == 0 and not clause_borrowed_receiver:
+        // #D5/P1: share-place (value_ref_abi) params are borrows — not callee-dropped.
+        let clause_share_place = sig_idx >= 0 and sema.sig_param_uses_value_ref_abi(sig_idx, pi) != 0
+        if sema.is_copy(p_ty) == 0 and not clause_borrowed_receiver and not clause_share_place:
             builder.schedule_drop(local_id, DropKind.DK_VALUE)
         param_locals.push(local_id)
     builder.body.n_params = param_count
@@ -12587,14 +12605,14 @@ fn lower_module(mut sema: Sema, ast_pool: AstPool, pool: InternPool) -> MirModul
                 continue
             var source_builder = MirBuilder.init(&sema, ast_pool, pool, mir_fn_sym)
             source_builder.in_generator = 1
-            let source_body = lower_fn_with_sig(source_builder, decl as i32, sig_idx)
+            let source_body = lower_fn_with_sig(move source_builder, decl as i32, sig_idx)
             let ctor_body = lower_generator_constructor(sema, ast_pool, pool, decl as i32, sig_idx)
             let next_body = lower_generator_next_body(sema, source_body, decl as i32)
             mir_mod.add_body(ctor_body)
             mir_mod.add_body(next_body)
             continue
         var builder = MirBuilder.init(&sema, ast_pool, pool, mir_fn_sym)
-        let body = lower_fn(builder, decl as i32)
+        let body = lower_fn(move builder, decl as i32)
         mir_mod.add_body(body)
 
     for gi in 0..sema.fn_clause_group_count():

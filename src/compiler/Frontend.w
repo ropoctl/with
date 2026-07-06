@@ -336,7 +336,7 @@ fn Zcu.expand_c_imports_frontend(self: Zcu, pool: AstPool) -> AstPool:
                 let nm_types = frontend_new_vec_str()
                 for nmi in 0..c_import_no_methods_count(nm_packed):
                     nm_types.push(frontend_owned_text(self.pool.resolve(out.get_extra(nm_base + nmi))))
-                ci_set_no_methods(c_import_no_methods_all(nm_packed), nm_types)
+                ci_set_no_methods(c_import_no_methods_all(nm_packed), move nm_types)
                 // #357: register this import's ownership annotations for the
                 // duration of translation (annotation evidence, §16.3c).
                 let ann_owns = frontend_new_vec_str()
@@ -345,7 +345,7 @@ fn Zcu.expand_c_imports_frontend(self: Zcu, pool: AstPool) -> AstPool:
                 let ann_borrows = frontend_new_vec_str()
                 for abi in 0..self.c_import_borrows_count_frontend(out, decl):
                     ann_borrows.push(frontend_owned_text(self.c_import_borrows_entry_frontend(out, decl, abi)))
-                ci_set_owned_annotations(ann_owns, ann_borrows)
+                ci_set_owned_annotations(move ann_owns, move ann_borrows)
                 let libclang_result = process_c_import_with_defines(libclang_header_spec, self.project_config.c_import_defines)
                 ci_clear_owned_annotations()
                 ci_clear_no_methods()
@@ -1488,7 +1488,8 @@ fn Zcu.compile_source_frontend_mode(self: Zcu, text: str, name: str, file_id: i3
         runtime_eprint("[frontend] compile_source:resolve")
     // Wave 4: sidecar resolved artifact.
     let t_resolve = runtime_clock_nanos()
-    let artifacts = resolve_from_root_pool(name, normalized_text, file_id, pool, self.pool, self.diagnostics, false)
+    var _sp_diag = self.diagnostics
+    let artifacts = resolve_from_root_pool(name, normalized_text, file_id, pool, self.pool, move _sp_diag, false)
     if do_profile:
         let resolve_ns = runtime_clock_nanos() - t_resolve
         runtime_eprint(f"[profile] frontend.resolve  {resolve_ns / 1000000}.{(resolve_ns % 1000000) / 1000} ms")

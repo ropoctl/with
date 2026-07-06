@@ -945,10 +945,10 @@ fn link_stage_output_path_for_source(source_path: str) -> str:
 
 fn link_stage_link_object_to_binary(obj_path: str, bin_path: str, link_libs: Vec[str], link_search_paths: Vec[str], needs_async_runtime: bool) -> bool:
     let link_args: Vec[str] = Vec.new()
-    link_stage_link_object_to_binary_result(obj_path, bin_path, link_libs, link_search_paths, link_args, needs_async_runtime).ok
+    link_stage_link_object_to_binary_result(obj_path, bin_path, link_libs, link_search_paths, move link_args, needs_async_runtime).ok
 
 fn link_stage_link_object_to_binary_result(obj_path: str, bin_path: str, link_libs: Vec[str], link_search_paths: Vec[str], link_args: Vec[str], needs_async_runtime: bool) -> LinkStageResult:
-    link_stage_result_for_plan(link_stage_link_object_to_binary_plan(obj_path, bin_path, link_libs, link_search_paths, link_args, needs_async_runtime))
+    link_stage_result_for_plan(link_stage_link_object_to_binary_plan(obj_path, bin_path, link_libs, link_search_paths, move link_args, needs_async_runtime))
 
 fn link_stage_link_object_to_binary_plan(obj_path: str, bin_path: str, link_libs: Vec[str], link_search_paths: Vec[str], link_args: Vec[str], needs_async_runtime: bool) -> LinkStagePlan:
     let extras: Vec[str] = Vec.new()

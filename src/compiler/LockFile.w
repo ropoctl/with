@@ -367,7 +367,7 @@ fn lock_upsert_installed_c_dep_tree_seen(lock: LockFile, project_root: str, name
         if req_name.len() == 0 or req_version.len() == 0:
             runtime_eprint("error: unsupported locked Conan requirement reference: " ++ req)
             return LockFile { entries: Vec.new() }
-        out = lock_upsert_installed_c_dep_tree_seen(out, project_root, req_name, req_version, seen)
+        out = lock_upsert_installed_c_dep_tree_seen(move out, project_root, req_name, req_version, seen)
         if out.entries.len() == 0:
             return out
     out

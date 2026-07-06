@@ -8568,9 +8568,9 @@ fn CCodegen.encoded_option_local_flags(self: CCodegen, body: &MirBody) -> Vec[i3
             let recv_local = self.place_local_id(body, recv_place)
             if self.place_is_direct_local(body, recv_place, recv_local) != 0:
                 if cc_builtin_uses_vec_receiver(kind):
-                    flags = cc_mark_local_repr(flags, recv_local, 2)
+                    flags = cc_mark_local_repr(move flags, recv_local, 2)
                 else if cc_builtin_uses_option_receiver(kind):
-                    flags = cc_mark_local_repr(flags, recv_local, 1)
+                    flags = cc_mark_local_repr(move flags, recv_local, 1)
 
         let start = body.bb_stmt_starts.get(bb as i64)
         let count = body.bb_stmt_counts.get(bb as i64)
@@ -8589,12 +8589,12 @@ fn CCodegen.encoded_option_local_flags(self: CCodegen, body: &MirBody) -> Vec[i3
             let lhs = body.rval_d1.get(rval_id as i64)
             let rhs = body.rval_d2.get(rval_id as i64)
             if op == BinaryOp.OP_SUB and self.operand_is_int_const(body, rhs, 1):
-                flags = cc_mark_local_repr(flags, self.operand_direct_local_id(body, lhs), 1)
+                flags = cc_mark_local_repr(move flags, self.operand_direct_local_id(body, lhs), 1)
             else if op == BinaryOp.OP_NEQ or op == BinaryOp.OP_EQ:
                 if self.operand_is_int_const(body, rhs, 0):
-                    flags = cc_mark_local_repr(flags, self.operand_direct_local_id(body, lhs), 1)
+                    flags = cc_mark_local_repr(move flags, self.operand_direct_local_id(body, lhs), 1)
                 if self.operand_is_int_const(body, lhs, 0):
-                    flags = cc_mark_local_repr(flags, self.operand_direct_local_id(body, rhs), 1)
+                    flags = cc_mark_local_repr(move flags, self.operand_direct_local_id(body, rhs), 1)
     flags
 
 fn CCodegen.local_used_as_encoded_option(self: CCodegen, body: &MirBody, local_id: i32) -> bool:

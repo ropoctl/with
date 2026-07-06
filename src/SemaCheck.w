@@ -1456,8 +1456,13 @@ fn Sema.check_fn_body_with_sig_at(self: Sema, node: i32, sig_idx: i32, decl_inde
                         eff = eff & (EFF_READ | EFF_RAW_PTR_VALIDITY)
                     if (eff & (EFF_WRITE | EFF_CONSUME | EFF_ESCAPE_VALUE | EFF_ESCAPE_VIEW | EFF_RAW_PTR_VALIDITY)) != 0:
                         eff = eff & (EFF_WRITE | EFF_CONSUME | EFF_ESCAPE_VALUE | EFF_ESCAPE_VIEW | EFF_RAW_PTR_VALIDITY)
-                    if self.param_type_is_by_value(p_tid) != 0 and (eff & EFF_ESCAPE_VIEW) != 0:
-                        self.emit_by_value_param_returned_view_error(node, sig_idx, pi)
+                    // #D5/P1: NO by-value-returns-a-view error and NO "consider &T"
+                    // warning. Under share-place a plain non-Copy value param is
+                    // IndirectPlace (a pointer to the caller's place), so returning
+                    // a view into it is valid (view-origin tracking keeps it safe),
+                    // and a by-value read-only param is the CORRECT default — the
+                    // caller keeps its binding. Those inverted lints were the
+                    // move-by-default vestige (D5); they are removed, not gated.
             self.set_sig_param_effect(sig_idx, pi, eff)
             if (eff & EFF_ESCAPE_VIEW) != 0:
                 self.set_sig_param_view_origin(sig_idx, pi, self.current_fn_param_origins.get(pi as i64))
@@ -1465,10 +1470,6 @@ fn Sema.check_fn_body_with_sig_at(self: Sema, node: i32, sig_idx: i32, decl_inde
                 self.set_sig_param_view_origin(sig_idx, pi, 0)
             if raw_validity_param_sym == 0 and (eff & EFF_RAW_PTR_VALIDITY) != 0 and pi < self.current_fn_param_syms.len() as i32:
                 raw_validity_param_sym = self.current_fn_param_syms.get(pi as i64)
-            if sig_idx >= 0:
-                let p_tid_for_lint = self.sig_param_type(sig_idx, pi)
-                if self.should_warn_by_value_read_only_param(node, sig_idx, pi, eff, p_tid_for_lint) != 0:
-                    self.emit_by_value_param_read_only_warning(node, sig_idx, pi)
 
     if raw_validity_param_sym != 0 and self.fn_symbol_is_unsafe(fn_name) == 0:
         let param_name = self.pool_resolve(raw_validity_param_sym)
@@ -7413,8 +7414,12 @@ fn Sema.check_let_binding(self: Sema, node: i32) -> i32:
                 if self.arithmetic_result_type(ann_type, val_type) == 0:
                     self.emit_error("type mismatch in binding", node)
 
-    // Move semantics
-    self.mark_moved_if_consumed(value)
+    // Move semantics. #D5/P1: a wildcard `let _ = x` does NOT bind or move `x`
+    // (as in Rust) — `x` is untouched, so it must not be marked consumed. This
+    // keeps `let _ = param` a non-consuming acknowledgement: the param stays
+    // share-place (borrowed) instead of being forced to owned.
+    if self.pool_resolve(name) != "_":
+        self.mark_moved_if_consumed(value)
 
     if ann_type_node != 0 and self.type_expr_is_collection_with_ref(ann_type_node) != 0:
         self.emit_error("ephemeral references cannot be stored in generic containers", node)
@@ -12469,25 +12474,38 @@ fn Sema.check_call(self: Sema, node: i32) -> i32:
             // fixpoint_effect_flow can complete transitive consume/escape even
             // when this callee is a forward reference (its body not yet checked).
             self.record_effect_edge(sig_idx, param_i, trans_nd)
-            // §3.8: a plain `T` parameter consumes — the caller's binding is
-            // invalidated whether or not the callee body exercises ownership
-            // (Copy types are copied instead; mark_moved_if_consumed skips
-            // them). Extern/C callees are exempt: they receive a bit-copy
-            // and cannot drop.
-            var arg_consumed_by_value = 0
-            if expected_ty != 0 and arg_ty != 0:
-                let consume_pk = self.get_type_kind(self.resolve_alias(expected_ty))
-                if consume_pk != TypeKind.TY_REF and consume_pk != TypeKind.TY_PTR:
-                    if self.extern_fn_names.contains(fn_sym) == 0 and self.ci_syms.contains(fn_sym) == 0:
-                        if self.is_copy(arg_ty as TypeId) == 0:
-                            arg_consumed_by_value = 1
-            if arg_consumed_by_value != 0 or (param_eff & (EFF_CONSUME | EFF_ESCAPE_VALUE)) != 0:
-                let eff_arg_nd = if has_resolved != 0: self.get_resolved_call_arg(node, ai) else: self.ast.get_extra(resolved_extra_start + ai)
-                // #604: a collection coerced to a slice view is BORROWED for the
-                // call, not moved — the caller's binding stays live and owning.
-                if eff_arg_nd > 0 and self.slice_coerce_args.contains(eff_arg_nd) == 0:
-                    // Mark the arg as consumed so subsequent uses are caught.
+            // #D5/P1 share-place (§3.8): a plain (non-move/copy) non-Copy value
+            // argument is NOT consumed — the caller keeps ownership and drops it
+            // in its own scope. Only an explicit `move`/`copy` transfers. A plain
+            // argument passed to an OWNED (consume/escape_value) parameter is a
+            // compile error requiring `move`/`copy`, enforced post-fixpoint by
+            // finalize_call_site_ownership with COMPLETE effects (recorded here so
+            // a forward-reference owned param cannot slip through as share-place).
+            // Extern/C params receive a bit-copy and do not own — no transfer.
+            let eff_arg_nd = if has_resolved != 0: self.get_resolved_call_arg(node, ai) else: self.ast.get_extra(resolved_extra_start + ai)
+            let eff_arg_kind = if eff_arg_nd > 0: self.ast.kind(eff_arg_nd) else: 0
+            if eff_arg_kind == NodeKind.NK_MOVE_ARG:
+                // explicit transfer: consume the source binding (use-after caught here).
+                if self.slice_coerce_args.contains(eff_arg_nd) == 0:
                     self.mark_moved_if_consumed(eff_arg_nd)
+            else if eff_arg_kind != NodeKind.NK_COPY_ARG:
+                if expected_ty != 0 and arg_ty != 0 and eff_arg_nd > 0:
+                    let consume_pk = self.get_type_kind(self.resolve_alias(expected_ty))
+                    if consume_pk != TypeKind.TY_REF and consume_pk != TypeKind.TY_PTR:
+                        if self.extern_fn_names.contains(fn_sym) == 0 and self.ci_syms.contains(fn_sym) == 0:
+                            // Ownership is about the PARAMETER's ABI, not the
+                            // argument's type: an enum argument coerced to a Copy
+                            // `i32` param transfers nothing. Key on expected_ty.
+                            if self.is_copy(expected_ty as TypeId) == 0 and self.slice_coerce_args.contains(eff_arg_nd) == 0:
+                                // Only a movable NAMED binding (a scoped local, or
+                                // a field of one) can require move/copy — an rvalue
+                                // (literal, call result, enum variant like
+                                // `Flags.PUB`) is consumed directly. `scope_has`
+                                // must be checked here in pass 1 while the scope is
+                                // live; the finalize pass only reads effects.
+                                let consume_root = self.place_root_sym(eff_arg_nd)
+                                if consume_root != 0 and self.scope_has(consume_root) != 0:
+                                    self.record_consume_call_site(eff_arg_nd, sig_idx, param_i)
             // escape_view: move/copy is forbidden because they invalidate the view's origin
             if (param_eff & EFF_ESCAPE_VIEW) != 0:
                 let ev_arg_nd = if has_resolved != 0: self.get_resolved_call_arg(node, ai) else: self.ast.get_extra(resolved_extra_start + ai)

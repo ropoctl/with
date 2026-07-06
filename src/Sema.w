@@ -400,6 +400,16 @@ type Sema {
     // param the callee actually escapes/consumes). See decisions.md D5.
     effect_flow_edges: Vec[i32],
 
+    // #D5/P1 share-place: recorded plain (non-move/copy) non-Copy value arguments,
+    // flattened as 3-tuples [arg_node, callee_sig, callee_pi]. A plain argument is
+    // share-place (the caller keeps ownership); after effects finalize,
+    // `finalize_call_site_ownership` errors on any whose param is OWNED
+    // (consume/escape_value → not value_ref_abi), requiring an explicit
+    // `move`/`copy`. Recorded in pass 1, resolved post-fixpoint so the ownership
+    // verdict uses COMPLETE effects (a forward-ref owned param must not slip
+    // through as share-place — that would be a double-free).
+    consume_call_sites: Vec[i32],
+
     // Extern fn names
     extern_fn_names: HashMap[i32, i32],
     // #602: c_import/extern params that RETAIN a passed C-string pointer past
@@ -1468,6 +1478,7 @@ fn sema_empty_state(pool: InternPool, diags: DiagnosticList, ast: AstPool) -> Se
         sig_param_eff_starts: Vec.new(),
         sig_value_ref_abi_params: Vec.new(),
         effect_flow_edges: Vec.new(),
+        consume_call_sites: Vec.new(),
         extern_fn_names,
         retained_extern_params,
         fn_decl_nodes,
@@ -4658,6 +4669,69 @@ fn Sema.fixpoint_effect_flow(self: Sema):
                 self.set_sig_param_effect(caller_sig, caller_pi, merged)
                 changed = 1
 
+// #D5/D6 P1: with effects complete, classify every non-Copy by-value parameter
+// whose effect excludes consume/escape_value as PassMode::IndirectPlace
+// (share-place) by setting its value_ref_abi flag. `arg_pass_mode` /
+// `declare_function` then pass it as a pointer to the caller's place, the
+// cathedral marshals its address, and MIR skips the callee drop — so the callee
+// mutates the caller's place and does not own it. Owned params (consume/
+// escape_value) keep the by-value/Indirect ABI and are dropped by the callee.
+// escape_view is share-place (satisfied by view-origin tracking), so it is NOT
+// excluded here. Runs after fixpoint_effect_flow so the effect is final.
+fn Sema.assign_share_place_abi(self: Sema):
+    let n = self.sig_param_eff_starts.len() as i32
+    var si = 0
+    while si < n:
+        let pc = self.sig_get_param_count(si)
+        for pi in 0..pc:
+            if self.sig_param_uses_value_ref_abi(si, pi) != 0:
+                continue
+            let pty = self.sig_param_type(si, pi)
+            if pty <= 0:
+                continue
+            if self.param_type_is_by_value(pty) == 0:
+                continue
+            if self.is_copy(pty as TypeId) != 0:
+                continue
+            let eff = self.sig_param_effect(si, pi)
+            if (eff & (EFF_CONSUME | EFF_ESCAPE_VALUE)) != 0:
+                continue
+            self.set_sig_param_value_ref_abi(si, pi, 1)
+        si = si + 1
+
+// #D5/P1: record a plain non-Copy value argument (with its file) for the
+// post-fixpoint ownership check.
+fn Sema.record_consume_call_site(self: Sema, arg_node: i32, callee_sig: i32, callee_pi: i32):
+    if arg_node <= 0 or callee_sig < 0 or callee_pi < 0:
+        return
+    self.consume_call_sites.push(arg_node)
+    self.consume_call_sites.push(callee_sig)
+    self.consume_call_sites.push(callee_pi)
+    self.consume_call_sites.push(self.local_file_id)
+
+// #D5/P1: with effects + share-place ABI final, a plain non-Copy argument passed
+// to an OWNED parameter (consume/escape_value → not share-place) must be given up
+// explicitly. Emit the "requires move/copy" error for each such NAMED binding
+// (an rvalue is consumed directly and needs nothing). Runs after
+// assign_share_place_abi so the share-place verdict is complete — never
+// mis-classifying a forward-reference owned param as share-place.
+fn Sema.finalize_call_site_ownership(self: Sema):
+    let n = self.consume_call_sites.len() as i32
+    var i = 0
+    while i + 3 < n:
+        let arg_node = self.consume_call_sites.get(i as i64)
+        let callee_sig = self.consume_call_sites.get((i + 1) as i64)
+        let callee_pi = self.consume_call_sites.get((i + 2) as i64)
+        let file_id = self.consume_call_sites.get((i + 3) as i64)
+        i = i + 4
+        // share-place param: the caller keeps ownership; no transfer needed.
+        // (Only movable named bindings were recorded, so an owned param here is a
+        // genuine ownership transfer that must be made explicit.)
+        if self.sig_param_uses_value_ref_abi(callee_sig, callee_pi) != 0:
+            continue
+        self.local_file_id = file_id
+        self.emit_error("this parameter takes ownership of a non-Copy value (it is consumed or escapes the call); pass `move x` to transfer ownership, or `copy x` for an independent copy (§3.8)", arg_node)
+
 fn Sema.get_sig(self: Sema, name: i32) -> i32:
     if self.sig_lookup.contains(name):
         return self.sig_lookup.get(name).unwrap()
@@ -4897,9 +4971,12 @@ fn Sema.check_module(self: Sema):
     self.check_bodies()
     // #D5/P0: with every top-level body checked, complete transitive
     // consume/escape_value effects across the call graph so sig_param_effects is
-    // final before any share-place decision (lowering/ABI) reads it. Behavior-
-    // neutral until the P1 flip consumes the completed bits.
+    // final before any share-place decision (lowering/ABI) reads it.
     self.fixpoint_effect_flow()
+    // #D5/P1: classify share-place params (IndirectPlace) from the final effect,
+    // then require explicit move/copy for plain args to owned params.
+    self.assign_share_place_abi()
+    self.finalize_call_site_ownership()
     self.check_reachable_comptime_errors()
 
 fn Sema.prepare_for_comptime_transform(self: Sema):

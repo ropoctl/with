@@ -741,7 +741,8 @@ fn run_cli(argc: i32) -> i32:
         if not parsed_build.ok:
             with_eprint("error: " ++ parsed_build.error_msg)
             return 1
-        return run_build_command(parsed_build.build, parsed_build.graph)
+        let _sp_build = parsed_build.build
+        return run_build_command(move _sp_build, parsed_build.graph)
     if cli_command(argc) == "reduce":
         if cli_has_flag(argc, "--help") or cli_has_flag(argc, "-h"):
             print_reduce_usage()
@@ -1732,7 +1733,7 @@ fn run_graph_target_command(target_name: str) -> i32:
     let build_options = build_command_options_default()
     var graph_options = build_graph_command_options_default()
     graph_options.selected_target = target_name
-    run_build_command(build_options, graph_options)
+    run_build_command(move build_options, graph_options)
 
 fn build_graph_find_target_by_name(graph: &BuildGraph, target_name: str) -> BuildGraphTarget:
     for i in 0..graph.targets.len() as i32:
@@ -1841,7 +1842,7 @@ fn run_build_command(options: BuildCommandOptions, graph_options: BuildGraphComm
         if cfg.manifest_error.len() > 0:
             with_eprint("error: invalid with.toml: " ++ cfg.manifest_error)
             return 1
-        actual_options = build_command_apply_project_target_default(actual_options, cfg)
+        actual_options = build_command_apply_project_target_default(move actual_options, cfg)
         if build_command_validate_target(actual_options, cfg) != 0:
             return 1
         if project_config_file_exists(build_path):
@@ -1887,7 +1888,7 @@ fn run_build_command(options: BuildCommandOptions, graph_options: BuildGraphComm
         if cfg.manifest_error.len() > 0:
             with_eprint("error: invalid with.toml: " ++ cfg.manifest_error)
             return 1
-        actual_options = build_command_apply_project_target_default(actual_options, cfg)
+        actual_options = build_command_apply_project_target_default(move actual_options, cfg)
         if build_command_validate_target(actual_options, cfg) != 0:
             return 1
     if graph_options.no_deps:
@@ -2862,7 +2863,7 @@ fn run_test_command(argc: i32, opt_level: i32, no_std: bool, alloc_mode: bool, r
         build_options.debug_info = debug_info
         var graph_options = build_graph_command_options_default()
         graph_options.selected_target = "test"
-        return run_build_command(build_options, graph_options)
+        return run_build_command(move build_options, graph_options)
     for ti in 0..targets.len() as i32:
         let target = targets.get(ti as i64)
         let rc = run_test_target(target, opt_level, no_std, alloc_mode, runtime_available, prelude_mode, debug_info, verbose, quiet, filter)

@@ -465,11 +465,11 @@ fn comptime_tool_path_normalize(path: str) -> str:
         if ch == 47 or ch == 92:
             if i > start:
                 let part = path.slice(start as i64, i as i64)
-                parts = comptime_tool_path_push_part(parts, part, is_absolute)
+                parts = comptime_tool_path_push_part(move parts, part, is_absolute)
             start = i + 1
     if start < path.len() as i32:
         let part = path.slice(start as i64, path.len() as i64)
-        parts = comptime_tool_path_push_part(parts, part, is_absolute)
+        parts = comptime_tool_path_push_part(move parts, part, is_absolute)
     if parts.len() == 0:
         if is_absolute:
             return "/"
@@ -614,28 +614,28 @@ fn comptime_gzip_stored(data: str) -> str:
     out.push_byte(139 as u8)
     out.push_byte(8 as u8)
     out.push_byte(0 as u8)
-    out = comptime_gzip_append_u32_le(out, 0 as u32)
+    out = comptime_gzip_append_u32_le(move out, 0 as u32)
     out.push_byte(0 as u8)
     out.push_byte(255 as u8)
     var offset: i64 = 0
     if data.len() == 0:
         out.push_byte(1 as u8)
-        out = comptime_gzip_append_u16_le(out, 0)
-        out = comptime_gzip_append_u16_le(out, 0xffff)
+        out = comptime_gzip_append_u16_le(move out, 0)
+        out = comptime_gzip_append_u16_le(move out, 0xffff)
     while offset < data.len():
         let remaining = data.len() - offset
         let chunk = if remaining > 65535: 65535 else: remaining
         let final_block = offset + chunk == data.len()
         out.push_byte(if final_block: 1 as u8 else: 0 as u8)
-        out = comptime_gzip_append_u16_le(out, chunk as i32)
-        out = comptime_gzip_append_u16_le(out, 0xffff - chunk as i32)
+        out = comptime_gzip_append_u16_le(move out, chunk as i32)
+        out = comptime_gzip_append_u16_le(move out, 0xffff - chunk as i32)
         var i: i64 = 0
         while i < chunk:
             out.push_byte(data.byte_at(offset + i) as u8)
             i = i + 1
         offset = offset + chunk
-    out = comptime_gzip_append_u32_le(out, comptime_gzip_crc32(data))
-    out = comptime_gzip_append_u32_le(out, data.len() as u32)
+    out = comptime_gzip_append_u32_le(move out, comptime_gzip_crc32(data))
+    out = comptime_gzip_append_u32_le(move out, data.len() as u32)
     out.to_str()
 
 fn comptime_tar_entry_name(path: str, directory: bool) -> str:
@@ -3973,7 +3973,7 @@ fn comptime_execute_workspace_compile_plan(plan: ComptimeWorkspaceCompilePlan) -
                 success = true
         else:
             return comptime_workspace_native_compile_invalid()
-    comptime_workspace_native_compile_result(if success: 0 else: 1, artifact_path, comp, 0)
+    comptime_workspace_native_compile_result(if success: 0 else: 1, artifact_path, move comp, 0)
 
 unsafe fn comptime_workspace_thread_entry(arg: *mut u8) -> i32:
     let job = arg as *mut ComptimeWorkspaceThreadJob

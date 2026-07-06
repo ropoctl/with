@@ -16346,7 +16346,7 @@ fn Codegen.monomorphize_generic_call_core(self: Codegen, fn_sym: i32, fn_node: i
     if lower_di >= 0:
         self.sema.update_decl_source_context(lower_di)
     var mir_builder = MirBuilder.init(self.sema, self.pool, self.intern, mono_sym)
-    let mir_body = lower_fn_with_sig(mir_builder, generic_node, sig_idx)
+    let mir_body = lower_fn_with_sig(move mir_builder, generic_node, sig_idx)
 
     // 3. Codegen via MIR (saves/restores all codegen state internally)
     self.gen_function_mir_mono(mono_sym, generic_node, mir_body)

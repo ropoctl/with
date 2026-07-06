@@ -885,7 +885,8 @@ fn Compilation.prepare_binary_link_from_pool(self: Compilation, pool: AstPool, s
         all_link_libs.push(self.zcu.project_config.link_libs.get(lli as i64))
     for dli in 0..self.zcu.project_config.dep_link_libs.len() as i32:
         all_link_libs.push(self.zcu.project_config.dep_link_libs.get(dli as i64))
-    let link_plan = link_stage_link_object_to_binary_plan(obj_path, bin_path, all_link_libs, self.zcu.project_config.link_search_paths, self.zcu.project_config.dep_link_args, requires_async_runtime)
+    var _sp_dla = self.zcu.project_config.dep_link_args
+    let link_plan = link_stage_link_object_to_binary_plan(obj_path, bin_path, all_link_libs, self.zcu.project_config.link_search_paths, move _sp_dla, requires_async_runtime)
     if not link_plan.ok:
         compilation_cleanup_build_products(obj_path, bin_path)
         return compilation_binary_link_plan_fail()
@@ -1407,7 +1408,8 @@ fn Compilation.run_mir_lower(self: Compilation, pool: AstPool) -> MirModule:
     if do_profile:
         profile_emit("mir.lower", t_mir, f"bodies={mir_mod.body_count()}")
     let t_suspend_check = profile_now()
-    sema.diags = check_no_await_guard_suspends(mir_mod, active_pool, &sema, sema.diags)
+    var _sp_diags = sema.diags
+    sema.diags = check_no_await_guard_suspends(mir_mod, active_pool, &sema, move _sp_diags)
     if do_profile:
         profile_emit("mir.suspend_check", t_suspend_check, "")
     if sema.diags.has_errors():

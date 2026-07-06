@@ -161,7 +161,7 @@ fn project_config_load_for_source(source_path_raw: str) -> ProjectConfig:
                         pending_value = pending_value ++ " "
                     pending_value = pending_value ++ line
                     if project_config_value_complete(pending_value):
-                        cfg = project_config_apply_manifest_entry(cfg, section, pending_key, pending_value)
+                        cfg = project_config_apply_manifest_entry(move cfg, section, pending_key, pending_value)
                         pending_key = ""
                         pending_value = ""
                 else if line.byte_at(0) == 91 and line.byte_at(line.len() as i64 - 1) == 93:
@@ -176,7 +176,7 @@ fn project_config_load_for_source(source_path_raw: str) -> ProjectConfig:
                             cfg.manifest_error = forbidden
                         if project_config_wants_key(section, key):
                             if project_config_value_complete(value):
-                                cfg = project_config_apply_manifest_entry(cfg, section, key, value)
+                                cfg = project_config_apply_manifest_entry(move cfg, section, key, value)
                             else:
                                 pending_key = key
                                 pending_value = value
@@ -184,15 +184,15 @@ fn project_config_load_for_source(source_path_raw: str) -> ProjectConfig:
         i = i + 1
 
     if pending_key.len() > 0 and project_config_value_complete(pending_value):
-        cfg = project_config_apply_manifest_entry(cfg, section, pending_key, pending_value)
+        cfg = project_config_apply_manifest_entry(move cfg, section, pending_key, pending_value)
 
     cfg
 
 fn project_config_apply_manifest_entry(cfg: ProjectConfig, section: str, key: str, value: str) -> ProjectConfig:
     let manual_c_dep = project_config_manual_c_dep_name(section)
     if manual_c_dep.len() > 0:
-        return project_config_apply_manual_c_dep_entry(cfg, manual_c_dep, key, value)
-    project_config_apply_entry(cfg, section, key, value)
+        return project_config_apply_manual_c_dep_entry(move cfg, manual_c_dep, key, value)
+    project_config_apply_entry(move cfg, section, key, value)
 
 fn project_config_apply_entry(cfg: ProjectConfig, section: str, key: str, value: str) -> ProjectConfig:
     var out = cfg
@@ -306,7 +306,7 @@ fn project_config_apply_entry(cfg: ProjectConfig, section: str, key: str, value:
                     else:
                         if not project_config_vec_contains(out.c_dep_metadata_names, pkg_name):
                             out.c_dep_metadata_names.push(pkg_name)
-                        out = project_config_load_dep_metadata(out, pkg_name, constraint)
+                        out = project_config_load_dep_metadata(move out, pkg_name, constraint)
             else if out.manifest_error.len() == 0:
                 out.manifest_error = "With package dependency '" ++ key ++ "' is declared in with.toml but the With package registry is not available yet; remove it or use a C package (c.<name>)"
     out
@@ -443,7 +443,7 @@ fn project_config_load_dep_metadata(cfg: ProjectConfig, name: str, version: str)
         if slash > 0:
             let req_name = req.slice(0, slash as i64)
             let req_version = req.slice((slash + 1) as i64, req.len())
-            out = project_config_load_dep_metadata(out, req_name, req_version)
+            out = project_config_load_dep_metadata(move out, req_name, req_version)
     out
 
 fn project_config_json_str_array(json: str, key: str) -> Vec[str]:

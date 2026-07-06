@@ -13235,7 +13235,7 @@ fn ci_collect_var_decls(session: i64, cursor: i32, decls_in: Vec[CiHoistedVarDec
     let nc = with_ci_num_children(session, cursor)
     var ci = 0
     while ci < nc:
-        decls = ci_collect_var_decls(session, with_ci_child(session, cursor, ci), decls, types)
+        decls = ci_collect_var_decls(session, with_ci_child(session, cursor, ci), move decls, types)
         ci = ci + 1
     decls
 
@@ -14320,7 +14320,7 @@ fn CiGotoCfgContext.verify_labels(self: CiGotoCfgContext):
 
 fn CiStmtPool.lower_goto_body_stackify(self: CiStmtPool, session: i64, body_cursor: i32, scope: CiScope, exprs: CiExprPool, types: CiTypePool) -> CiStmtId:
     var hoisted_decls: Vec[CiHoistedVarDecl] = Vec.new()
-    hoisted_decls = ci_collect_var_decls(session, body_cursor, hoisted_decls, types)
+    hoisted_decls = ci_collect_var_decls(session, body_cursor, move hoisted_decls, types)
 
     var hoisted_stmt_ids: Vec[i32] = Vec.new()
     var hvi: i32 = 0

@@ -5360,7 +5360,7 @@ fn Codegen.monomorphize_struct_method_core(self: Codegen, mono_type_sym: i32, me
     if lower_di >= 0:
         self.sema.update_decl_source_context(lower_di)
     var mir_builder = MirBuilder.init(self.sema, self.pool, self.intern, mono_sym)
-    let mir_body = lower_fn_with_sig(mir_builder, decl, sig_idx)
+    let mir_body = lower_fn_with_sig(move mir_builder, decl, sig_idx)
 
     // 3. Codegen via MIR (saves/restores all codegen state internally)
     self.gen_function_mir_mono(mono_sym, decl, mir_body)
@@ -5532,7 +5532,7 @@ fn Codegen.monomorphize_struct_static_method_core(self: Codegen, mono_type_sym: 
     if lower_di >= 0:
         self.sema.update_decl_source_context(lower_di)
     var mir_builder = MirBuilder.init(self.sema, self.pool, self.intern, mono_sym)
-    let mir_body = lower_fn_with_sig(mir_builder, decl, sig_idx)
+    let mir_body = lower_fn_with_sig(move mir_builder, decl, sig_idx)
     self.gen_function_mir_mono(mono_sym, decl, mir_body)
     self.sema.local_file_id = saved_lower_file_id
     self.sema.current_module_path = saved_lower_module_path

@@ -811,7 +811,7 @@ fn suspend_check_body(ast: AstPool, sema: &Sema, body_by_fn: &HashMap[i32, i32],
                     reported_ends.push(site.end)
                     reported_locals.push(li)
                     reported_origins.push(li)
-                    out = suspend_emit_guard_error(out, sema, body, site, li)
+                    out = suspend_emit_guard_error(move out, sema, body, site, li)
                 reported_direct = 1
                 break
         if reported_direct != 0:
@@ -835,7 +835,7 @@ fn suspend_check_body(ast: AstPool, sema: &Sema, body_by_fn: &HashMap[i32, i32],
                     reported_ends.push(site2.end)
                     reported_locals.push(vi)
                     reported_origins.push(guard_local)
-                    out = suspend_emit_derived_guard_error(out, sema, body, site2, vi, guard_local)
+                    out = suspend_emit_derived_guard_error(move out, sema, body, site2, vi, guard_local)
                 reported_derived = 1
                 break
     out
@@ -857,7 +857,7 @@ fn suspend_check_no_suspend_body(ast: AstPool, sema: &Sema, body_by_fn: &HashMap
         reported_starts.push(site.start)
         reported_ends.push(site.end)
         reported_nodes.push(no_suspend_node)
-        out = suspend_emit_no_suspend_error(out, sema, body, body_by_fn, body_may_suspend, site, bb)
+        out = suspend_emit_no_suspend_error(move out, sema, body, body_by_fn, body_may_suspend, site, bb)
     out
 
 fn check_no_await_guard_suspends(mir_mod: &MirModule, ast: AstPool, sema: &Sema, diags: DiagnosticList) -> DiagnosticList:
@@ -866,6 +866,6 @@ fn check_no_await_guard_suspends(mir_mod: &MirModule, ast: AstPool, sema: &Sema,
     let body_may_suspend = suspend_compute_may_suspend(mir_mod, body_by_fn)
     for bi in 0..mir_mod.bodies.len() as i32:
         let body = mir_mod.bodies.get(bi as i64)
-        out = suspend_check_no_suspend_body(ast, sema, body_by_fn, body_may_suspend, &body, out)
-        out = suspend_check_body(ast, sema, body_by_fn, body_may_suspend, &body, out)
+        out = suspend_check_no_suspend_body(ast, sema, body_by_fn, body_may_suspend, &body, move out)
+        out = suspend_check_body(ast, sema, body_by_fn, body_may_suspend, &body, move out)
     out
