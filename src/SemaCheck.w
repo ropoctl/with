@@ -8010,6 +8010,7 @@ fn Sema.propagate_method_call_param_effects(self: Sema, call_node: i32, sig_idx:
     let param_count = self.sig_get_param_count(sig_idx)
     if recv_node != 0 and param_offset == 1 and param_count > 0:
         self.propagate_call_param_effect(self.sig_param_effect(sig_idx, 0), recv_node)
+        self.record_effect_edge(sig_idx, 0, recv_node)
     for ai in 0..arg_count:
         let param_i = ai + param_offset
         if param_i >= param_count:
@@ -8017,6 +8018,8 @@ fn Sema.propagate_method_call_param_effects(self: Sema, call_node: i32, sig_idx:
         let arg_node = if has_resolved != 0: self.get_resolved_call_arg(call_node, ai) else: self.ast.get_extra(extra_start + ai)
         if arg_node > 0:
             self.propagate_call_param_effect(self.sig_param_effect(sig_idx, param_i), arg_node)
+            // #D5/P0: record caller-param → callee-param edge (method path).
+            self.record_effect_edge(sig_idx, param_i, arg_node)
             // §3.8: a plain `T` method parameter consumes its argument, whether
             // or not the callee body exercises ownership (Copy types are
             // copied; mark_moved_if_consumed skips them). Receivers are
@@ -12462,6 +12465,10 @@ fn Sema.check_call(self: Sema, node: i32) -> i32:
             // function's effect set.
             let trans_nd = if has_resolved != 0: self.get_resolved_call_arg(node, ai) else: self.ast.get_extra(resolved_extra_start + ai)
             self.propagate_call_param_effect(param_eff, trans_nd)
+            // #D5/P0: record the caller-param → callee-param effect-flow edge so
+            // fixpoint_effect_flow can complete transitive consume/escape even
+            // when this callee is a forward reference (its body not yet checked).
+            self.record_effect_edge(sig_idx, param_i, trans_nd)
             // §3.8: a plain `T` parameter consumes — the caller's binding is
             // invalidated whether or not the callee body exercises ownership
             // (Copy types are copied instead; mark_moved_if_consumed skips

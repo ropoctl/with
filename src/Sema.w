@@ -388,6 +388,18 @@ type Sema {
     // whose native ABI passes an address.
     sig_value_ref_abi_params: Vec[i32],
 
+    // #D5 share-place foundation (P0): effect-flow edges discovered during body
+    // checking, flattened as 4-tuples [caller_sig, caller_pi, callee_sig,
+    // callee_pi] — "caller param `caller_pi` is passed as the argument to callee
+    // param `callee_pi`." After all bodies are checked, `fixpoint_effect_flow`
+    // propagates consume/escape effects backward along these edges to a fixpoint,
+    // so every sig_param_effects entry is COMPLETE (transitively, across forward
+    // references and mutual recursion) before any call-site share-place decision
+    // reads it. Single-pass inference alone under-detects forward-ref escapes;
+    // under share-place that would double-free (caller keeps ownership of a
+    // param the callee actually escapes/consumes). See decisions.md D5.
+    effect_flow_edges: Vec[i32],
+
     // Extern fn names
     extern_fn_names: HashMap[i32, i32],
     // #602: c_import/extern params that RETAIN a passed C-string pointer past
@@ -1455,6 +1467,7 @@ fn sema_empty_state(pool: InternPool, diags: DiagnosticList, ast: AstPool) -> Se
         sig_param_view_origins: Vec.new(),
         sig_param_eff_starts: Vec.new(),
         sig_value_ref_abi_params: Vec.new(),
+        effect_flow_edges: Vec.new(),
         extern_fn_names,
         retained_extern_params,
         fn_decl_nodes,
@@ -4584,6 +4597,67 @@ fn Sema.note_place_effect(self: Sema, expr_node: i32, eff: i32):
         if dep_sym != 0:
             self.note_param_effect(dep_sym, eff)
 
+// #D5/P0: when the current function passes one of its own parameters as the
+// argument to `callee_pi` of `callee_sig`, record the effect-flow edge
+// [caller_sig, caller_pi, callee_sig, callee_pi]. `fixpoint_effect_flow` later
+// propagates the callee param's ownership-forcing effects (consume/escape_value)
+// backward onto the caller param, completing effects that single-pass inference
+// misses when the callee is a forward reference or mutual recursion. Only
+// param-rooted arguments produce an edge; a temporary/rvalue argument carries no
+// caller-place ownership to propagate.
+fn Sema.record_effect_edge(self: Sema, callee_sig: i32, callee_pi: i32, arg_node: i32):
+    let caller_sig = self.current_fn_sig_idx
+    if caller_sig < 0 or callee_sig < 0 or callee_pi < 0 or arg_node <= 0:
+        return
+    let root = self.place_root_sym(arg_node)
+    if root == 0:
+        return
+    let caller_pi = self.param_index_for_sym(root)
+    if caller_pi < 0:
+        return
+    self.effect_flow_edges.push(caller_sig)
+    self.effect_flow_edges.push(caller_pi)
+    self.effect_flow_edges.push(callee_sig)
+    self.effect_flow_edges.push(callee_pi)
+
+// #D5/P0: complete transitive consume/escape_value effects across the whole call
+// graph, so every sig_param_effects entry is final before any share-place
+// decision reads it. A greatest-fixpoint over the recorded edges: propagate the
+// ownership-forcing bits backward until stable. Reference/pointer params never
+// own, so they never receive these bits (mirrors the flush-time clamp). This
+// only ADDS data; nothing consumes the completed bits until the P1 flip, so P0
+// is behavior-neutral.
+fn Sema.fixpoint_effect_flow(self: Sema):
+    let n = self.effect_flow_edges.len() as i32
+    if n < 4:
+        return
+    var changed = 1
+    var guard = 0
+    while changed != 0 and guard < 4096:
+        changed = 0
+        guard = guard + 1
+        var i = 0
+        while i + 3 < n:
+            let caller_sig = self.effect_flow_edges.get(i as i64)
+            let caller_pi = self.effect_flow_edges.get((i + 1) as i64)
+            let callee_sig = self.effect_flow_edges.get((i + 2) as i64)
+            let callee_pi = self.effect_flow_edges.get((i + 3) as i64)
+            i = i + 4
+            let callee_eff = self.sig_param_effect(callee_sig, callee_pi)
+            let trans = callee_eff & (EFF_CONSUME | EFF_ESCAPE_VALUE)
+            if trans == 0:
+                continue
+            let p_tid = self.sig_param_type(caller_sig, caller_pi)
+            if p_tid > 0:
+                let p_tk = self.get_type_kind(self.resolve_alias(p_tid))
+                if p_tk == TypeKind.TY_REF or p_tk == TypeKind.TY_PTR:
+                    continue
+            let caller_eff = self.sig_param_effect(caller_sig, caller_pi)
+            let merged = caller_eff | trans
+            if merged != caller_eff:
+                self.set_sig_param_effect(caller_sig, caller_pi, merged)
+                changed = 1
+
 fn Sema.get_sig(self: Sema, name: i32) -> i32:
     if self.sig_lookup.contains(name):
         return self.sig_lookup.get(name).unwrap()
@@ -4821,6 +4895,11 @@ fn Sema.check_module(self: Sema):
     self.check_top_level_let_values()
     self.check_type_decl_field_defaults()
     self.check_bodies()
+    // #D5/P0: with every top-level body checked, complete transitive
+    // consume/escape_value effects across the call graph so sig_param_effects is
+    // final before any share-place decision (lowering/ABI) reads it. Behavior-
+    // neutral until the P1 flip consumes the completed bits.
+    self.fixpoint_effect_flow()
     self.check_reachable_comptime_errors()
 
 fn Sema.prepare_for_comptime_transform(self: Sema):
