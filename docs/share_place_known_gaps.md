@@ -19,25 +19,32 @@ fn main:
     let _ = handle.id            // should be use-after-move; currently accepted
 ```
 
-**Fact (`with check … --dump-abi`):**
+**Fact (`with check … --dump-abi`, after the drop-scope/move-self work landed):**
 ```
-fn close_external  param[0] ty=… eff=[none] value_ref_abi=1 -> SHARE-PLACE
+fn close_external  param[0] ty=… eff=[consume] value_ref_abi=0 -> OWNED
 ```
-The declared `consume` effect is **not** on the sig (`eff=[none]`), so
-`assign_share_place_abi` classifies the param SHARE-PLACE (borrow) instead of
-OWNED. The consume is ignored, so the arg is treated as borrowed and use-after
-is not caught.
+The classification is **correct** — the declared consume IS honored and the
+param is OWNED. (An earlier note here recorded `eff=[none] -> SHARE-PLACE`; that
+was a stale, pre-rebuild reading — `--dump-abi` corrected it.)
 
-`apply_declared_effects_to_extern_sig` (Sema.w) *does* call
-`set_sig_param_effect` at decl time (SemaDecl.w:1563), yet the effect is absent
-by classification time — so either the `@[effect]` pin is not parsed/attached to
-the extern fn node (`fn_effect_pin_count` == 0) or the effect is reset. Worked by
-accident under the old move-by-default (every param consumed regardless).
+The bug is at the **call site**, and it is extern-specific:
+- a regular consuming call — `fn sink(h: Handle) -> Handle: h; … sink(handle)` —
+  correctly errors "this parameter takes ownership … pass `move x`" and marks
+  `handle` moved;
+- the extern call `close_external(handle)` (with or without `unsafe`) produces
+  **no** ownership error at all, so `handle.id` afterwards is not caught as
+  use-after-move.
 
-**Fix direction:** ensure `@[effect(... : consume)]` on an extern fn reaches
-`sig_param_effect` before `assign_share_place_abi` runs (check pin parsing for
-extern fns first). Then remove the skip; the test should again produce
-`use of moved value` (or a require-move at the call).
+So extern calls skip the OWNED-param consume enforcement that regular calls run
+(`record_consume_call_site` / `finalize_call_site_ownership`). The extern-call
+path short-circuits before that recording — see the `extern_fn_names.contains`
+branches in `SemaCheck.w` (~3552, ~4045) in the call-arg checking flow.
+
+**Fix direction:** make extern-fn calls record a consume-call-site (or mark the
+arg moved) for each OWNED (consume/escape_value) parameter, the same way regular
+calls do. Then remove the skip; the test should produce `use of moved value` (or
+a require-move) at `close_external(handle)`. Verify the classification stays
+OWNED with `--dump-abi`.
 
 ---
 
