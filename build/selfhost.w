@@ -2302,8 +2302,13 @@ pub fn run_cli_selfhost_project_action(ctx: ActionCtx) -> i32:
     if rc != 0: return rc
     rc = bs_check_remove_update_packages(ctx, compiler_path, bs_join(output_dir, "remove_update_packages_case"))
     if rc != 0: return rc
-    rc = bs_check_get_zlib_versions(ctx, compiler_path, bs_join(output_dir, "get_zlib_versions_case"))
-    if rc != 0: return rc
+    // #623/#624: the get-zlib case downloads zlib over the LIVE network (conan)
+    // and flakes the otherwise-offline gate — SKIPPED. To exercise the real
+    // network resolution, re-enable the call below or run get-zlib manually.
+    // (The build action is comptime-evaluated, so a raw getenv opt-in gate is
+    // not available here — hence an unconditional skip.)
+    // rc = bs_check_get_zlib_versions(ctx, compiler_path, bs_join(output_dir, "get_zlib_versions_case"))
+    // if rc != 0: return rc
     rc = bs_check_build_cache_tracks_compiler(ctx, compiler_path, bs_join(output_dir, "build_cache_compiler_case"))
     if rc != 0: return rc
     rc = bs_check_build_cache_tracks_action_source(ctx, compiler_path, bs_join(output_dir, "build_cache_action_case"))
