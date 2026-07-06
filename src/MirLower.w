@@ -7867,9 +7867,14 @@ fn MirBuilder.lower_call_arg(self: MirBuilder, arg_node: i32, sig_idx: i32, call
     // params are already rejected at check time, so a plain arg reaching here for
     // a non-share-place param is extern/copy — keep the existing behavior.)
     let arg_kind = self.ast.kind(arg_node)
-    let arg_is_plain = arg_kind != NodeKind.NK_MOVE_ARG and arg_kind != NodeKind.NK_COPY_ARG
+    let arg_is_copy = arg_kind == NodeKind.NK_COPY_ARG
     let callee_share_place = sig_idx >= 0 and arg_i >= 0 and self.sema.sig_param_uses_value_ref_abi(sig_idx, arg_i) != 0
-    if not (arg_is_plain and callee_share_place):
+    // A share-place (value_ref_abi) parameter BORROWS — it never owns the
+    // argument, so the caller keeps its drop for a plain OR a `move` argument
+    // (moving into a borrow is redundant but must not leak the value). Only an
+    // owned/extern param, or a `copy` (whose clone is a distinct owned temp),
+    // consumes the operand.
+    if arg_is_copy or not callee_share_place:
         self.consume_moved_operand(lowered)
     // #606: a by-value `xs.push(a)` arg carries the receiver's buffer; cancel the
     // receiver's drop so it isn't double-freed with the callee's. Gated to NK_CALL
