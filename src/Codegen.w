@@ -4066,6 +4066,31 @@ fn Codegen.declare_function_at(self: Codegen, fn_node: i32, decl_index: i32):
 
     self.current_method_owner_sym = saved_owner
 
+// #D6: PassMode — the per-parameter ABI classification, the SINGLE source of
+// truth. `arg_pass_mode` computes it; both the callee prologue
+// (declare_function_from_sig) and every call site read it, so caller and callee
+// can never disagree on how an argument is passed (that disagreement is exactly
+// the transparent T*/T** bug). Extend the classification HERE, never per-path.
+// See decisions.md D6, docs/fn_abi_descriptor_design.md.
+//   PM_DIRECT         = by value (Copy / scalar / small aggregate)
+//   PM_INDIRECT       = pointer to a callee-owned copy (byval, Windows-x86_64)
+//   PM_INDIRECT_PLACE = pointer to the CALLER's place (share-place / value_ref_abi)
+const PM_DIRECT: i32 = 0
+const PM_INDIRECT: i32 = 1
+const PM_INDIRECT_PLACE: i32 = 2
+
+fn Codegen.arg_pass_mode(self: Codegen, sig_idx: i32, pi: i32) -> i32:
+    if self.sema.sig_param_uses_value_ref_abi(sig_idx, pi) != 0:
+        return PM_INDIRECT_PLACE
+    var p_ty = self.sema_type_to_llvm(self.sema.sig_param_type(sig_idx, pi))
+    if p_ty == 0:
+        p_ty = self.type_fallback()
+    if wl_get_type_kind(p_ty) == wl_void_type_kind():
+        p_ty = wl_i32_type(self.context)
+    if self.internal_abi_needs_indirect_param(p_ty):
+        return PM_INDIRECT
+    PM_DIRECT
+
 fn Codegen.declare_function_from_sig(self: Codegen, fn_sym: i32, sig_idx: i32, force_internal: i32):
     if fn_sym == 0 or sig_idx < 0:
         return
@@ -4091,7 +4116,9 @@ fn Codegen.declare_function_from_sig(self: Codegen, fn_sym: i32, sig_idx: i32, f
             p_ty = self.type_fallback()
         if wl_get_type_kind(p_ty) == wl_void_type_kind():
             p_ty = wl_i32_type(self.context)
-        if self.sema.sig_param_uses_value_ref_abi(sig_idx, pi) != 0:
+        // #D6: the prologue reads the single ABI classifier — an IndirectPlace
+        // param is a pointer to the caller's place (value_ref_abi / share-place).
+        if self.arg_pass_mode(sig_idx, pi) == PM_INDIRECT_PLACE:
             p_ty = wl_ptr_type(self.context)
             self.record_ref_param(cg_sym, pi, param_count)
             if cg_sym != fn_sym:
@@ -4112,7 +4139,8 @@ fn Codegen.declare_function_from_sig(self: Codegen, fn_sym: i32, sig_idx: i32, f
         actual_param_types.push(wl_ptr_type(self.context))
     for api in 0..param_count:
         let source_ty = param_types.get(api as i64)
-        if self.internal_abi_needs_indirect_param(source_ty):
+        // #D6: byval indirection is the Indirect pass mode (callee-owned copy).
+        if self.arg_pass_mode(sig_idx, api) == PM_INDIRECT:
             actual_param_types.push(wl_ptr_type(self.context))
             byval_mask = byval_mask | ((1 as i64) << (api as u32))
             byval_types.push(source_ty)
