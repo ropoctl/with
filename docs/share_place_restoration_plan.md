@@ -232,6 +232,20 @@ if ignored:
   reach it (Box methods likely route through the generic path, not Group B direct
   sites) before unifying; do NOT add transparent handling to `mir_ref_arg_ptr`
   blindly — it would change the concrete path (which works today without it).
+  - **FOUND (investigated):** transparent handling lives ONLY in the generic path
+    (12819-12925: `T**` via `mir_operand_place_addr`); the concrete path
+    (13913-14160) has NO transparent guard and treats a transparent box value as
+    already-a-pointer → `T*` via the short-circuit. BOTH currently work + fixpoint.
+    So generic and concrete use different, each-correct address forms for a
+    transparent receiver — they CANNOT share one `mir_ref_arg_ptr` for that case
+    until we resolve WHY the callee ABI differs (does generic-mono vs concrete-mono
+    disagree on the transparent receiver's ptr ABI, or do the two paths handle
+    disjoint receiver shapes?). The cathedral unifies cleanly for non-transparent
+    (struct) receivers — the bulk; the transparent case needs its own resolution
+    and must NOT be forced through the shared helper until then. Concrete unblock
+    step: determine whether a transparent-receiver method call ever reaches the
+    concrete needs_ref block at all (if generic-mono always claims it, the concrete
+    short-circuit is dead and the paths are disjoint → safe to unify the rest).
 
 Net: migrate one site → gate (build+fixpoint+suite) → commit, never batch, so a
 fixpoint break isolates to one swap.
