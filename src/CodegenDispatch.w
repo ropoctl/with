@@ -5935,11 +5935,8 @@ fn Codegen.mir_emit_multi_index_method_call(self: Codegen, body: &MirBody, args_
 
     let call_args: Vec[i64] = Vec.new()
     if self.is_ref_param(fn_sym, 0):
-        let base_ptr = self.mir_try_place_ptr_for_ref(body, base_op)
-        if base_ptr != 0:
-            call_args.push(base_ptr)
-        else:
-            call_args.push(self.get_mutable_receiver_ptr(self.pool.get_data0(mi_node), base_val, base_ty))
+        // #D6: receiver marshals through the one canonical policy.
+        call_args.push(self.marshal_ref_addr(body, base_op, base_val))
     else:
         call_args.push(base_val)
     call_args.push(self.mir_build_multi_index_specs_ref(body, args_id, mi_node, is_set))
@@ -13472,11 +13469,8 @@ fn Codegen.mir_emit_call_term(self: Codegen, body: &MirBody, callee_operand: i32
                             let gc_direct_args: Vec[i64] = Vec.new()
                             let gc_direct_is_ref = self.fn_ref_param_starts.get(gc_direct_fn_sym).is_some()
                             if gc_direct_is_ref:
-                                let gc_direct_ref_ptr = self.mir_try_place_ptr_for_ref(body, gc_recv_op)
-                                if gc_direct_ref_ptr != 0:
-                                    gc_direct_args.push(gc_direct_ref_ptr)
-                                else:
-                                    gc_direct_args.push(self.get_mutable_receiver_ptr(gc_self_expr_node, gc_recv_val, gc_recv_ty))
+                                // #D6: receiver marshals through the one canonical policy.
+                                gc_direct_args.push(self.marshal_ref_addr(body, gc_recv_op, gc_recv_val))
                             else:
                                 gc_direct_args.push(gc_recv_val)
                             for gc_direct_ai in 0..gc_direct_method_arg_count:
