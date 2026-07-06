@@ -1259,6 +1259,12 @@ fn Compilation.dump_place_map_file(self: Compilation, source_path: str) -> str:
         return ""
     self.dump_place_map(pool)
 
+fn Compilation.dump_abi_file(self: Compilation, source_path: str) -> str:
+    let pool = self.compile_file(source_path)
+    if pool.decl_count() == 0:
+        return ""
+    self.zcu.last_sema.dump_abi()
+
 fn Compilation.trace_cleanup_edge(self: Compilation, pool: AstPool, spec: str) -> str:
     if self.zcu.last_mir_module.body_count() == 0:
         let _ = self.run_mir_lower(pool)

@@ -4699,6 +4699,28 @@ fn Sema.assign_share_place_abi(self: Sema):
             self.set_sig_param_value_ref_abi(si, pi, 1)
         si = si + 1
 
+// #D5/D6: dump the per-parameter ownership/ABI classification for every function
+// signature — the ground truth for share-place vs owned, without inferring it
+// from MIR. Answers "is this param a borrow (share-place) or owned?" directly.
+// Backs `--dump-abi`. Run after check so effects + value_ref_abi are final.
+fn Sema.dump_abi(self: Sema) -> str:
+    var out = f"abi module sigs={self.sig_names.len() as i32}\n"
+    for si in 0..self.sig_names.len() as i32:
+        let fn_sym = self.sig_names.get(si as i64)
+        let name = self.pool_resolve(fn_sym)
+        let pc = self.sig_get_param_count(si)
+        out = out ++ f"fn {name} [sig={si} params={pc}]\n"
+        for pi in 0..pc:
+            let ty = self.sig_param_type(si, pi)
+            let eff = self.sig_param_effect(si, pi)
+            let vra = self.sig_param_uses_value_ref_abi(si, pi)
+            let cls =
+                if self.is_copy(ty as TypeId) != 0: "COPY"
+                else if vra != 0: "SHARE-PLACE"
+                else: "OWNED"
+            out = out ++ f"  param[{pi}] ty={ty} eff=[" ++ sema_effect_bits_text(eff) ++ f"] value_ref_abi={vra} -> " ++ cls ++ "\n"
+    out
+
 // #D5/P1: record a plain non-Copy value argument (with its file) for the
 // post-fixpoint ownership check.
 fn Sema.record_consume_call_site(self: Sema, arg_node: i32, callee_sig: i32, callee_pi: i32):

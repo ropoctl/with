@@ -10,5 +10,5 @@ fn identity(p: Pair) -> Pair:
 
 fn main:
     let p = Pair { first: 1, second: 2 }
-    let _ = identity(p)
+    let _ = identity(move p)
     let _ = p.first

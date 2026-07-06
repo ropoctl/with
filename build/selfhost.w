@@ -2508,7 +2508,11 @@ fn bs_check_by_value_read_only_warning(ctx: &ActionCtx, compiler_path: str, case
     args |> push(bs_abs(root, src))
     let result = bs_edge_expect_success(ctx, compiler_path, case_dir, "by-value-read-only-warning", args)
     if result.rc != 0: return result.rc
-    rc = bs_assert_contains(ctx, result.stderr, "warning: 'inspect' only reads 'x'; consider 'x: &ReadOnly' so callers keep their binding", "by_value_read_only_warning")
+    // §D5 share-place: a by-value read-only param is the CORRECT default — an
+    // IndirectPlace borrow, so the caller keeps its binding. The old
+    // "consider 'x: &ReadOnly'" nag was the move-by-default vestige and was
+    // removed (P1). Assert it is NOT produced for the plain by-value param.
+    rc = bs_assert_not_contains(ctx, result.stderr, "'inspect' only reads 'x'", "by_value_read_only_no_warning")
     if rc != 0: return rc
     rc = bs_assert_not_contains(ctx, result.stderr, "'inspect_ref' only reads", "by_value_read_only_ref_clean")
     if rc != 0: return rc

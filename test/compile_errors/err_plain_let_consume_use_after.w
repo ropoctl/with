@@ -10,5 +10,5 @@ fn consume_store(v: Resource) -> i32:
 
 fn main:
     let r = Resource { id: 1 }
-    let _ = consume_store(r)
+    let _ = consume_store(move r)
     let _ = r.id

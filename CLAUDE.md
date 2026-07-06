@@ -585,6 +585,7 @@ fixpoint bugs:
 ./out/stage/bin/with-stage2 check repro.w --trace-ownership main:_1
 ./out/stage/bin/with-stage2 check repro.w --dump-drop-plan
 ./out/stage/bin/with-stage2 check repro.w --dump-place-map
+./out/stage/bin/with-stage2 check repro.w --dump-abi
 ./out/stage/bin/with-stage2 check repro.w --trace-cleanup-edge 'main:bb0->bb1'
 ./out/stage/bin/with-stage2 check repro.w --dump-drop-flags
 ./out/stage/bin/with-stage2 check repro.w --validate-all
@@ -592,6 +593,18 @@ fixpoint bugs:
 with build :fixpoint-diff
 ```
 See `docs/deep-debugging-tools.md`.
+
+`--dump-abi` prints, per function signature, each parameter's ownership/ABI
+classification — effect flags, `value_ref_abi`, and the `SHARE-PLACE | OWNED |
+COPY` verdict. It is the direct answer to "is this parameter a borrow
+(share-place) or owned?" — do NOT infer that from MIR or reasoning; dump it.
+
+For drop-exactly-once correctness across (value shape × control flow × ownership
+op × receiver mode), run the `/drop-audit` skill
+(`.claude/skills/drop-audit/audit.py`) before and after ANY change to drop
+scheduling, ownership, or receiver lowering. One bad cell means the whole region
+is untested — audit it, don't spot-fix. The auditor classifies every failure
+against a baseline compiler so regressions self-identify.
 
 ### LLDB (preferred)
 ```

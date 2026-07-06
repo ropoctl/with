@@ -5299,12 +5299,12 @@ fn Sema.check_expr(self: Sema, node: i32) -> TypeId:
             return unwrapped_tuple as TypeId
         if self.expr_is_awaitable_task_value(inner) == 0:
             self.emit_error("await requires a Task value", node)
-        // #D5/P1: `.await` CONSUMES the task — it drives it to completion, using
-        // it up. Mark the awaited binding moved and record the consume effect, so
-        // a task parameter that is awaited is classified as owned (not
-        // share-place) and passing it requires an explicit `move`.
-        self.mark_moved_if_consumed(inner)
-        self.note_place_effect(inner, EFF_CONSUME)
+        // §14.7: `.await` does NOT consume the task — it drives it to completion
+        // and returns the result, but the task remains observable afterwards
+        // (`task.was_cancelled()`, `task.is_done()` are valid post-await). So
+        // await must not mark the awaited binding moved or record a consume
+        // effect; doing so both broke §14.7 observation and mis-classified an
+        // awaited task parameter as owned.
         // Unwrap Task[T] → T for the .await expression type
         let await_result_ty = self.unwrap_task_type(inner_ty)
         self.typed_expr_types.insert(node, await_result_ty as i32)

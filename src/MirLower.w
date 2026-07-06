@@ -6213,8 +6213,14 @@ fn MirBuilder.lower_for_range(self: MirBuilder, for_node: i32, pat_or_sym: i32, 
     self.switch_to(body_bb)
     self.bind_for_element_or_skip(for_node, pat_or_sym, counter_place, elem_ty, body_expr, inc_bb)
 
+    // #614b: establish a per-iteration drop scope around the body and emit its
+    // drops on the back-edge. A multi-statement body is an NK_BLOCK that pushes
+    // its own scope, but a single-statement body (`for i in ...: let x = mk()`)
+    // is a BARE statement — without this barrier its Drop locals register in the
+    // enclosing function scope and fire once at exit instead of per iteration.
+    self.push_scope()
     let _ = self.lower_expr_discard(body_expr)
-    self.terminate(TermKind.TK_GOTO, inc_bb, 0, 0, 0)
+    self.pop_scope_with_goto(inc_bb)
 
     // Increment: counter = counter + 1, goto header
     self.switch_to(inc_bb)
@@ -8711,6 +8717,20 @@ fn MirBuilder.lower_method_call(self: MirBuilder, self_expr: i32, method_sym: i3
     if not is_static_call:
         if self.callee_has_mut_self(callee_sym):
             recv_op = self.lower_receiver_with_method_autoderef_for_method(self_expr, method_sym)
+        else if self.callee_has_move_self(callee_sym) and self.ast.kind(self_expr) == NodeKind.NK_IDENT and self.lookup_local(self.ast.get_data0(self_expr)) >= 0:
+            // §9.5/#D5: a `move self` receiver that is a caller-owned LOCAL is
+            // CONSUMED — lower it as OK_MOVE of the caller's place and consume it
+            // so the caller does NOT also drop it (the callee owns and drops it;
+            // see lower_fn_with_sig). Without this the receiver flows through
+            // lower_call_arg, which keeps the caller's drop for a share-place
+            // param → double free when the callee returns self or a field of self.
+            // Only locals need this: an rvalue/temporary receiver (enum variant,
+            // struct literal, call result) has no caller binding to double-drop,
+            // and lower_expr_place cannot address it — it flows through the arg
+            // path below, which materializes it into a temp.
+            let mv_recv_place = self.lower_expr_place(self_expr)
+            recv_op = self.body.new_operand(OperandKind.OK_MOVE, mv_recv_place)
+            self.consume_moved_operand(recv_op)
         else:
             arg_nodes.push(self_expr)
     let has_resolved_method_args = self.sema.has_resolved_call_args(node)
@@ -11973,12 +11993,19 @@ fn lower_fn_with_sig(builder: MirBuilder, fn_node: i32, sig_idx: i32) -> MirBody
             // the legacy unflagged `self: ConcreteType` form) are owned here.
             let recv_flags = builder.ast.fn_param_flags(param_start, i)
             let borrowed_receiver = i == 0 and (fn_param_is_mut_self(recv_flags) != 0 or fn_param_is_ref_self(recv_flags) != 0)
+            // §9.5/#D5: a `move self` receiver is CONSUMED — the callee owns it and
+            // drops it at scope exit (the drop is elided if self, or a field of
+            // self, is moved out — e.g. `-> Self: self` or `-> T: self.field`). The
+            // caller consumes it at the call site (lower_method_call), so exactly
+            // one drop occurs. A read-only move-self body would otherwise infer
+            // effect READ and be mis-classified share-place, dropping nothing here.
+            let move_self_receiver = i == 0 and fn_param_is_move_self(recv_flags) != 0
             // #D5/P1: a share-place param (PassMode::IndirectPlace / value_ref_abi)
             // is a BORROW of the caller's place — the callee mutates it but does
             // NOT own it, so it is dropped in the caller's scope, not here. Only
-            // owned params (consume/escape_value → not value_ref_abi) are dropped
-            // by the callee.
-            let share_place_param = sig_idx >= 0 and builder.sema.sig_param_uses_value_ref_abi(sig_idx, i) != 0
+            // owned params (consume/escape_value → not value_ref_abi, and move-self
+            // receivers) are dropped by the callee.
+            let share_place_param = sig_idx >= 0 and builder.sema.sig_param_uses_value_ref_abi(sig_idx, i) != 0 and not move_self_receiver
             if builder.sema.is_copy(p_ty) == 0 and drop_receiver_self == 0 and not borrowed_receiver and not share_place_param:
                 builder.schedule_drop(local_id, DropKind.DK_VALUE)
             param_locals.push(local_id)
@@ -12083,11 +12110,14 @@ fn lower_fn_clause_dispatcher(sema: &Sema, ast_pool: AstPool, pool: InternPool, 
         // §9.5/#641a parity with lower_fn_with_sig: borrow-mode receivers are
         // not owned by the callee — no scope-exit drop.
         var clause_borrowed_receiver = false
+        var clause_move_self = false
         if pi == 0 and first_meta >= 0 and 0 < ast_pool.fn_meta_param_count(first_meta):
             let clause_recv_flags = ast_pool.fn_param_flags(ast_pool.fn_meta_param_start(first_meta), 0)
             clause_borrowed_receiver = fn_param_is_mut_self(clause_recv_flags) != 0 or fn_param_is_ref_self(clause_recv_flags) != 0
+            clause_move_self = fn_param_is_move_self(clause_recv_flags) != 0
         // #D5/P1: share-place (value_ref_abi) params are borrows — not callee-dropped.
-        let clause_share_place = sig_idx >= 0 and sema.sig_param_uses_value_ref_abi(sig_idx, pi) != 0
+        // A move-self receiver is owned (§9.5/#D5) and dropped by the callee.
+        let clause_share_place = sig_idx >= 0 and sema.sig_param_uses_value_ref_abi(sig_idx, pi) != 0 and not clause_move_self
         if sema.is_copy(p_ty) == 0 and not clause_borrowed_receiver and not clause_share_place:
             builder.schedule_drop(local_id, DropKind.DK_VALUE)
         param_locals.push(local_id)

@@ -704,6 +704,7 @@ fn run_cli(argc: i32) -> i32:
     let explain_mir_origin_spec = cli_value_or_prefix(argc, "--explain-mir-origin", "--explain-mir-origin=")
     let trace_ownership_spec = cli_value_or_prefix(argc, "--trace-ownership", "--trace-ownership=")
     let dump_drop_plan_flag = cli_has_flag(argc, "--dump-drop-plan")
+    let dump_abi_flag = cli_has_flag(argc, "--dump-abi")
     let validate_ownership_flag = cli_has_flag(argc, "--validate-ownership")
     let dump_place_map_flag = cli_has_flag(argc, "--dump-place-map")
     let trace_cleanup_edge_spec = cli_value_or_prefix(argc, "--trace-cleanup-edge", "--trace-cleanup-edge=")
@@ -827,6 +828,8 @@ fn run_cli(argc: i32) -> i32:
             return trace_ownership_artifact(source, trace_ownership_spec, no_std, alloc_mode, runtime_available, prelude_mode)
         if dump_drop_plan_flag:
             return dump_drop_plan_artifact(source, no_std, alloc_mode, runtime_available, prelude_mode)
+        if dump_abi_flag:
+            return dump_abi_artifact(source, no_std, alloc_mode, runtime_available, prelude_mode)
         if validate_ownership_flag:
             return validate_ownership_artifact(source, no_std, alloc_mode, runtime_available, prelude_mode)
         if dump_place_map_flag:
@@ -2179,6 +2182,17 @@ fn dump_drop_plan_artifact(source_file: str, no_std: bool, alloc_mode: bool, run
     let text = comp.dump_drop_plan_file(source_file)
     if text.len() == 0:
         with_eprint("error: drop-plan dump failed during compilation or mir lowering")
+        return 1
+    with_write(text)
+    0
+
+fn dump_abi_artifact(source_file: str, no_std: bool, alloc_mode: bool, runtime_available: bool, prelude_mode: i32) -> i32:
+    var comp = Compilation.init()
+    comp.configure(0, no_std, alloc_mode, runtime_available)
+    comp.set_prelude_mode(prelude_mode)
+    let text = comp.dump_abi_file(source_file)
+    if text.len() == 0:
+        with_eprint("error: abi dump failed during compilation")
         return 1
     with_write(text)
     0

@@ -12,5 +12,5 @@ fn wrap_take(r: Resource) -> Resource:
 
 fn main:
     let r = Resource { id: 1 }
-    let _ = wrap_take(r)
+    let _ = wrap_take(move r)
     let _ = r.id
