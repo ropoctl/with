@@ -84,10 +84,23 @@ task's fiber/internal state, so the caller's Task drop frees it a second time �
 double free. `spec_ss14_7` (await + observe in the SAME scope) is fine; the bug is
 specifically await-through-a-borrow then caller-drop.
 
-**Fix direction:** make the Task destructor idempotent w.r.t. await — after the
-fiber state has been reaped by `await`, the Task drop must free nothing (the
-struct is inert but observable). This is a runtime/Task-lifecycle fix, NOT an
-`await`-consume workaround (that was tried and reverted because it violates §14.7).
-Verify with `--debug-alloc` (leak count == 0, no invalid free) and that
-`spec_ss14_7` still passes.
+**Fact (`with run --debug-alloc`):**
+```
+debug-alloc: DOUBLE FREE addr=… size=16 origin=with_alloc
+```
+`Task[T]` is `{ fiber_id: i32, result_buf: *mut u8 }` (lib/std/task.w:13); the
+double-freed 16-byte block is the task's `result_buf`. `await`-through-a-borrow
+(`consume_task` borrows `first`, then `first.await`) drives the fiber and reaps
+the frame, and the OWNER's scope-exit Task drop — `lower_cleanup_await`
+(MirLower.w:6798), scheduled by `task_drop_kind_for_binding` (695) — reaps it a
+SECOND time. `spec_ss14_7` (await + observe in the SAME scope, task owned there)
+is fine; the double-free is specifically await-through-a-borrow then owner-drop.
+
+**Fix direction:** either (a) `await` on a task the caller does NOT own (a
+share-place borrow) must drive + read the result but NOT free `result_buf` /
+reap the fiber — leave that to the owner's Task drop; or (b) make the Task
+cleanup idempotent (a reaped/freed flag so the second `lower_cleanup_await` frees
+nothing). NOT an `await`-consume workaround (reverted — violates §14.7). Verify
+with `--debug-alloc` (no double free, leak count == 0) and that `spec_ss14_7`
+and behav_ephemeral_task_consuming_callee both pass.
 

@@ -12498,7 +12498,13 @@ fn Sema.check_call(self: Sema, node: i32) -> i32:
                 if expected_ty != 0 and arg_ty != 0 and eff_arg_nd > 0:
                     let consume_pk = self.get_type_kind(self.resolve_alias(expected_ty))
                     if consume_pk != TypeKind.TY_REF and consume_pk != TypeKind.TY_PTR:
-                        if self.extern_fn_names.contains(fn_sym) == 0 and self.ci_syms.contains(fn_sym) == 0:
+                        // Extern/C params are bit-copied and do NOT own by default
+                        // (no transfer). But an extern param with a DECLARED
+                        // consume/escape effect (`@[effect(x: consume)]`, §16.3d)
+                        // DOES take ownership, so enforce the `move` for those too
+                        // (G1 — docs/share_place_known_gaps.md).
+                        let extern_owns = (param_eff & (EFF_CONSUME | EFF_ESCAPE_VALUE)) != 0
+                        if (self.extern_fn_names.contains(fn_sym) == 0 and self.ci_syms.contains(fn_sym) == 0) or extern_owns:
                             // Ownership is about the PARAMETER's ABI, not the
                             // argument's type: an enum argument coerced to a Copy
                             // `i32` param transfers nothing. Key on expected_ty.
