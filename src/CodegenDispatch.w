@@ -12919,17 +12919,22 @@ fn Codegen.mir_emit_call_term(self: Codegen, body: &MirBody, callee_operand: i32
                     let gc_arg_nodes: Vec[i32] = Vec.new()
                     let gc_arg_sema_tys: Vec[i32] = Vec.new()
                     let gc_ast_count = self.pool.get_data2(gc_node)
-                    var gc_ref_abi_param0 = false
+                    // #D6: hoist the owner lookup so the ref-ABI classification is
+                    // queried PER PARAMETER (not just param 0) — every IndirectPlace
+                    // argument marshals through the one policy, which is what lets a
+                    // non-receiver share-place param be passed correctly here.
+                    var gc_ra_param_start = -1
+                    var gc_ra_owner_sym = 0
+                    var gc_ra_owner_ty = 0
                     let gc_fn_meta = self.pool.find_fn_meta(gc_gf.unwrap())
                     if gc_fn_meta >= 0:
-                        let gc_param_start = self.pool.fn_meta_param_start(gc_fn_meta)
+                        gc_ra_param_start = self.pool.fn_meta_param_start(gc_fn_meta)
                         let gc_method_text = self.codegen_symbol_text(gc_callee_sym)
                         for gc_dot_i in 0..gc_method_text.len() as i32:
                             if gc_method_text.byte_at(gc_dot_i as i64) == 46:
                                 let gc_owner_name = gc_method_text.slice(0, gc_dot_i as i64)
-                                let gc_owner_sym = self.sema.pool_lookup_symbol(gc_owner_name)
-                                let gc_owner_ty = if gc_owner_sym != 0: self.sema.lookup_named_type_visible(gc_owner_sym) else: 0
-                                gc_ref_abi_param0 = self.sema.fn_param_uses_value_ref_abi(gc_param_start, 0, gc_owner_sym, gc_owner_ty) != 0
+                                gc_ra_owner_sym = self.sema.pool_lookup_symbol(gc_owner_name)
+                                gc_ra_owner_ty = if gc_ra_owner_sym != 0: self.sema.lookup_named_type_visible(gc_ra_owner_sym) else: 0
                                 break
                     for gc_ai in 0..gc_mir_count:
                         let gc_arg_nd = if gc_ai < gc_ast_count: self.pool.get_extra(gc_as + gc_ai) else: 0
@@ -12937,11 +12942,12 @@ fn Codegen.mir_emit_call_term(self: Codegen, body: &MirBody, callee_operand: i32
                         let gc_op = body.call_arg_operands.get((gc_mir_start + gc_ai) as i64)
                         let gc_raw_val = self.mir_eval_operand(body, gc_op, 0)
                         var gc_val = gc_raw_val
-                        if gc_ai == 0 and gc_ref_abi_param0:
-                            // #D6: the IndirectPlace receiver marshals through the one
-                            // canonical policy (transparent Box/Rc/Arc → slot T**, else
-                            // already-ptr/place/rvalue-temp) — shared with the concrete
-                            // path via marshal_ref_addr, so they cannot diverge.
+                        // #D6: any IndirectPlace argument (per-index, not just the
+                        // receiver) marshals through the one canonical policy
+                        // (transparent Box/Rc/Arc → slot T**, else already-ptr/place/
+                        // rvalue-temp) shared with the concrete path via marshal_ref_addr.
+                        let gc_ai_is_ref = gc_ra_param_start >= 0 and self.sema.fn_param_uses_value_ref_abi(gc_ra_param_start, gc_ai, gc_ra_owner_sym, gc_ra_owner_ty) != 0
+                        if gc_ai_is_ref:
                             gc_val = self.marshal_ref_addr(body, gc_op, gc_raw_val)
                         gc_arg_vals.push(gc_val)
                         gc_arg_tys.push(wl_type_of(gc_raw_val))
