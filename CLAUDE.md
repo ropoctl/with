@@ -156,6 +156,22 @@ share-place model. The receiver modes (`&self`/`mut self`/`move self`)
 and the `Copy` opt-in for aggregates are part of the same model. See
 `docs/decisions.md` D5.
 
+**`FnAbi` is the single ABI source of truth — never re-derive call ABI
+per-path.** Every function signature has ONE ABI descriptor (`FnAbi`
+with a per-parameter `PassMode` — `Direct`/`Indirect`/`IndirectPlace`/
+`Fat`/`Ignore`), computed ONCE by `compute_fn_abi(sig)` and read by BOTH
+the callee prologue (`declare_function`) and every call site
+(`push_call_arg`). This is what Rust (`FnAbi`/`PassMode`), Go
+(`ABIParamResultInfo`), Zig (`fn_info`), and Clang/LLVM
+(`CGFunctionInfo`/`ABIArgInfo`) all do; it makes caller/callee/path
+divergence impossible. When adding a call-lowering path, a receiver
+shape, or a parameter kind, extend `compute_fn_abi`/`PassMode` in ONE
+place and read it — **never** write a fresh per-path "value vs address
+vs byval" decision. A per-path ABI derivation is the exact bug that
+produced the transparent `T*`/`T**` divergence; re-introducing one is a
+regression. Share-place (D5) is `PassMode::IndirectPlace`. See
+`docs/decisions.md` D6 and `docs/fn_abi_descriptor_design.md`.
+
 ---
 
 ## No Silent Fallbacks
