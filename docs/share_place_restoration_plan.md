@@ -58,8 +58,50 @@ CHANGE (coordinated — Sema+MIR+codegen must flip together or it miscompiles):
    their binding") is the precise inversion of the doc. Delete them; under
    share-place, a by-value read-only param is the correct default, not a lint.
 
+## CRITICAL FINDING — effect inference must be a pre-pass (fixpoint), or share-place double-frees
+
+The call site decides share-place-vs-move from the **callee's inferred effect**,
+read from the persistent sig via `sig_param_effect(sig_idx, pi)` (SemaCheck.w
+~12459, `propagate_*_param_effect` 7998/8007). But `sig_param_effects` is
+populated *per function body* as it is checked (flush at SemaCheck.w:1461), with
+**no pre-pass and no callee-first ordering**. Bodies are checked roughly in decl
+order.
+
+Under the current MOVE model this is harmless: the call site moves every non-Copy
+arg **unconditionally** (SemaCheck.w:12470-12476), independent of the callee's
+effect. The effect is only consumed for `escape_view` + transitive propagation.
+
+Under SHARE-PLACE it is a **correctness landmine**. If caller A is checked before
+callee B (forward reference, mutual recursion, or just decl order), B's
+`sig_param_effect` is still 0 when A's call is checked → A treats B's owning
+(`consume`/`escape_value`) param as share-place → A keeps ownership AND B drops
+→ **double-free**. This would corrupt the self-host chain silently.
+
+**Therefore the restoration MUST add a whole-program effect-inference pre-pass
+that completes before any call-site share-place/borrow decision** — infer every
+function's `sig_param_effects` first (a fixpoint over the call graph, because a
+param's effect can depend transitively on callees' effects, and mutual recursion
+needs iteration to converge; seed unknowns as the weakest effect and iterate to a
+greatest fixpoint / until stable). Only then check call sites and lowering, which
+now read stable, complete effect summaries. The value_ref_abi flag (below) is
+also derived from the final effect, so it too must be set post-fixpoint.
+
+This is foundational and must land **before** the coordinated flip (P1). It is
+the reason the effort is release-sized rather than a few edits: the effect *brain*
+exists, but it is currently a single-pass side effect of checking, not a
+committed pre-pass the convention can depend on.
+
 ## Phases / sequencing
 
+- **P0 — effect-inference pre-pass (the foundation; see CRITICAL FINDING).**
+  Make every function's `sig_param_effects` complete and stable *before* any
+  call-site share-place/borrow/ABI decision. Two candidate implementations:
+  (a) run the existing body-check effect-inference over all fns to a fixpoint
+  with call-site *decisions* suppressed, then a final decision pass; (b) a
+  dedicated lightweight effect-only walk iterated to a fixpoint. Land P0 while
+  the convention is still move (P0 changes nothing observable — it only makes
+  effects reliably available), gate + fixpoint, so P1 builds on stable ground.
+  Derive `value_ref_abi` from the final effect here too.
 - **P1** — sites 1-4 + 6 coordinated (the core + vestige removal). Build stage1
   with the old (move) seed → stage1 is share-place. Verify the doc's `append_byte`
   / `store` / `rename` examples on a scratch program.
