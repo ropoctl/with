@@ -86,10 +86,11 @@ specifically await-through-a-borrow then caller-drop.
 
 **Fact (`with run --debug-alloc`):**
 ```
-debug-alloc: DOUBLE FREE addr=… size=16 origin=with_alloc
+debug-alloc: DOUBLE FREE addr=… size=16 origin=with_alloc first_drop=<untagged> second_drop=<untagged>
 ```
-`Task[T]` is `{ fiber_id: i32, result_buf: *mut u8 }` (lib/std/task.w:13); the
-double-freed 16-byte block is the task's `result_buf`. `await`-through-a-borrow
+The 16-byte `with_alloc` block is the **async entry** `[fiber_id: i32, pad: i32,
+result_buf: *mut u8]` (rt/rt_core.w:3507) backing a `Task[T]`
+(`{ fiber_id, result_buf }`, lib/std/task.w:13). `await`-through-a-borrow
 (`consume_task` borrows `first`, then `first.await`) drives the fiber and reaps
 the frame, and the OWNER's scope-exit Task drop — `lower_cleanup_await`
 (MirLower.w:6798), scheduled by `task_drop_kind_for_binding` (695) — reaps it a
@@ -100,7 +101,13 @@ is fine; the double-free is specifically await-through-a-borrow then owner-drop.
 share-place borrow) must drive + read the result but NOT free `result_buf` /
 reap the fiber — leave that to the owner's Task drop; or (b) make the Task
 cleanup idempotent (a reaped/freed flag so the second `lower_cleanup_await` frees
-nothing). NOT an `await`-consume workaround (reverted — violates §14.7). Verify
-with `--debug-alloc` (no double free, leak count == 0) and that `spec_ss14_7`
-and behav_ephemeral_task_consuming_callee both pass.
+nothing). NOT an `await`-consume workaround (reverted — violates §14.7).
+
+**Next step (tooling):** the two free sites are `<untagged>` — name them at the
+instruction level before editing runtime code. Run `tools/debug_drop.w` +
+`tools/debug_drop_sites.lldb` on the repro (docs/debug-allocator.md) to get the
+exact allocation site and both free call sites of the async entry, then decide
+which free path to drop (the borrowed-await reap, vs the owner's Task drop).
+Verify with `--debug-alloc` (no double free, leak count == 0) and that
+`spec_ss14_7` and behav_ephemeral_task_consuming_callee both pass.
 
