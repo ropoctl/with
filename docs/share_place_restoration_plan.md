@@ -206,6 +206,36 @@ concrete path R7, the most complete existing logic), it must reproduce:
    value-vs-address decision one level above `monomorphize_generic_call_core`
    (which just forwards pre-built `arg_vals`). Route through `push_call_arg`.
 
+### Migration subtleties (found while routing Group B — de-risk before swapping)
+
+Brick 1 (extract `mir_ref_arg_ptr` + concrete path) landed neutral. The remaining
+loops are NOT mechanical swaps; each hazard below breaks fixpoint or miscompiles
+if ignored:
+
+- **Double-evaluation.** Group B sites (multi-index 5904, direct 13449, 13399)
+  pre-compute `recv_val = mir_eval_operand(recv_op)` for the non-ref branch, then
+  branch. `mir_ref_arg_ptr(body, operand)` evaluates the operand AGAIN internally
+  → a redundant load (fixpoint break) or a double side effect (miscompile). Fix:
+  add a value-taking variant `mir_ref_arg_ptr_val(body, operand, val, val_ty)`
+  that skips the internal eval, and have pre-computing sites call that; the
+  concrete path (no pre-eval) keeps calling `mir_ref_arg_ptr`.
+- **Fallback helper.** Group B's rvalue fallback is `get_mutable_receiver_ptr`
+  (node, val, ty); the helper's is `alloca+store`. Equivalent ONLY for the
+  rvalue case the fallback reaches (a place → `mir_try_place_ptr_for_ref` != 0 →
+  fallback not reached; `get_mutable_receiver_ptr`'s NK_IDENT branch is a place
+  and never reached here). Verify by gate per site; if a divergence appears,
+  route the fallback through `get_mutable_receiver_ptr` in the value-variant.
+- **Transparent single-pointer receivers (Box/Rc/Arc).** The generic path (R4,
+  12797/12899) uses `mir_operand_place_addr` (T**) for transparent receivers; the
+  concrete path / `mir_ref_arg_ptr` treats the box value as already-a-pointer →
+  T*. These differ. Determine per site whether transparent receivers actually
+  reach it (Box methods likely route through the generic path, not Group B direct
+  sites) before unifying; do NOT add transparent handling to `mir_ref_arg_ptr`
+  blindly — it would change the concrete path (which works today without it).
+
+Net: migrate one site → gate (build+fixpoint+suite) → commit, never batch, so a
+fixpoint break isolates to one swap.
+
 ### Out of scope (leave alone)
 - Group A (18 runtime/intrinsic sites, Codegen.w 1989-3214 area): no MIR operand;
   LLVM constants. Not addressable by an operand-keyed helper.
