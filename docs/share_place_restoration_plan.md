@@ -265,6 +265,47 @@ P1's flip = derive `value_ref_abi` from effect post-fixpoint (one place) + calle
 no-drop + call-site no-consume + delete residue — and the cathedral marshals the
 addresses automatically.
 
+## THE FLIP — requires a two-pass call-site decision (the architectural crux)
+
+The cathedral is done (both sides read `arg_pass_mode`/`marshal_ref_addr`; the
+transparent divergence is retired). The flip itself is 4 coordinated parts:
+
+1. Post-P0-fixpoint, set `value_ref_abi` (IndirectPlace) for a param that is
+   non-Copy, by-value, and whose complete effect excludes CONSUME|ESCAPE_VALUE
+   (read/write/escape_view → share-place). `declare_function` (via
+   `arg_pass_mode`) then makes it a `ptr` and `record_ref_param` marks it, so the
+   cathedral marshals its address automatically. Note: generic mono recomputes
+   ABI structurally, so this naturally lands on CONCRETE functions first;
+   generics stay move until the mono ABI reads the flag (follow-on).
+2. Callee no-drop for IndirectPlace params (MirLower.w:11961/12068): schedule the
+   `DK_VALUE` drop only when the param is OWNED (not `value_ref_abi`). MIR runs
+   post-fixpoint, so it reads the final flag — correct.
+3. Call-site: a non-Copy value arg to a share-place param must NOT be marked
+   consumed (the caller keeps ownership and drops it); a non-Copy arg to an
+   OWNED (consume/escape_value) param is consumed as today (later: require
+   explicit `move`/`copy`). Delete the `arg_consumed_by_value`-for-all-non-Copy.
+4. Delete the inverted lints (SemaCheck.w:1459-60/1469-71).
+
+**The crux (verified):** part 3 runs DURING `check_bodies` (per call, inline with
+use-after-move tracking), but the share-place-vs-owned determination needs the
+callee's COMPLETE effect, which only finalizes in `fixpoint_effect_flow` AFTER
+`check_bodies`. Reading the in-check (single-pass) effect is WRONG for forward
+references / mutual recursion:
+- callee's effect not yet inferred → reads 0 → "share-place" → caller keeps it,
+  but the flag later resolves to OWNED (callee drops) → **double-free**.
+And it cannot be deferred to MIR because the use-after decision (`buf.use()` after
+`append_byte(buf)` — the definition of share-place) is also in-check.
+
+**Therefore the flip requires a TWO-PASS body check:** pass 1 infers effects
+(no consume/use-after decision), fixpoint completes them + sets `value_ref_abi`,
+pass 2 makes the call-site consume/use-after decisions with complete flags. This
+is a real re-architecture of the move/borrow pass (or a dedicated post-fixpoint
+"finalize call-site ownership" pass that records call sites + use positions in
+pass 1 and resolves them in pass 2). It is the deepest and last piece; it must be
+built carefully and gated hard (a wrong forward-ref decision = a silent
+double-free in the seed). Do NOT ship parts 1-2 without 3, and do NOT do 3 off
+single-pass effects.
+
 ## Self-host note
 
 The seed is move-semantics. `move x` compiles under BOTH move and share-place, so
