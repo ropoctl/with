@@ -10,6 +10,69 @@ decision supersedes an earlier one, say so in both.
 
 ---
 
+## D5 — The calling convention is SHARE-PLACE by default (restore mutability.md); do not revert to move
+
+**Date:** 2026-07-05
+**Status:** Accepted — CANONICAL, load-bearing, protected
+**Spec:** `docs/completed/mutability.md` (authoritative) · **Deciders:** Eric (BDFL, original author of the design)
+
+### Decision
+
+With's calling convention for a non-`Copy` value passed `f(x)` is an **ephemeral
+shared-place alias**: the callee operates on the **caller's** place (reads and
+mutations are caller-visible), the caller retains ownership, and the destructor
+runs in the caller's scope. `move`/`copy` at the call site are required **only**
+when the callee's inferred effect summary on that parameter is `consume` or
+`escape_value`; `escape_view` is governed by view-origin lifetime tracking. This
+is the full model in `docs/completed/mutability.md` (effect summaries, the
+Copy/non-Copy split, receiver modes `&self`/`mut self`/`move self`, `&T` niche,
+`@[effect(...)]` pinning). It is authoritative.
+
+### Why (Eric, verbatim intent)
+
+"mutability.md's shared-place design was my explicit design and will, and yes it
+was unique to With — a calling card, a statement of what With means. Subsequent
+agents have trampled it." The share-place default is the anti-ceremony mission
+made concrete: `bump(p)` mutates `p` with no `&mut` tax — Python-shaped
+ergonomics with static, borrow-checked safety. No systems reference does this
+(Vale/Rust move; Zig/Go copy); Python is the only prior art, and With makes it
+statically safe. This is the point of With.
+
+### The regression being corrected
+
+The implementation drifted to **move + callee-drop**: by-value non-`Copy` params
+are treated as consumed and dropped by the callee (`lower_fn_with_sig` schedules
+a value-drop for every non-Copy param; #605 treats a moved-in value as consumed;
+argument lowering `OK_MOVE`s non-Copy args). That is Rust/Vale semantics, not
+With's. It was a silent agent "simplification," and it is wrong.
+
+### Protection (this is the point of writing it down)
+
+- **Do not revert to move-by-default.** If a future agent finds by-value non-Copy
+  params being moved/consumed/callee-dropped by default, that is the bug to fix
+  toward share-place — never a behavior to preserve, extend, or re-introduce.
+- **Do not propose move-by-default or copy-by-default** as a "simplification,"
+  performance win, or Vale/Rust-alignment. The mission's "as safe as Rust" is a
+  safety bar; share-place meets it via effect summaries + borrow checking without
+  adopting Rust's move-by-default.
+- Before touching parameter passing, argument/call lowering, drop scheduling, or
+  effect inference, re-read `mutability.md` in full and preserve share-place.
+- CLAUDE.md "Language Design Philosophy" carries the standing guardrail.
+
+### Consequences (the implementation work)
+
+Restore the model end to end: infer per-parameter effect summaries
+(read/write/consume/escape_value/escape_view) from bodies; make the default
+non-Copy call a share-place borrow (pass a reference to the caller's place, no
+callee-drop, destructor in the caller's scope); require `move`/`copy` only for
+consume/escape_value; keep escape_view under view-origin tracking; the borrow
+checker enforces aliasing conflicts via effect summaries. Receiver modes and the
+`Copy` opt-in are already aligned (Cycle 1). Deferred follow-ons (the other
+receiver/param calls, queued bug fixes) are in
+`docs/resume_after_mutability_fixed.md`.
+
+---
+
 ## D4 — #602: `retains:` c_import contract, enforced check-time via cstr_in modeling
 
 **Date:** 2026-07-05

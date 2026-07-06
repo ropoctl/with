@@ -131,6 +131,31 @@ do this, never app developers"). When weighing ownership/drop/
 lifetime semantics, check `.reference/Vale` first; reach for Rust
 only when Vale's answer cannot meet the safety bar.
 
+**The calling convention is SHARE-PLACE by default — this is
+load-bearing, canonical, and MUST NOT be reverted.** `docs/completed/
+mutability.md` is the authoritative, Eric-authored design for With's
+mutability and calling-convention model. A non-`Copy` value passed
+`f(x)` is an *ephemeral shared-place alias*: the callee mutates the
+**caller's** place, the caller keeps ownership, and the destructor runs
+in the caller's scope. `move`/`copy` are required **only** when the
+callee's inferred effect summary is `consume`/`escape_value`
+(`escape_view` is governed by view-origin tracking). This is With's
+calling card — the Python-shaped ergonomics (`bump(p)` just mutates `p`;
+no `&mut` tax) with static borrow-checked safety, unique among systems
+languages. It is NOT move-by-default; it is NOT copy-by-default.
+
+Past agents "simplified" this to move + callee-drop (the callee consumes
+and drops every non-Copy by-value param). **That is a regression, not a
+simplification, and it is forbidden.** If you find by-value non-Copy
+params being moved/consumed/callee-dropped by default, that is a bug to
+fix toward share-place, never a behavior to preserve or extend. Do not
+propose, implement, or rationalize move-by-default for non-Copy params.
+Before touching parameter passing, argument lowering, drop scheduling,
+or effect handling, re-read `mutability.md` in full and preserve the
+share-place model. The receiver modes (`&self`/`mut self`/`move self`)
+and the `Copy` opt-in for aggregates are part of the same model. See
+`docs/decisions.md` D5.
+
 ---
 
 ## No Silent Fallbacks
