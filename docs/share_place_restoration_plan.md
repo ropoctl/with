@@ -160,6 +160,67 @@ Estimated: P1 is the large unit; P2 (self-host migration) blast radius is unknow
 until share-place stage1 runs `check src/main.w`. Both need fresh context; the P0
 foundation they build on is committed and green.
 
+## THE CATHEDRAL — centralize argument marshalling before the flip (Eric's directive)
+
+Recon of all 30 `build_call_fn_value` callers + the bypass path confirms the
+bazaar is really **three separate arg-building loops sharing one predicate
+family** (`is_ref_param`/`value_ref_abi` + the address helpers), plus 18
+runtime/intrinsic value-only sites that have no MIR operand and stay out of
+scope. Build the cathedral as a **behavior-neutral** refactor first; then the
+share-place flip is a one-line `value_ref_abi` extension in one place.
+
+### The seam: one per-arg helper `push_call_arg`
+
+`Codegen.build_call_fn_value` (Codegen.w:1759) is the common tail and already
+owns sret prepend, byval indirection (via `coerce_call_args_for_fn_value`
+1715-1757), dyn-trait wrapping, coercion, ABI attrs. Callers own exactly one
+thing: **value-vs-address per parameter.** Centralize THAT:
+
+`push_call_arg(args, callee_fn_sym, callee_sig, param_index, body, operand, node)`
+— keyed on `is_ref_param(callee, param_index)` for **every** index (matching the
+concrete path R7, the most complete existing logic), it must reproduce:
+- **ref-param → address:** transparent box/rc/arc (`mir_sema_type_is_box` /
+  `mir_sema_type_refcount_kind`) → `mir_operand_place_addr` (T**); else if the
+  operand value is **already a pointer**, pass as-is (the #568 short-circuit — a
+  `&T` value is already `T*`; taking its place-addr would hand `T**`); else
+  `mir_try_place_ptr_for_ref`; else `get_mutable_receiver_ptr` / alloca+store
+  (rvalue-temp materialization).
+- **value param → value:** `mir_eval_operand`, or `mir_eval_call_operand_info`
+  when a cstr/rvalue-temp + `cleanup_ptr` is needed (thread `cleanup_ptr` back).
+- Feeds the tail with a VALUE for byval params (the tail does byval indirection);
+  pushes the pointer for ref/value_ref_abi params (tail leaves ptr direct).
+
+### The three loops to route through it (behavior-neutral)
+
+1. **Group B receiver blocks** (6): CodegenDispatch.w 5904, 13399, 13435, 13607;
+   Codegen.w 5147, 5374 (5147/5374 use a precomputed `obj_ptr` → a value-level
+   variant). Today these special-case index 0 only and push args 1..n as values;
+   routing every index through `push_call_arg` matches R7 and is neutral because
+   `is_ref_param` at index>0 is true only for `&T`/same-owner params whose value
+   is already a pointer (the short-circuit yields the same value push).
+2. **Concrete/direct path** (CodegenDispatch.w 13913-14245, bypasses the tail):
+   the 14101-14131 per-param `needs_ref` sub-block maps 1:1 to `push_call_arg`.
+   Leave its byval (14062-14076), direct-aggregate (14080), dyn-trait
+   (14132-14152), ctx_ptr (14042), sret (14046) branches in place.
+3. **Generic-call eval loop** (CodegenDispatch.w 12884-12909): the receiver
+   value-vs-address decision one level above `monomorphize_generic_call_core`
+   (which just forwards pre-built `arg_vals`). Route through `push_call_arg`.
+
+### Out of scope (leave alone)
+- Group A (18 runtime/intrinsic sites, Codegen.w 1989-3214 area): no MIR operand;
+  LLVM constants. Not addressable by an operand-keyed helper.
+- Structural injections: ctx_ptr (closure env), sret buffer, fmt-spec constants,
+  multi-index specs-ref/count, str_concat parts/count — pushed directly, never
+  through `push_call_arg`.
+
+### Order of work (each step gated behavior-neutral)
+P0.5a define `push_call_arg` (operand-level) + a value-level variant → P0.5b
+migrate one Group B site + gate (proof) → P0.5c migrate remaining Group B → P0.5d
+concrete-path sub-block → P0.5e generic loop → gate + fixpoint after each. Then
+P1's flip = derive `value_ref_abi` from effect post-fixpoint (one place) + callee
+no-drop + call-site no-consume + delete residue — and the cathedral marshals the
+addresses automatically.
+
 ## Self-host note
 
 The seed is move-semantics. `move x` compiles under BOTH move and share-place, so
