@@ -331,6 +331,33 @@ malformed. Users reach regex through `std.regex`, never through
 **After bootstrap the seed depends on nothing external from LLVM.**
 This is a hard invariant, not an aspiration.
 
+**All tooling is With too — even temporary, one-off, throwaway scripts.**
+The "1000% self-hosted, no non-With code" rule covers every tool you write:
+migrators, source rewriters, log/output scanners, ad-hoc analysis. Never reach
+for Python, bash, perl, or awk — a scratch script in another language is the same
+violation as C in the compiler. Delete it and rewrite it in With. There is no
+"just a quick script" exception; With IS a scripting language:
+
+- **One-liners** (perl/python `-e` style):
+  - `with -e 'print_i32(6 * 7)'` — eval a snippet (implicit main)
+  - `... | with -n 'if line.starts_with("a"): print(line)'` — per stdin line,
+    `line` bound (grep-like)
+  - `... | with -p 'line = line ++ "!"'` — per-line transform, auto-printed
+    (sed-like)
+- **Implicit main** — a `.w` file needs no `fn main`; top-level statements are the
+  program and may sit alongside helper `fn` definitions:
+  ```
+  use std.process
+  fn shout(s: str) -> str: s ++ "!"
+  let argv = args()
+  for i in 1..argv.len() as i32: print(shout(argv.get(i as i64)))
+  ```
+- **Run without a build step**: `with run tool.w a b` compiles-and-runs, passing
+  `a b` as the program's argv. Reuse the compiler's modules (`use Lexer`,
+  `use Token`) for token-accurate source tooling rather than regex. See
+  `tools/migrate_receivers.w`. File I/O: `with_fs_read_file` / `with_fs_write_file`
+  (extern fns).
+
 *We* build the entire static LLVM/Clang/lld SDK from source. First-platform
 bootstrap may use the `tools/build-ninja.*`, `tools/build-cmake.*`, and
 `tools/build-static-llvm.*` scripts inside the bootstrap runbook boundary. After

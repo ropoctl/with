@@ -387,6 +387,34 @@ through a shim written in another language. If a capability seems to
 require a C/C++ source file, the answer is a With-side implementation
 over the C API (or asm), or the capability waits.
 
+**This includes ALL tooling — even temporary, one-off, throwaway scripts.**
+Migrators, source rewriters, log/output scanners, ad-hoc analysis: write them in
+With, never in Python, bash, perl, or awk. A Python/bash scratch script in this
+repo is the same violation as C in the compiler — delete it and rewrite it in
+With. With IS a scripting language; there is no "just a quick script" exception.
+
+- **One-liners** (perl/python `-e` style):
+  - `with -e 'print_i32(6 * 7)'` — eval a snippet (implicit main)
+  - `... | with -n 'if line.starts_with("a"): print(line)'` — run the code per
+    stdin line with `line` bound (grep-like)
+  - `... | with -p 'line = line ++ "!"'` — per-line transform, auto-printed
+    (sed-like)
+- **Implicit main** — a `.w` file needs no `fn main`; top-level statements ARE
+  the program, and may sit alongside helper `fn` definitions:
+  ```
+  use std.process
+  fn shout(s: str) -> str: s ++ "!"
+  let argv = args()                      // std.process
+  for i in 1..argv.len() as i32: print(shout(argv.get(i as i64)))
+  ```
+- **Run without a build step**: `with run tool.w a b` compiles-and-runs and
+  forwards `a b` as the program's argv. Reuse the compiler's own modules
+  (`use Lexer`, `use Token`) for token-accurate source tooling — regex/text
+  hacks are not acceptable for self-host-critical rewrites. See
+  `tools/migrate_receivers.w`.
+- File I/O via `extern fn with_fs_read_file(path: str) -> str` /
+  `with_fs_write_file(path: str, data: str) -> i32`.
+
 **After bootstrap the seed depends on nothing external from LLVM.** A
 hard invariant.
 
