@@ -219,10 +219,10 @@ fn sdk_add_unique(items: Vec[str], item: str) -> Vec[str]:
     out
 
 fn sdk_add_parent_dirs(dirs: Vec[str], top_dir: str, rel_path: str) -> Vec[str]:
-    var out = sdk_add_unique(dirs, top_dir)
+    var out = sdk_add_unique(move dirs, top_dir)
     for i in 0..rel_path.len() as i32:
         if rel_path.byte_at(i as i64) == 47:
-            out = sdk_add_unique(out, top_dir ++ "/" ++ rel_path.slice(0, i as i64))
+            out = sdk_add_unique(move out, top_dir ++ "/" ++ rel_path.slice(0, i as i64))
     out
 
 fn sdk_file_exists(fs: &ToolFs, path: str) -> bool:
@@ -414,7 +414,7 @@ fn sdk_package_entries(ctx: &ActionCtx, prefix: str, sdk_base: str, platform: st
     var dirs: Vec[str] = Vec.new()
     for i in 0..files.len() as i32:
         let rel = sdk_rel_path(prefix, files.get(i as i64))
-        dirs = sdk_add_parent_dirs(dirs, sdk_base, rel)
+        dirs = sdk_add_parent_dirs(move dirs, sdk_base, rel)
     if platform != "windows-x86_64":
         let aliases: Vec[str] = Vec.new()
         aliases.push("ld.lld")
@@ -424,7 +424,7 @@ fn sdk_package_entries(ctx: &ActionCtx, prefix: str, sdk_base: str, platform: st
         for i in 0..aliases.len() as i32:
             let alias = aliases.get(i as i64)
             if fs.exists(sdk_join(prefix, "bin/" ++ alias)):
-                dirs = sdk_add_parent_dirs(dirs, sdk_base, "bin/" ++ alias)
+                dirs = sdk_add_parent_dirs(move dirs, sdk_base, "bin/" ++ alias)
     dirs = sdk_sort_strings(dirs)
     let entries: Vec[ArchiveEntry] = Vec.new()
     for i in 0..dirs.len() as i32:

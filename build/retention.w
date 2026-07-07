@@ -741,9 +741,9 @@ fn ret_add_old_release_artifacts(fs: &ToolFs, candidates: Vec[str]) -> Vec[str]:
 fn ret_small_prune_candidates(ctx: &ActionCtx) -> Vec[str]:
     let fs = ctx.fs()
     var candidates: Vec[str] = Vec.new()
-    candidates = ret_add_stale_state_files(fs, ret_live_targets(ctx.args()), candidates)
-    candidates = ret_add_old_seed_archives(fs, candidates)
-    candidates = ret_add_old_release_artifacts(fs, candidates)
+    candidates = ret_add_stale_state_files(fs, ret_live_targets(ctx.args()), move candidates)
+    candidates = ret_add_old_seed_archives(fs, move candidates)
+    candidates = ret_add_old_release_artifacts(fs, move candidates)
     ret_sorted_strings(candidates)
 
 fn ret_apply_small_prune(ctx: &ActionCtx, candidates: Vec[str]) -> i32:
@@ -834,11 +834,11 @@ fn ret_apply_large_prune(ctx: &ActionCtx) -> i32:
     let issue61 = ret_issue61_stale_candidates(fs)
     let embedded = ret_embedded_compiler_candidates(fs)
     var all: Vec[str] = Vec.new()
-    all = ret_append_all_prune_candidates(all, bin)
-    all = ret_append_all_prune_candidates(all, lib)
-    all = ret_append_all_prune_candidates(all, bootstrap)
-    all = ret_append_all_prune_candidates(all, issue61)
-    all = ret_append_all_prune_candidates(all, embedded)
+    all = ret_append_all_prune_candidates(move all, bin)
+    all = ret_append_all_prune_candidates(move all, lib)
+    all = ret_append_all_prune_candidates(move all, bootstrap)
+    all = ret_append_all_prune_candidates(move all, issue61)
+    all = ret_append_all_prune_candidates(move all, embedded)
     if ret_remove_prune_candidates(ctx, all) != 0:
         return 1
     print(f"[prune] removed temp out/bin entries: {bin.len()}")
@@ -872,11 +872,11 @@ fn ret_report_large_prune(ctx: &ActionCtx):
     print(f"[prune] stale issue61 regression directories: {issue61.len()}")
     print(f"[prune] retained embedded runtime compiler copies: {embedded.len()}")
     var examples: Vec[str] = Vec.new()
-    examples = ret_append_all_prune_candidates(examples, bin)
-    examples = ret_append_all_prune_candidates(examples, lib)
-    examples = ret_append_all_prune_candidates(examples, bootstrap)
-    examples = ret_append_all_prune_candidates(examples, issue61)
-    examples = ret_append_all_prune_candidates(examples, embedded)
+    examples = ret_append_all_prune_candidates(move examples, bin)
+    examples = ret_append_all_prune_candidates(move examples, lib)
+    examples = ret_append_all_prune_candidates(move examples, bootstrap)
+    examples = ret_append_all_prune_candidates(move examples, issue61)
+    examples = ret_append_all_prune_candidates(move examples, embedded)
     examples = ret_sorted_strings(examples)
     var shown = 0
     for i in 0..examples.len() as i32:

@@ -125,10 +125,10 @@ fn pkg_rel_path(root: str, path: str) -> str:
     ""
 
 fn pkg_add_parent_dirs(dirs: Vec[str], top_dir: str, rel_path: str) -> Vec[str]:
-    var out = pkg_add_unique(dirs, top_dir)
+    var out = pkg_add_unique(move dirs, top_dir)
     for i in 0..rel_path.len() as i32:
         if rel_path.byte_at(i as i64) == 47:
-            out = pkg_add_unique(out, top_dir ++ "/" ++ rel_path.slice(0, i as i64))
+            out = pkg_add_unique(move out, top_dir ++ "/" ++ rel_path.slice(0, i as i64))
     out
 
 fn pkg_host_exe_suffix() -> str:
@@ -453,7 +453,7 @@ fn pkg_write_archive(ctx: &ActionCtx, compiler_path: str, stage_root: str, top_d
         let rel = pkg_rel_path(stage_root, files.get(i as i64))
         if rel.len() == 0:
             return pkg_fail(ctx, "package file is outside stage root: " ++ files.get(i as i64))
-        dirs = pkg_add_parent_dirs(dirs, top_dir, rel)
+        dirs = pkg_add_parent_dirs(move dirs, top_dir, rel)
     dirs = pkg_sort_strings(dirs)
     let entries: Vec[ArchiveEntry] = Vec.new()
     for i in 0..dirs.len() as i32:

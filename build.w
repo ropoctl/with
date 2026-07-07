@@ -368,7 +368,7 @@ fn package_platform_target(name: str, platform: str, ctx: &BuildCtx) -> Target:
     target = target.write_scope("out/release")
     target = target.write_scope("out/command/" ++ name)
     target = target.timeout(600000)
-    target = target_with_version_inputs(target, ctx)
+    target = target_with_version_inputs(move target, ctx)
     if supported_release_platform_tag() == platform:
         target = target.dep("build")
         target = target.dep("fixpoint")
@@ -861,13 +861,13 @@ pub fn build(ctx: BuildCtx) -> Build:
     compiler_sources = compiler_sources.extra_output("out/gen/main.w")
     compiler_sources = compiler_sources.extra_output("out/gen/bootstrap_main.w")
     compiler_sources = compiler_sources.extra_output("out/gen/version.txt")
-    compiler_sources = target_with_version_inputs(compiler_sources, ctx)
+    compiler_sources = target_with_version_inputs(move compiler_sources, ctx)
     out = out.add_target(compiler_sources)
 
     var print_version = target_new(.Action, "print-version", "").output("out/.build-state/print-version.txt")
     print_version.action = run_print_version_action
     print_version = print_version.input("src/version")
-    print_version = target_with_version_inputs(print_version, ctx)
+    print_version = target_with_version_inputs(move print_version, ctx)
     out = out.add_target(print_version)
 
     var bootstrap_c_emit_sources = target_new(.Action, "bootstrap-c-emit-sources", "").output("out/bootstrap-c/src/with_compiler.c")
@@ -883,7 +883,7 @@ pub fn build(ctx: BuildCtx) -> Build:
     var package_bootstrap_c = target_new(.Action, "package-bootstrap-c", "").output("out/release/with-bootstrap-c-" ++ release_version ++ ".tar.gz")
     package_bootstrap_c.action = run_package_bootstrap_c_action
     package_bootstrap_c = package_bootstrap_c.arg(release_compiler_bin("with"))
-    package_bootstrap_c = target_with_version_inputs(package_bootstrap_c, ctx)
+    package_bootstrap_c = target_with_version_inputs(move package_bootstrap_c, ctx)
     package_bootstrap_c = package_bootstrap_c.dep("build")
     package_bootstrap_c = package_bootstrap_c.dep("bootstrap-c-emit-sources")
     package_bootstrap_c = package_bootstrap_c.input("src/version")
@@ -934,7 +934,7 @@ pub fn build(ctx: BuildCtx) -> Build:
     var compat_runtime = target_new(.Action, "compat-runtime-source", "").output("out/gen/compat_runtime.w")
     compat_runtime = compat_runtime.extra_output("out/gen/compiler/EmbeddedStdlibData.w")
     compat_runtime = compat_runtime.input(host_runtime.compat_source)
-    compat_runtime = target_with_embedded_stdlib_inputs(compat_runtime, ctx)
+    compat_runtime = target_with_embedded_stdlib_inputs(move compat_runtime, ctx)
     compat_runtime.action = generate_compat_runtime_action
     out = out.add_target(compat_runtime)
 
@@ -947,7 +947,7 @@ pub fn build(ctx: BuildCtx) -> Build:
     var compiler_no_c_export = target_new(.Action, "compiler-no-c-export", "").output("out/.build-state/compiler-no-c-export.txt")
     compiler_no_c_export.action = run_check_compiler_no_new_c_export_action
     compiler_no_c_export = compiler_no_c_export.write_scope("out/.build-state")
-    compiler_no_c_export = target_with_compiler_c_export_audit_inputs(compiler_no_c_export, ctx)
+    compiler_no_c_export = target_with_compiler_c_export_audit_inputs(move compiler_no_c_export, ctx)
     out = out.add_target(compiler_no_c_export)
 
     var requirements_informative = target_new(.Action, "requirements-informative-check", "").output("out/.build-state/requirements-informative-check.txt")
@@ -1093,7 +1093,7 @@ pub fn build(ctx: BuildCtx) -> Build:
     stage1.action = run_with_compiler_build_action
     stage1 = stage1.compiler("seed")
     stage1 = stage1.input("out/gen/main.w")
-    stage1 = target_with_compiler_source_inputs(stage1, ctx)
+    stage1 = target_with_compiler_source_inputs(move stage1, ctx)
     stage1 = stage1.arg("-O1")
     stage1 = stage1.extra_output("out/command/stage1")
     stage1 = stage1.extra_output("out/.build-state/seed-input.json")
@@ -1112,7 +1112,7 @@ pub fn build(ctx: BuildCtx) -> Build:
     stage2.action = run_with_compiler_build_action
     stage2 = stage2.compiler(bootstrap_compiler_bin("with-stage1"))
     stage2 = stage2.input("out/gen/main.w")
-    stage2 = target_with_compiler_source_inputs(stage2, ctx)
+    stage2 = target_with_compiler_source_inputs(move stage2, ctx)
     stage2 = stage2.arg("-O1")
     stage2 = stage2.extra_output("out/command/stage2")
     stage2 = stage2.write_scope("out/stage/bin")
@@ -1125,7 +1125,7 @@ pub fn build(ctx: BuildCtx) -> Build:
     stage3.action = run_with_compiler_build_action
     stage3 = stage3.compiler(stage_compiler_bin("with-stage2"))
     stage3 = stage3.input("out/gen/main.w")
-    stage3 = target_with_compiler_source_inputs(stage3, ctx)
+    stage3 = target_with_compiler_source_inputs(move stage3, ctx)
     stage3 = stage3.arg("-O1")
     stage3 = stage3.extra_output("out/command/stage3")
     stage3 = stage3.write_scope("out/stage/bin")
@@ -1138,7 +1138,7 @@ pub fn build(ctx: BuildCtx) -> Build:
     stage2_fixpoint.action = run_with_compiler_build_action
     stage2_fixpoint = stage2_fixpoint.compiler(bootstrap_compiler_bin("with-stage1"))
     stage2_fixpoint = stage2_fixpoint.input("out/gen/main.w")
-    stage2_fixpoint = target_with_compiler_source_inputs(stage2_fixpoint, ctx)
+    stage2_fixpoint = target_with_compiler_source_inputs(move stage2_fixpoint, ctx)
     stage2_fixpoint = stage2_fixpoint.arg("--emit-obj")
     stage2_fixpoint = stage2_fixpoint.arg("-O1")
     stage2_fixpoint = stage2_fixpoint.extra_output("out/command/stage2-fixpoint-object")
@@ -1152,7 +1152,7 @@ pub fn build(ctx: BuildCtx) -> Build:
     stage3_fixpoint.action = run_with_compiler_build_action
     stage3_fixpoint = stage3_fixpoint.compiler(stage_compiler_bin("with-stage2"))
     stage3_fixpoint = stage3_fixpoint.input("out/gen/main.w")
-    stage3_fixpoint = target_with_compiler_source_inputs(stage3_fixpoint, ctx)
+    stage3_fixpoint = target_with_compiler_source_inputs(move stage3_fixpoint, ctx)
     stage3_fixpoint = stage3_fixpoint.arg("--emit-obj")
     stage3_fixpoint = stage3_fixpoint.arg("-O1")
     stage3_fixpoint = stage3_fixpoint.extra_output("out/command/stage3-fixpoint-object")
@@ -1264,7 +1264,7 @@ pub fn build(ctx: BuildCtx) -> Build:
     compiler.action = run_with_compiler_build_action
     compiler = compiler.compiler(stage_compiler_bin("with-stage2"))
     compiler = compiler.input("out/gen/main.w")
-    compiler = target_with_compiler_source_inputs(compiler, ctx)
+    compiler = target_with_compiler_source_inputs(move compiler, ctx)
     compiler = compiler.arg("-O1")
     compiler = compiler.extra_output("out/command/build")
     compiler = compiler.write_scope("out/release/bin")
@@ -1882,7 +1882,7 @@ pub fn build(ctx: BuildCtx) -> Build:
     prune = prune.arg("dry-run")
     prune = prune.arg("live-target=prune")
     prune = prune.arg("live-target=prune-apply")
-    prune = target_with_live_targets(prune, out)
+    prune = target_with_live_targets(move prune, out)
     prune = prune.write_scope("out/bin")
     prune = prune.write_scope("out/bootstrap/bin")
     prune = prune.write_scope("out/stage/bin")
@@ -1901,7 +1901,7 @@ pub fn build(ctx: BuildCtx) -> Build:
     prune_apply = prune_apply.arg("apply")
     prune_apply = prune_apply.arg("live-target=prune")
     prune_apply = prune_apply.arg("live-target=prune-apply")
-    prune_apply = target_with_live_targets(prune_apply, out)
+    prune_apply = target_with_live_targets(move prune_apply, out)
     prune_apply = prune_apply.write_scope("out/bin")
     prune_apply = prune_apply.write_scope("out/bootstrap/bin")
     prune_apply = prune_apply.write_scope("out/stage/bin")

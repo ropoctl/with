@@ -773,7 +773,7 @@ fn comp_spec_public_attributes(spec: str) -> Vec[str]:
                     end = ci
                     break
             if end > 1:
-                attrs = comp_collect_attr_names(attrs, line.slice(1, end as i64))
+                attrs = comp_collect_attr_names(move attrs, line.slice(1, end as i64))
     attrs
 
 fn comp_spec_internal_attributes(spec: str) -> Vec[str]:
@@ -784,7 +784,7 @@ fn comp_spec_internal_attributes(spec: str) -> Vec[str]:
         if line.starts_with("**Implementation-internal"):
             var j = i
             while j < lines.len() as i32 and comp_trim(lines.get(j as i64)).len() > 0:
-                attrs = comp_collect_attr_names(attrs, lines.get(j as i64))
+                attrs = comp_collect_attr_names(move attrs, lines.get(j as i64))
                 j = j + 1
     attrs
 
@@ -862,7 +862,7 @@ fn comp_spec_cli_commands(spec: str) -> Vec[str]:
 fn comp_spec_cli_flags() -> Vec[str]:
     var flags: Vec[str] = Vec.new()
     let defaults = "--release --target --emit-c --emit-obj --overflow --no-std --strict-effects --debug-alloc --dump-drop-state -O0 -O1 -O2 -O3 --open -e -n -p"
-    comp_add_words(flags, defaults)
+    comp_add_words(move flags, defaults)
 
 fn comp_impl_commands(fs: &ToolFs) -> Vec[str]:
     let raw = comp_collect_quoted_after(fs.read_text("src/main.w"), "cli_command(argc) == \"")
@@ -1077,7 +1077,7 @@ pub fn run_check_spec_inventory_action(ctx: ActionCtx) -> i32:
     let spec = fs.read_text(spec_path)
     var errors: Vec[str] = Vec.new()
 
-    errors = comp_inventory_add_errors(errors, "keywords", comp_spec_keywords(spec), comp_impl_keywords(fs), "", "")
+    errors = comp_inventory_add_errors(move errors, "keywords", comp_spec_keywords(spec), comp_impl_keywords(fs), "", "")
 
     var allowed_attrs = comp_spec_public_attributes(spec)
     let internal_attrs = comp_spec_internal_attributes(spec)
@@ -1085,11 +1085,11 @@ pub fn run_check_spec_inventory_action(ctx: ActionCtx) -> i32:
         let item = internal_attrs.get(ai as i64)
         if item.len() > 0 and not comp_vec_contains(allowed_attrs, item):
             allowed_attrs.push(item)
-    errors = comp_inventory_add_errors(errors, "attributes", allowed_attrs, comp_impl_attributes(fs), "attribute", "")
+    errors = comp_inventory_add_errors(move errors, "attributes", allowed_attrs, comp_impl_attributes(fs), "attribute", "")
 
-    errors = comp_inventory_add_errors(errors, "cli commands", comp_spec_cli_commands(spec), comp_impl_commands(fs), "", "command")
-    errors = comp_inventory_add_errors(errors, "cli flags", comp_spec_cli_flags(), comp_impl_flags(fs), "flag", "flag")
-    errors = comp_inventory_add_errors(errors, "stdlib modules", comp_spec_modules(spec), comp_impl_modules(fs), "module", "module")
+    errors = comp_inventory_add_errors(move errors, "cli commands", comp_spec_cli_commands(spec), comp_impl_commands(fs), "", "command")
+    errors = comp_inventory_add_errors(move errors, "cli flags", comp_spec_cli_flags(), comp_impl_flags(fs), "flag", "flag")
+    errors = comp_inventory_add_errors(move errors, "stdlib modules", comp_spec_modules(spec), comp_impl_modules(fs), "module", "module")
 
     if errors.len() > 0:
         ctx.diagnostics().error(comp_inventory_error_text(errors))
@@ -1152,10 +1152,10 @@ pub fn run_stack_budget_check_action(ctx: ActionCtx) -> i32:
 
     var sizes: Vec[i32] = Vec.new()
     if format == "pe":
-        sizes = comp_stack_collect_after_marker(result.stdout, "ALLOC_SMALL size=", sizes)
-        sizes = comp_stack_collect_after_marker(result.stdout, "ALLOC_LARGE size=", sizes)
+        sizes = comp_stack_collect_after_marker(result.stdout, "ALLOC_SMALL size=", move sizes)
+        sizes = comp_stack_collect_after_marker(result.stdout, "ALLOC_LARGE size=", move sizes)
     else:
-        sizes = comp_stack_collect_after_marker(result.stdout, "DW_CFA_def_cfa_offset:", sizes)
+        sizes = comp_stack_collect_after_marker(result.stdout, "DW_CFA_def_cfa_offset:", move sizes)
 
     let report = comp_stack_summarize(binary_path, format, sizes)
     let max_frame = report.max_frame
