@@ -10,6 +10,76 @@ decision supersedes an earlier one, say so in both.
 
 ---
 
+## D7 — Eliminate `self`: the receiver mode is a `fn` prefix keyword; `self` and its type are never written (Swift-style)
+
+**Date:** 2026-07-07
+**Status:** Accepted — BDFL ruling. Plan: `docs/eliminate-self.md`. Spec: §2.4, §9.5. **Deciders:** Eric (BDFL)
+
+### The decision
+
+A method's receiver is expressed by a keyword on the declaration, not by a
+parameter. `self` is never declared and its type is never spelled:
+
+- `fn m()` inside `impl` / `Type.` — instance, **read borrow** (`self: &Self`)
+- `mut fn m()` — instance, **mutable share-place borrow** (`mut self: Self`)
+- `move fn m()` — instance, **consuming** (`move self: Self`)
+- `static fn m()` — **no receiver**
+
+`self` remains an implicit binding in the body of instance methods. The
+receiver's type is always the enclosing type. Implemented as a **parser
+desugar** to the existing (verified-working) receiver-param shapes, so
+sema/MIR/codegen are unchanged.
+
+### Context / why
+
+The mission's first law — *"every unnecessary character is a compiler failure;
+if With can infer it, the programmer should not have to spell it out"* — applies
+directly: a receiver's type is **always** the owner type, so `: Self` is pure
+ceremony, and the mode is one bit that belongs on the declaration, not smeared
+across a `self` parameter. The prior form `fn m(mut self: Self)` forced the user
+to write the value (`self`), its mode, and its (inferable) type.
+
+This ruling also **dissolves** four open issues instead of patching them: #646
+(unflagged `self: ConcreteType` escapes the mode check — no annotation to
+escape), #645 part 2 (`mut` discarded on a param — `mut` now only prefixes
+`fn`), #644 (mut-self on a primitive owner — mode is uniform, type inferred),
+and the bare-`mut self` codegen failure (bare receiver forms cease to exist at
+the surface).
+
+### Alternatives weighed
+
+- **Keep `mut self: Self` (status quo).** Rejected: maximal ceremony; the spec
+  even called it "canonical," contradicting the mission's first law. The clause
+  is superseded here.
+- **Bare `mut self` (drop only `: Self`, Rust shorthand).** Rejected as the
+  end-state: still writes `self`. Eric's ruling: if `self` can be avoided, avoid
+  it. (Bare `mut self` is nonetheless the internal desugar target's cousin — the
+  desugar emits `mut self: Self` with a literal `Self` node.)
+- **Swift `mutating`/`consuming` spelling.** Rejected the *words*: we reuse
+  existing `mut`/`move` keywords (fewer characters, Rust-adjacent, no new
+  reserved words).
+
+### Reference consensus
+
+Swift is the model: `SelfAccessKind` (`include/swift/AST/Decl.h:262` —
+`NonMutating`/`Mutating`/`Consuming`/`Borrowing`) is a **decl** property and
+`self` is a compiler-synthesised `getImplicitSelfDecl()`. `mutating ⇒ inout
+self` (OwnershipManifesto) is verbatim With's share-place (D5). Swift threads a
+persisted `SelfAccessKind`; we take a cheaper route (parser desugar to shapes
+sema already handles). Rust's `&self`/`&mut self`/`self` shorthand and Swift's
+implicit `self` both confirm "no receiver type annotation" as the ergonomic
+norm; Go/Zig write the receiver type and are explicitly the more-ceremony pole
+we reject.
+
+### What would reopen it
+
+Evidence that implicit `self` cannot express a needed method shape (verified by
+running, not reasoning), or that the instance/static discriminator (`static fn`)
+creates an ambiguity the desugar cannot resolve. Supersedes the §2.4 "canonical
+receiver is `move self: Self`" wording (now `move fn drop()`).
+
+---
+
 ## D6 — `FnAbi` is the single ABI source of truth: compute once, both sides read it, never re-derive per call path
 
 **Date:** 2026-07-06

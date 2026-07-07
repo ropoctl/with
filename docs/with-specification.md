@@ -412,13 +412,15 @@ impl Copy for Buffer                      // ERROR: field `data` is not Copy
 
 type File { fd: i32 }
 impl Drop for File:
-    fn drop(move self: Self): ...
+    move fn drop(): ...
 impl Copy for File                        // ERROR: Copy + Drop is forbidden
 ```
 
-The canonical destructor receiver is `move self: Self` — a destructor
-always consumes. Other receiver forms in a `Drop` impl are a
-compile-time error with a fix-it. Explicit destructor calls are legal
+The canonical destructor is `move fn drop()` — a destructor always
+consumes, so its receiver mode is `move` (D7; `self` is implicit and never
+written). Any other receiver mode on a `Drop` impl's `drop` is a compile-time
+error with a fix-it. (The explicit form `fn drop(move self: Self)` remains
+accepted during the receiver migration; see `docs/eliminate-self.md`.) Explicit destructor calls are legal
 (Higher RAII): `x.drop()` is an ordinary consuming call that runs the
 destructor body AND the field drop glue, after which the binding is
 consumed — identical to the scope-exit drop, just earlier. The free
@@ -442,7 +444,7 @@ value** — the value is consumed:
 
 ```
 impl Drop for Database:
-    fn drop(move self: Self):
+    move fn drop():
         sqlite3_close(self.handle)
 ```
 
@@ -457,7 +459,7 @@ No recursion, no leaks, no ceremony:
 
 ```
 impl Drop for Database:
-    fn drop(move self: Self):
+    move fn drop():
         sqlite3_close(self.handle)
         // self.handle was consumed by the close call
         // compiler drops remaining fields automatically
@@ -3615,16 +3617,34 @@ controlled equivalent.
 
 ```
 extend Vec[T]:
-    fn is_empty(self: &Vec[T]) -> bool: self.len() == 0
+    fn is_empty() -> bool: self.len() == 0
 ```
 
-**Method call syntax** applies to all `self` parameter forms:
+**Receiver mode is a keyword on the declaration; `self` is never written (D7).**
+A method's receiver is expressed by a prefix keyword on `fn`. The receiver value
+`self` is an implicit binding in the body, and its type — always the enclosing
+type — is never spelled. Writing `self` (or its type) as a parameter is an
+unnecessary character and is being retired.
 
-| First parameter | Call syntax | Semantics |
-|-----------------|-------------|-----------|
-| `self: &T` | `x.method()` | Borrows `x` immutably |
-| `mut self: Self` | `x.method()` | Mutates `x` in place |
-| `move self: Self` | `x.method()` | Moves (consumes) `x` |
+| Declaration | Receiver semantics | Call syntax | Implicit receiver |
+|-------------|--------------------|-------------|-------------------|
+| `fn m()` (in `impl`/`Type.`) | borrows the receiver immutably | `x.m()` | `self: &Self` |
+| `mut fn m()` | mutates the receiver in place (share-place borrow) | `x.m()` | `mut self: Self` |
+| `move fn m()` | moves (consumes) the receiver | `x.m()` | `move self: Self` |
+| `static fn m()` | no receiver | `Type.m()` | — |
+
+```
+extend Counter:
+    fn get() -> i32: self.n            # read borrow — no `self` parameter
+    mut fn bump(): self.n = self.n + 1  # mutable borrow
+    move fn into_n() -> i32: self.n     # consuming
+    static fn zero() -> Counter: Counter { n: 0 }
+```
+
+*Transition:* the explicit receiver-parameter forms (`self: &Self`,
+`mut self: Self`, `move self: Self`) remain accepted while the compiler and
+stdlib migrate to the keyword form; the parser desugars the keyword form to
+them. See `docs/eliminate-self.md` for the phased plan.
 
 **Consuming `self` enables consuming method chains:**
 
@@ -3632,9 +3652,9 @@ extend Vec[T]:
 type Builder { host: str, port: u16 }
 
 extend Builder:
-    fn host(self: Builder, h: str) -> Builder: { self with host: h }
-    fn port(self: Builder, p: u16) -> Builder: { self with port: p }
-    fn build(self: Builder) -> Result[Server, ConfigError]: ...
+    move fn host(h: str) -> Builder: { self with host: h }
+    move fn port(p: u16) -> Builder: { self with port: p }
+    move fn build() -> Result[Server, ConfigError]: ...
 
 // Dot-notation chains naturally — each call moves the builder
 let server = Builder.new()
