@@ -20,15 +20,18 @@ decision supersedes an earlier one, say so in both.
 A method's receiver is expressed by a keyword on the declaration, not by a
 parameter. `self` is never declared and its type is never spelled:
 
-- `fn m()` inside `impl` / `Type.` — instance, **read borrow** (`self: &Self`)
-- `mut fn m()` — instance, **mutable share-place borrow** (`mut self: Self`)
-- `move fn m()` — instance, **consuming** (`move self: Self`)
-- `static fn m()` — **no receiver**
+- `fn m()` inside `impl`/`extend`/`type` — instance, **read borrow** (`self: &Self`)
+- `mut fn m()` inside a type — instance, **mutable share-place borrow** (`mut self: Self`)
+- `move fn m()` inside a type — instance, **consuming** (`move self: Self`)
+- top-level `fn Type.name()` — **associated**, no receiver (no `static` keyword)
 
-`self` remains an implicit binding in the body of instance methods. The
-receiver's type is always the enclosing type. Implemented as a **parser
-desugar** to the existing (verified-working) receiver-param shapes, so
-sema/MIR/codegen are unchanged.
+**Instance vs. associated is decided by *location*, not a keyword:** inside an
+`impl`/`extend`/`type` the receiver is synthesised; at top level there is none
+(a `mut`/`move` prefix at top level is an error). This is Rust/Zig/Go's
+presence-of-receiver rule with `self` implicit. `self` remains an implicit
+binding in instance-method bodies; the receiver's type is always the enclosing
+type. Implemented as a **parser desugar** to the existing (verified-working)
+receiver-param shapes, so sema/MIR/codegen are unchanged.
 
 ### Context / why
 
@@ -74,9 +77,9 @@ we reject.
 ### What would reopen it
 
 Evidence that implicit `self` cannot express a needed method shape (verified by
-running, not reasoning), or that the instance/static discriminator (`static fn`)
-creates an ambiguity the desugar cannot resolve. Supersedes the §2.4 "canonical
-receiver is `move self: Self`" wording (now `move fn drop()`).
+running, not reasoning), or that the location discriminator (inside a type vs.
+top level) creates an ambiguity the desugar cannot resolve. Supersedes the §2.4
+"canonical receiver is `move self: Self`" wording (now `move fn drop()`).
 
 ---
 

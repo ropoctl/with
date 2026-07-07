@@ -2,11 +2,14 @@
 
 **BDFL ruling (Eric, 2026-07-07):** the receiver `self` and its type
 annotation are **unnecessary characters** and must not be written. The
-receiver mode becomes a prefix keyword on the function declaration
-(`mut fn` / `move fn` / plain `fn` / `static fn`); `self` is implicit in the
-body; the receiver's type is always the enclosing type and is never spelled.
-This is Swift's `mutating`/`consuming`/`borrowing func` model, adapted to With's
-existing `mut`/`move` keywords.
+receiver mode is a prefix keyword on `fn` (`mut fn` / `move fn` / plain `fn`),
+`self` is implicit in the body, and the receiver's type is always the enclosing
+type and is never spelled. **Instance vs. associated is decided by *location*,
+with no `static` keyword:** a function declared **inside** an `impl` / `extend` /
+`type` is an instance method (receiver synthesised); a function declared at
+**top level** — including the dotted `fn Type.name` — is associated / free (no
+receiver). This is Rust/Zig/Go's rule (presence of receiver discriminates) with
+`self` implicit, so it is strictly less ceremony than any of them.
 
 This document is the implementation plan. The normative surface is amended in
 `docs/with-specification.md` (§2.4, §9.5); the rationale is recorded in
@@ -19,15 +22,16 @@ This document is the implementation plan. The normative surface is amended in
 ### Canonical surface (target)
 
 ```with
-impl Counter:
-    static fn new(n: i32) -> Counter:      # static: no receiver
-        Counter { n: n }
-    fn get() -> i32:                        # instance, read borrow  (implicit `self: &Self`)
+impl Counter:                               # inside a type: instance methods
+    fn get() -> i32:                        # read borrow  (implicit `self: &Self`)
         self.n
-    mut fn bump():                          # instance, mutable borrow (implicit `mut self: Self`)
+    mut fn bump():                          # mutable borrow (implicit `mut self: Self`)
         self.n = self.n + 1
-    move fn into_n() -> i32:                # instance, consuming      (implicit `move self: Self`)
+    move fn into_n() -> i32:                # consuming      (implicit `move self: Self`)
         self.n
+
+fn Counter.new(n: i32) -> Counter:          # top level: associated function, no receiver
+    Counter { n: n }
 
 impl Drop for File:
     move fn drop():                         # the only destructor receiver mode (§2.4)
@@ -38,13 +42,15 @@ impl Drop for File:
   body of every instance method (exactly like Swift's `getImplicitSelfDecl()`).
 - **The receiver's type is never spelled.** It is always the enclosing type
   (`Self`).
-- **The mode is the keyword on `fn`:**
-  | keyword | receiver semantics | desugars to |
+- **The mode is the keyword on `fn` (inside a type); location decides
+  instance vs. associated:**
+  | declaration | receiver semantics | desugars to |
   |---|---|---|
-  | `fn` (in impl / `Type.`) | read borrow | `self: &Self` |
-  | `mut fn` | mutable share-place borrow | `mut self: Self` |
-  | `move fn` | consuming (owns `self`) | `move self: Self` |
-  | `static fn` | no receiver | *(no self param)* |
+  | `fn` inside `impl`/`extend`/`type` | read borrow | `self: &Self` |
+  | `mut fn` inside a type | mutable share-place borrow | `mut self: Self` |
+  | `move fn` inside a type | consuming (owns `self`) | `move self: Self` |
+  | `fn` / `fn Type.name` at top level | associated / free | *(no receiver)* |
+  | `mut`/`move fn` at top level | **error** — mode with no receiver | — |
 
 ### Why this maps cleanly onto our model
 
@@ -103,19 +109,27 @@ codegen.**
 
 ---
 
-## 3. The one genuinely new concept: instance vs. static
+## 3. The discriminator: location, no keyword
 
-Today the *presence of a `self` parameter* is what distinguishes an instance
-method from a static function in an `impl`. Once `self` is implicit, we need a
-new discriminator. Swift's answer (adopted): a plain `fn` inside an `impl` /
-`Type.` is an **instance** method (implicit read-borrow `self`); a **static**
-function is marked `static fn`.
+Today the *presence of a `self` parameter* distinguishes an instance method from
+an associated function. Once `self` is implicit, the discriminator becomes
+**lexical location** — a fact the parser already has, requiring no keyword and no
+inference:
 
-This is the only part that touches existing code meaning: every current static
-`impl` function that has no `self` parameter (`Type.new`, `Type.from_*`, factory
-and free helpers under an `impl`) must gain `static fn`. This migration must
-land **before** the plain-`fn`-is-instance flip, otherwise a bare `fn new()`
-is ambiguous between "old static" and "new instance read-borrow".
+- **Inside `impl` / `extend` / `type`** → instance method; the receiver is
+  synthesised (mode from the keyword).
+- **Top level** (incl. the dotted `fn Type.name`) → associated / free function;
+  no receiver. A `mut`/`move` prefix here is an error.
+
+Construction is a struct literal (`Counter { n: 0 }`, already in the language) or
+a top-level `fn Type.make() -> Counter`. This is exactly Rust/Zig/Go's rule
+(Zig: `init` vs `deinit(self)`) with `self` implicit.
+
+The consequence for **existing code**: our compiler writes most instance methods
+as *top-level* `fn Type.method(self: Type)`. Under this rule those are "associated
+by location", so reaching full self-elimination **relocates them into `impl`
+blocks** (dropping `self`). The transition keeps explicit-`self` forms accepted,
+so it is gradual, not big-bang.
 
 ---
 
@@ -128,55 +142,54 @@ Each phase self-hosts and passes the full gate
 diff the tree, review every flip before gating. Until the campaign-end seed
 update, compiler sources must not rely on the new spelling.
 
-### Phase 0 — Grammar: accept the modifiers (no semantics)
-- Parser: accept `mut` / `move` / `static` as a prefix before `fn` in
-  declaration position (both `impl` bodies and top-level `fn Type.method`).
-- Store the modifier on the fn node (a new `FN_FLAG_RECV_MUT` /
-  `FN_FLAG_RECV_MOVE` / `FN_FLAG_STATIC`, or reuse the existing self-param flag
-  space). No desugar yet — just parse + carry, error if a modifier appears on a
-  non-method `fn`. Gate green (pure addition, no existing code affected).
+### Phase 0 — Grammar (done as part of P1)
+- Parser: accept a `mut` / `move` prefix on a method `fn` **inside** an
+  `impl`/`extend` block; error it at top level. No `static` keyword. The impl
+  loop guard and top-level lookahead admit `mut`/`move`.
 
-### Phase 1 — Desugar `mut fn` / `move fn` (unambiguous)
-- When a method decl carries `FN_FLAG_RECV_MUT` / `_MOVE`, the parser
-  **prepends a synthetic receiver param** to the parameter list:
-  `mut self: Self` / `move self: Self` — a real `self` name node + a literal
-  `Self` `NK_TYPE_NAMED` node (the mode machinery keys off the literal `Self`;
-  see #646). Downstream is untouched.
-- This is **safe and unambiguous**: `mut fn` / `move fn` have no prior meaning,
-  so nothing existing conflicts.
-- Migrate the compiler + stdlib `mut self: Self` / `move self: Self` methods to
-  `mut fn` / `move fn` (drop the explicit receiver). Mechanical; the emitted AST
-  is identical, so behavior is unchanged (the gate proves it). This also
-  migrates `impl Drop: fn drop(move self: Self)` → `move fn drop()`.
-- Keep the explicit `mut self: Self` / `move self: Self` forms **accepted** so
-  migration can be incremental.
+### Phase 1 — Synthesise `mut fn` / `move fn` (unambiguous) — **IMPLEMENTED**
+- Inside `impl`/`extend`, a `mut fn` / `move fn` **prepends a synthetic receiver
+  param** (`mut self: Self` / `move self: Self`) with a literal `Self`
+  `NK_TYPE_NAMED` node (the mode machinery keys off the literal `Self`; see
+  #646). Both the parenthesised and paren-less method forms are covered
+  (`Parser.build_synth_receiver` + `flush_receiver_only_param`, consumed by
+  `parse_param_list`). Downstream is untouched.
+- Safe/unambiguous: `mut fn` / `move fn` have no prior meaning.
+- Migration (relocation): because most `mut self: Self`/`move self: Self` methods
+  are top-level `fn Type.method(...)`, converting them to `mut fn`/`move fn`
+  means **moving them into an `impl` block**. Deferred to the migrator (§4a) with
+  the P3 read-borrow bulk; explicit forms stay accepted meanwhile.
 
-### Phase 2 — `static fn` + migrate static functions
-- Parser: `static fn` on an `impl` / `Type.` function marks it static
-  (synthesise no receiver). A top-level `fn foo()` outside any impl is a free
-  function and is unaffected.
-- Migrate every existing no-`self` `impl` / `Type.` function to `static fn`
-  (`Type.new`, `Type.from_*`, factories). This is the enabling migration for
-  Phase 3. Sweep the whole tree; the gate + fixpoint prove nothing was missed
-  (an un-migrated static function would flip to an instance method in Phase 3
-  and fail to type-check).
+### Phase 2 — Synthesise read-borrow `fn` inside `impl`/`extend`
+- A plain `fn` inside `impl`/`extend` with no explicit receiver prepends
+  `self: &Self`. (This is where plain `fn` inside a type gains meaning.)
+- Migrate the read-borrow methods **already in** `impl`/`extend` blocks (drop the
+  explicit `self: &Self`/`self: Self`).
+- **Blocker to fix first:** generic `impl Type[T]:` blocks with receiver methods
+  currently fail (pre-existing, independent of this work — the working generic
+  form is top-level `fn Type.m[T](self…)`). Generic types can only migrate into
+  `impl` blocks once this is fixed.
 
-### Phase 3 — Flip plain `fn` to instance read-borrow
-- After Phase 2, a plain `fn` inside `impl` / `Type.` with no explicit receiver
-  desugars to `fn m(self: &Self, …)` (implicit read borrow).
-- Migrate read-borrow methods (`fn get(self: &Self)` → `fn get()`), dropping the
-  explicit receiver.
-- A method that uses no `self` is still an instance method (Swift parity); mark
-  it `static fn` if it should be static.
+### Phase 3 — Relocate top-level instance methods into `impl` blocks
+- The ~3,386 top-level `fn Type.method(self: Type)` are associated-by-location;
+  to become implicit-`self` instance methods they move into `impl Type:` blocks.
+  This is the large mechanical restructuring — needs the migrator (§4a).
+  Associated/top-level `fn Type.name()` (no self) stay put.
 
-### Phase 4 — Retire explicit-`self` receivers
-- Reject an explicit `self` parameter (`self:` / `mut self:` / `move self:` /
-  `&self`) with a fix-it pointing at the modifier form. "Nonexistence of `self`"
-  is now enforced.
-- Update all remaining spec examples and `examples/` to the self-less form.
-- Campaign-end bootstrap: one chain
+### Phase 4 — Enforce
+- Reject an explicit `self` parameter with a fix-it; reject `mut`/`move fn` at
+  top level. Update remaining spec examples / `examples/` and the compile-error
+  test pins. Campaign-end bootstrap: one chain
   `:test → :last-green → :update-seed → :install-user`; verify the new seed
   compiles a self-less probe.
+
+## 4a. Migration tooling
+
+The volume (~3,900 receivers + relocations) needs a **compiler-driven migrator**
+(`with migrate-receivers`, reusing the parser) — it must handle multi-line
+signatures, the paren-less `fn T.m -> R:` form, and P3's decl relocation into
+`impl` blocks. It transforms precisely because the parser sees param 0's `self` +
+its flags. Regex will not survive 3,900 self-host-critical sites.
 
 ---
 
@@ -186,8 +199,9 @@ update, compiler sources must not rely on the new spelling.
   `Self` (mut/move) or `&Self` (read) type node, not the concrete owner name
   (`self: ConcreteType` is the #646 bug path). Verify the synthesized node
   routes through the working receiver-mode classification.
-- **`fn Type.method` free-function form** — owner is `type_str`
-  (`Parser.w:1179`); synthesise the same receiver as the `impl` form.
+- **Top-level `fn Type.name` form** — associated by location: **no** receiver is
+  synthesised. An explicit `self` there is the transition path (Phase 4 rejects
+  it, directing the author to move the method into an `impl` block).
 - **Generics** — `mut fn bump[T]()` on a generic owner: `Self` resolves to the
   generic instance, as it does for explicit `mut self: Self` today
   (`behav_mut_self_drop_generic` is the guard test).
@@ -199,9 +213,9 @@ update, compiler sources must not rely on the new spelling.
 - **Explicit `self` uses in the body** — `self`, `self.field`, and passing
   `self` onward (`f(self)`) must resolve against the synthesized binding
   exactly as against a written `self` param today.
-- **`static fn` calling convention** — a `static fn` is an ordinary function
-  namespaced under the type; no receiver ABI. Verify call-site resolution
-  (`Type.method()` static call vs `value.method()` instance call).
+- **Associated-function calls** — a top-level `fn Type.name()` is an ordinary
+  function namespaced under the type; no receiver ABI. Verify call-site
+  resolution (`Type.name()` associated call vs `value.method()` instance call).
 - **One-line assignment-body methods** — noted during design: a one-line
   `fn m(...): self.x = e` shape has a separate codegen quirk; ensure the desugar
   does not depend on body shape.
@@ -212,7 +226,7 @@ update, compiler sources must not rely on the new spelling.
 
 - Fast check (`out/stage/bin/with-stage2 check src/main.w`) before any build.
 - Probe each edge case above with `out/release/bin/with` (never the seed).
-- Fixtures: `behav_*` for each mode (read/mut/move/static) in both `impl` and
+- Fixtures: `behav_*` for each mode (read/mut/move + top-level associated) in both `impl` and
   `Type.` forms, generics, trait methods; `compile_errors/` for a modifier on a
   free function, a static call on an instance method, and (Phase 4) an explicit
   `self` parameter.

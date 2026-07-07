@@ -3626,19 +3626,26 @@ A method's receiver is expressed by a prefix keyword on `fn`. The receiver value
 type — is never spelled. Writing `self` (or its type) as a parameter is an
 unnecessary character and is being retired.
 
+Whether a function is an instance method or an associated function is decided by
+**location**, with no keyword: a `fn` declared **inside** an `impl`/`extend`/`type`
+is an instance method (receiver synthesised); a `fn` at **top level** — including
+the dotted `fn Type.name` — is associated / free (no receiver).
+
 | Declaration | Receiver semantics | Call syntax | Implicit receiver |
 |-------------|--------------------|-------------|-------------------|
-| `fn m()` (in `impl`/`Type.`) | borrows the receiver immutably | `x.m()` | `self: &Self` |
-| `mut fn m()` | mutates the receiver in place (share-place borrow) | `x.m()` | `mut self: Self` |
-| `move fn m()` | moves (consumes) the receiver | `x.m()` | `move self: Self` |
-| `static fn m()` | no receiver | `Type.m()` | — |
+| `fn m()` inside `impl`/`extend`/`type` | borrows the receiver immutably | `x.m()` | `self: &Self` |
+| `mut fn m()` inside a type | mutates the receiver in place (share-place borrow) | `x.m()` | `mut self: Self` |
+| `move fn m()` inside a type | moves (consumes) the receiver | `x.m()` | `move self: Self` |
+| `fn Type.m()` at top level | none (associated) | `Type.m()` | — |
+| `mut`/`move fn` at top level | *error* — mode with no receiver | — | — |
 
 ```
-extend Counter:
+impl Counter:
     fn get() -> i32: self.n            # read borrow — no `self` parameter
     mut fn bump(): self.n = self.n + 1  # mutable borrow
     move fn into_n() -> i32: self.n     # consuming
-    static fn zero() -> Counter: Counter { n: 0 }
+
+fn Counter.zero() -> Counter: Counter { n: 0 }   # top level: associated
 ```
 
 *Transition:* the explicit receiver-parameter forms (`self: &Self`,

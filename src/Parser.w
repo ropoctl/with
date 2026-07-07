@@ -64,6 +64,10 @@ pub type Parser {
     pending_compiler_hook_phase: i32,
     pending_comptime_with_names: Vec[i32],
     pending_comptime_with_types: Vec[i32],
+    // D7 eliminate-self: receiver mode for the next method's synthetic `self`
+    // (0 none, 1 read `self: &Self`, 2 `mut self: Self`, 3 `move self: Self`).
+    pending_receiver_mode: i32,
+    synth_recv_type: i32,
     pending_unsafe_fn: i32,
     pending_iter_of_self: i32,
     saw_implicit_it: i32,
@@ -136,6 +140,8 @@ fn Parser.init_with_pool(tokens: TokenList, source: str, file_id: i32, intern: I
         pending_compiler_hook_phase: 0,
         pending_comptime_with_names: Vec.new(),
         pending_comptime_with_types: Vec.new(),
+        pending_receiver_mode: 0,
+        synth_recv_type: 0,
         pending_unsafe_fn: 0,
         pending_iter_of_self: 0,
         saw_implicit_it: 0,
@@ -3091,7 +3097,7 @@ fn Parser.parse_impl_block(self: Parser, vis: i32):
     let extra_start = self.pool.extra_len()
     var method_count = 0
 
-    while self.peek() == TokenKind.TK_AT or self.peek() == TokenKind.TK_KW_FN or self.peek() == TokenKind.TK_KW_PUB or self.peek() == TokenKind.TK_KW_ASYNC or self.peek() == TokenKind.TK_KW_TYPE or (impl_braced and self.peek() == TokenKind.TK_R_BRACE):
+    while self.peek() == TokenKind.TK_AT or self.peek() == TokenKind.TK_KW_FN or self.peek() == TokenKind.TK_KW_PUB or self.peek() == TokenKind.TK_KW_ASYNC or self.peek() == TokenKind.TK_KW_MUT or self.peek() == TokenKind.TK_KW_MOVE or self.peek() == TokenKind.TK_KW_TYPE or (impl_braced and self.peek() == TokenKind.TK_R_BRACE):
         if impl_braced and self.peek() == TokenKind.TK_R_BRACE:
             break
         if not impl_braced:
@@ -3125,6 +3131,16 @@ fn Parser.parse_impl_block(self: Parser, vis: i32):
         if self.peek() == TokenKind.TK_KW_ASYNC:
             m_async = 1
             self.advance()
+        // D7 eliminate-self: a `mut`/`move` prefix on a method sets the receiver
+        // mode; plain `fn` inside an impl is (P2) a read borrow. `self` is
+        // synthesized, never written.
+        var m_recv_mode = 0
+        if self.peek() == TokenKind.TK_KW_MUT:
+            m_recv_mode = 2
+            self.advance()
+        else if self.peek() == TokenKind.TK_KW_MOVE:
+            m_recv_mode = 3
+            self.advance()
         if self.expect(TokenKind.TK_KW_FN) == 0:
             break
         let method_name_sym = self.expect_ident_or_keyword()
@@ -3142,6 +3158,7 @@ fn Parser.parse_impl_block(self: Parser, vis: i32):
         var m_params_start = 0
         var param_count = 0
         var required_param_count = 0
+        self.pending_receiver_mode = m_recv_mode
         if self.peek() == TokenKind.TK_L_PAREN:
             self.advance()
             param_count = self.parse_param_list()
@@ -3149,6 +3166,11 @@ fn Parser.parse_impl_block(self: Parser, vis: i32):
             if param_count > 0:
                 m_params_start = self.pool.extra_len() - param_count * FN_PARAM_STRIDE
             self.expect(TokenKind.TK_R_PAREN)
+        else if self.pending_receiver_mode != 0:
+            // D7: paren-less method with a receiver mode (`mut fn m -> R:`)
+            param_count = self.flush_receiver_only_param()
+            required_param_count = self.last_param_required_count
+            m_params_start = self.pool.extra_len() - param_count * FN_PARAM_STRIDE
 
         var ret_type: NodeId = 0 as NodeId
         if self.peek() == TokenKind.TK_ARROW:
@@ -7513,6 +7535,37 @@ fn Parser.param_binding_should_parse_pattern(self: Parser) -> bool:
     next == TokenKind.TK_DOT or next == TokenKind.TK_DOT_IDENT or
     next == TokenKind.TK_L_PAREN or next == TokenKind.TK_L_BRACE or next == TokenKind.TK_AT
 
+// D7 eliminate-self: build the synthetic receiver type node for `mode`
+// (1 = read `&Self`, 2 = `mut Self`, 3 = `move Self`), stash it in
+// `synth_recv_type`, and return the FN_PARAM_FLAG_*_SELF bit. The type is a
+// literal `Self` node so it routes through the existing receiver-mode handling.
+fn Parser.build_synth_receiver(self: Parser, mode: i32) -> i32:
+    let sp = self.current_start()
+    let self_ty = self.pool.add_node(NodeKind.NK_TYPE_NAMED, sp, sp, self.intern.intern("Self"), 0, 0)
+    if mode == 1:
+        self.synth_recv_type = self.pool.add_node(NodeKind.NK_TYPE_REF, sp, sp, self_ty as i32, 0, 0) as i32
+        return FN_PARAM_FLAG_REF_SELF
+    self.synth_recv_type = self_ty as i32
+    if mode == 2:
+        return FN_PARAM_FLAG_MUT_SELF
+    FN_PARAM_FLAG_MOVE_SELF
+
+// D7: emit the pending synthetic receiver as the sole parameter — the paren-less
+// method form (`mut fn m -> R:`), where parse_param_list is never called.
+fn Parser.flush_receiver_only_param(self: Parser) -> i32:
+    let pattern_start = self.pool.fn_param_patterns_len()
+    let rmode = self.pending_receiver_mode
+    self.pending_receiver_mode = 0
+    let rflags = self.build_synth_receiver(rmode)
+    self.pool.add_extra(self.intern.intern("self"))
+    self.pool.add_extra(self.synth_recv_type)
+    self.pool.add_extra(rflags)
+    self.pool.add_fn_param_pattern_value(0 as NodeId)
+    self.last_param_pattern_start = pattern_start
+    self.last_param_pattern_count = 1
+    self.last_param_required_count = 1
+    1
+
 fn Parser.parse_param_list(self: Parser) -> i32:
     var params: Vec[i32] = Vec.new()
     var default_nodes: Vec[i32] = Vec.new()
@@ -7522,6 +7575,20 @@ fn Parser.parse_param_list(self: Parser) -> i32:
     self.last_param_pattern_start = pattern_start
     self.last_param_pattern_count = 0
     self.last_param_required_count = 0
+
+    // D7: a pending receiver mode (`mut fn`/`move fn`/read) synthesizes `self`
+    // as param 0, before any comptime-with capabilities.
+    if self.pending_receiver_mode != 0:
+        let rmode = self.pending_receiver_mode
+        self.pending_receiver_mode = 0
+        let rflags = self.build_synth_receiver(rmode)
+        params.push(self.intern.intern("self"))
+        params.push(self.synth_recv_type)
+        params.push(rflags)
+        default_nodes.push(0)
+        self.pool.add_fn_param_pattern_value(0 as NodeId)
+        pattern_count = pattern_count + 1
+        required_count = required_count + 1
 
     let pending_count = self.pending_comptime_with_names.len() as i32
     for ci in 0..pending_count:
