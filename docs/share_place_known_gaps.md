@@ -6,7 +6,14 @@ deterministic repro and `--dump-abi` evidence. Verify fixes with the
 
 ---
 
-## G1 — extern `@[effect(consume)]` not applied to share-place classification
+## G1 — extern `@[effect(consume)]` not applied to share-place classification — RESOLVED
+
+**RESOLVED:** the classification was correct (`--dump-abi`: OWNED); the gap was
+call-site enforcement — extern calls skipped `record_consume_call_site`. Fixed in
+SemaCheck.w:12501 (enforce for extern params whose effect includes CONSUME/
+ESCAPE_VALUE). Test un-skipped + migrated. The historical diagnosis below is kept
+for reference.
+
 
 **Repro:** `test/compile_errors/err_effect_extern_consume_marks_moved.w` (currently `//! skip:`).
 
@@ -64,7 +71,18 @@ Confirm any such change leaves `/drop-audit` at 0 fail and `--dump-abi` showing
 
 ---
 
-## G3 — ephemeral Task double-frees when awaited through a share-place borrow
+## G3 — ephemeral Task double-frees when awaited through a share-place borrow — RESOLVED
+
+**RESOLVED:** `result_buf` was freed by BOTH the value-await (FIBER_AWAIT) and the
+Task drop (FIBER_CLEANUP_AWAIT). Fixed by threading an `await_owns` flag from
+MirLower to codegen: a value-await frees the buffer only when this scope OWNS the
+task (a temporary, or an owned local whose scheduled drop the await cancels) — a
+borrowed param's owner-drop frees it instead. `await_task_owns_result` +
+`local_has_scheduled_value_drop` (MirLower.w), threaded through `lower_single_await`
+and the tuple-await / select-await FIBER_AWAIT emitters; codegen reads the flag
+(CodegenDispatch.w). Verified with `--debug-alloc` across owned/temporary/tuple/
+select/borrowed (all leak count=0). Test un-skipped. History below for reference.
+
 
 **Repro:** `test/behavior/behav_ephemeral_task_consuming_callee.w` (currently `//! skip:`).
 

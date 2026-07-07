@@ -9173,9 +9173,20 @@ fn Codegen.mir_emit_atomic_fiber_intrinsic_call(self: Codegen, body: &MirBody, i
             let dst_local = body.place_locals.get(dest_place as i64)
             self.mir_local_ptrs.insert(dst_local, dst_alloca)
             self.mir_local_types.insert(dst_local, dst_llvm_ty)
-        // Raw Task await consumes the result buffer. ScopedTask await leaves
-        // the buffer owned by the async scope cleanup entry.
-        if not scoped_task_await:
+        // §14.7/G3: `result_buf` is owned by the Task and freed exactly ONCE.
+        // FIBER_AWAIT carries an `await_owns` flag as arg 1 (set by MirLower):
+        // 1 = this value-await OWNS the buffer here (a temporary, or an owned
+        // local whose own drop the await cancelled) and must free it; 0 = the
+        // awaited task is a share-place BORROW (the owner's scope-exit Task drop
+        // frees it), so freeing here too double-frees (await-through-borrow then
+        // owner-drop). FIBER_CLEANUP_AWAIT is the owner's Task drop and always
+        // frees. ScopedTask leaves the buffer to the async-scope cleanup entry.
+        var await_frees_buf = intrinsic == MirIntrinsic.FIBER_CLEANUP_AWAIT
+        if intrinsic == MirIntrinsic.FIBER_AWAIT:
+            let ao_val = self.mir_intrinsic_arg(body, args_id, 1)
+            if not self.is_const_int_value(ao_val) or wl_const_int_sext_val(ao_val) != 0:
+                await_frees_buf = true
+        if not scoped_task_await and await_frees_buf:
             var free_fn = wl_get_named_function(self.llmod, "with_free")
             if free_fn == 0:
                 let fp: Vec[i64] = Vec.new()

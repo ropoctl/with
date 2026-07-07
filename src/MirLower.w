@@ -363,6 +363,32 @@ fn MirBuilder.cancel_scheduled_value_drop_for_local(self: MirBuilder, local_id: 
             return
         i = i - 1
 
+// Whether `local_id` currently has a scheduled value drop in this scope (an
+// owned local), without cancelling it. A share-place borrow (param) has none.
+fn MirBuilder.local_has_scheduled_value_drop(self: MirBuilder, local_id: i32) -> i32:
+    var i = self.drop_local_ids.len() as i32 - 1
+    while i >= 0:
+        if self.drop_local_ids.get(i as i64) == local_id and self.drop_kind_owns_value(self.drop_kinds.get(i as i64)) != 0:
+            return 1
+        i = i - 1
+    0
+
+// §14.7/G3: whether a value-await on `inner` OWNS the result buffer here and so
+// must free it. True for a temporary/rvalue task and for an owned local (whose
+// own drop the await cancels); false for a borrowed param/local (no scheduled
+// value drop — the owner's Task drop frees the buffer). Mirrors the reach of
+// cancel_scheduled_value_drop_for_receiver_expr for the ident case.
+fn MirBuilder.await_task_owns_result(self: MirBuilder, inner: i32) -> i32:
+    var e = inner
+    while e != 0 and self.ast.kind(e) == NodeKind.NK_GROUPED:
+        e = self.ast.get_data0(e)
+    if e == 0 or self.ast.kind(e) != NodeKind.NK_IDENT:
+        return 1
+    let local = self.lookup_local(self.ast.get_data0(e))
+    if local < 0:
+        return 1
+    self.local_has_scheduled_value_drop(local)
+
 fn MirBuilder.moved_field_path_matches(self: MirBuilder, idx: i32, base_local: i32, path_start: i32, path_count: i32) -> i32:
     if idx < 0 or idx >= self.moved_field_base_locals.len() as i32:
         return 0
@@ -6698,12 +6724,15 @@ fn MirBuilder.lower_return(self: MirBuilder, node: i32) -> i32:
 // result_ty: sema type of the unwrapped result (T from Task[T])
 // task_ty: sema type of the Task value (Task[T])
 // node: AST node for the await expression (for span/ast_node)
-fn MirBuilder.lower_single_await(self: MirBuilder, task_op: i32, result_ty: i32, task_ty: i32, node: i32) -> i32:
+fn MirBuilder.lower_single_await(self: MirBuilder, task_op: i32, result_ty: i32, task_ty: i32, node: i32, await_owns: i32) -> i32:
     let span = self.ast.get_start(node)
 
-    // 1. Emit FIBER_AWAIT intrinsic call
+    // 1. Emit FIBER_AWAIT intrinsic call. Arg 1 (await_owns) tells codegen whether
+    // this value-await OWNS the result buffer and must free it (§14.7/G3): 1 for a
+    // temporary/owned-local await, 0 for a borrowed param (the owner's drop frees).
     let await_args: Vec[i32] = Vec.new()
     await_args.push(task_op)
+    await_args.push(self.const_operand(ConstKind.CK_INT, await_owns, self.sema.ty_i32))
     let await_args_id = self.body.new_call_args(await_args)
     self.body.set_call_intrinsic(await_args_id, MirIntrinsic.FIBER_AWAIT)
     self.body.set_call_ast_node(await_args_id, node)
@@ -9155,8 +9184,10 @@ fn MirBuilder.lower_tuple_await_question_mark(self: MirBuilder, await_node: i32,
     let result_tuple_ty = self.expr_type(question_node)
 
     let task_ops: Vec[i32] = Vec.new()
+    let tq_owns: Vec[i32] = Vec.new()
     for i in 0..count:
         let elem = self.ast.get_extra(extra + i)
+        tq_owns.push(self.await_task_owns_result(elem))
         self.cancel_scheduled_value_drop_for_receiver_expr(elem)
         task_ops.push(self.lower_expr(elem))
 
@@ -9167,7 +9198,7 @@ fn MirBuilder.lower_tuple_await_question_mark(self: MirBuilder, await_node: i32,
         let task_ty = self.expr_type(elem_node)
         let result_ty = self.tuple_elem_type(await_tuple_ty, i)
         let payload_ty = self.tuple_elem_type(result_tuple_ty, i)
-        let awaited = self.lower_single_await(task_ops.get(i as i64), result_ty, task_ty, await_node)
+        let awaited = self.lower_single_await(task_ops.get(i as i64), result_ty, task_ty, await_node, tq_owns.get(i as i64))
         let payload = self.lower_question_mark_value(awaited, result_ty, payload_ty, question_node, await_node, &task_ops, i + 1)
         fields.push(payload)
         names.push(0)
@@ -11672,8 +11703,10 @@ fn MirBuilder.lower_expr(self: MirBuilder, node: i32) -> i32:
             let ta_result_ty = self.expr_type(node)
             // Lower all task expressions first (spawns all fibers)
             var ta_task_ops: Vec[i32] = Vec.new()
+            var ta_owns: Vec[i32] = Vec.new()
             for ta_i in 0..ta_count:
                 let ta_elem = self.ast.get_extra(ta_extra + ta_i)
+                ta_owns.push(self.await_task_owns_result(ta_elem))
                 self.cancel_scheduled_value_drop_for_receiver_expr(ta_elem)
                 ta_task_ops.push(self.lower_expr(ta_elem))
             // Await each sequentially, collect results
@@ -11683,7 +11716,7 @@ fn MirBuilder.lower_expr(self: MirBuilder, node: i32) -> i32:
                 let ta_elem_ty = self.tuple_elem_type(ta_result_ty, ta_i)
                 let ta_elem_node = self.ast.get_extra(ta_extra + ta_i)
                 let ta_task_ty = self.expr_type(ta_elem_node)
-                let ta_op = self.lower_single_await(ta_task_ops.get(ta_i as i64), ta_elem_ty, ta_task_ty, node)
+                let ta_op = self.lower_single_await(ta_task_ops.get(ta_i as i64), ta_elem_ty, ta_task_ty, node, ta_owns.get(ta_i as i64))
                 ta_awaited_ops.push(ta_op)
                 ta_awaited_names.push(0)
             // Build result tuple via RK_AGGREGATE
@@ -11694,12 +11727,14 @@ fn MirBuilder.lower_expr(self: MirBuilder, node: i32) -> i32:
             self.body.push_stmt(self.cur_bb, StmtKind.Assign, ta_place, ta_agg_rv, self.ast.get_start(node))
             return self.body.new_operand(OperandKind.OK_COPY, ta_place)
 
-        // Single task await
+        // Single task await. Compute ownership BEFORE the cancel (which removes
+        // the scheduled drop the query looks for).
+        let single_await_owns = self.await_task_owns_result(inner)
         self.cancel_scheduled_value_drop_for_receiver_expr(inner)
         let task_op = self.lower_expr(inner)
         let result_ty = self.expr_type(node)
         let task_inner_ty = self.expr_type(inner)
-        return self.lower_single_await(task_op, result_ty, task_inner_ty, node)
+        return self.lower_single_await(task_op, result_ty, task_inner_ty, node, single_await_owns)
 
     if kind == NodeKind.NK_YIELD:
         let inner = self.ast.get_data0(node)
@@ -11799,10 +11834,14 @@ fn MirBuilder.lower_expr(self: MirBuilder, node: i32) -> i32:
             return self.unit_operand()
         let span = self.ast.get_start(node)
 
-        // 1. Lower each arm's task expression → task operands
+        // 1. Lower each arm's task expression → task operands. Capture ownership
+        // BEFORE the cancel (§14.7/G3): the winner's value-await frees its result
+        // buffer iff this scope owns the task (its drop, cancelled just below).
         var task_ops: Vec[i32] = Vec.new()
+        var sel_owns: Vec[i32] = Vec.new()
         for ai in 0..arm_count:
             let task_node = self.ast.get_extra(extra_start + ai * 3 + 1)
+            sel_owns.push(self.await_task_owns_result(task_node))
             self.cancel_scheduled_value_drop_for_receiver_expr(task_node)
             let task_op = self.lower_expr(task_node)
             task_ops.push(task_op)
@@ -11849,6 +11888,7 @@ fn MirBuilder.lower_expr(self: MirBuilder, node: i32) -> i32:
             // Await the winning task to get its result
             let await_args: Vec[i32] = Vec.new()
             await_args.push(task_ops.get(ai as i64))
+            await_args.push(self.const_operand(ConstKind.CK_INT, sel_owns.get(ai as i64), self.sema.ty_i32))
             let await_call_id = self.body.new_call_args(await_args)
             self.body.set_call_intrinsic(await_call_id, MirIntrinsic.FIBER_AWAIT)
             self.body.set_call_ast_node(await_call_id, node)
