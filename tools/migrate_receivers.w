@@ -14,8 +14,7 @@
 // strings are never mistaken for code. Always re-run the gate afterward — the
 // migration is only correct if the tree still builds byte-identically.
 //
-//   with build tools/migrate_receivers.w -o out/migrate_receivers
-//   out/migrate_receivers lib/std/rc.w lib/std/box.w ...
+//   with run tools/migrate_receivers.w lib/std/rc.w lib/std/box.w ...
 
 use std.process
 use Lexer

@@ -730,7 +730,7 @@ fn run_cli(argc: i32) -> i32:
 
     // `with hello.w` is shorthand for `with run hello.w`
     if cli_is_implicit_run(argc):
-        return run_run_command(cli_command(argc), "", opt_level, no_std, alloc_mode, runtime_available, prelude_mode, debug_info)
+        return run_run_command(cli_command(argc), "", opt_level, no_std, alloc_mode, runtime_available, prelude_mode, debug_info, run_program_args(argc, cli_command(argc)))
 
     if cli_command(argc) == "build":
         if cli_has_flag(argc, "--help") or cli_has_flag(argc, "-h"):
@@ -758,7 +758,7 @@ fn run_cli(argc: i32) -> i32:
         if emit_c_mode:
             with_eprint("error: '--emit-c' is only supported with 'build'")
             return 1
-        return run_run_command(source, find_target_selector_arg(argc), opt_level, no_std, alloc_mode, runtime_available, prelude_mode, debug_info)
+        return run_run_command(source, find_target_selector_arg(argc), opt_level, no_std, alloc_mode, runtime_available, prelude_mode, debug_info, run_program_args(argc, source))
     if cli_command(argc) == "emit-c-header":
         // §16.5: print the generated C header for this module's @[c_export]
         // symbols to stdout.
@@ -921,6 +921,25 @@ fn has_output_prefix(arg: str) -> bool:
     if with_str_len(arg) < 9:
         return false
     with_str_starts_with(arg, "--output=") != 0
+
+// Everything on the command line after the source `.w` is forwarded to the
+// program as its argv, so `with run tool.w a b` runs the program with a, b
+// (no separate build step needed). Returns "" when there are no trailing args.
+fn run_program_args(argc: i32, source: str) -> str:
+    if source == "":
+        return ""
+    // NUL-terminated argv blob (the format with_exec_argv expects).
+    var result = ""
+    var i = 2
+    var found = false
+    while i < argc:
+        let arg = with_arg_at(i)
+        if found:
+            result = result ++ arg ++ "\0"
+        else if arg == source:
+            found = true
+        i = i + 1
+    result
 
 // Find the first positional (non-flag) argument starting from argv[2].
 // Skips `-o <path>` pairs and `--output=...` prefixed options.
@@ -1988,7 +2007,7 @@ fn run_run_project_command(selected_target_hint: str, opt_level: i32, no_std: bo
         return 1
     build_graph_rt_exec_binary(bin_path)
 
-fn run_run_command(source_file: str, selected_target_hint: str, opt_level: i32, no_std: bool, alloc_mode: bool, runtime_available: bool, prelude_mode: i32, debug_info: bool) -> i32:
+fn run_run_command(source_file: str, selected_target_hint: str, opt_level: i32, no_std: bool, alloc_mode: bool, runtime_available: bool, prelude_mode: i32, debug_info: bool, prog_args: str) -> i32:
     if source_file == "":
         return run_run_project_command(selected_target_hint, opt_level, no_std, alloc_mode, runtime_available, prelude_mode, debug_info)
     var comp = Compilation.init()
@@ -2000,7 +2019,11 @@ fn run_run_command(source_file: str, selected_target_hint: str, opt_level: i32, 
         with_eprint("error: run failed")
         return 1
     comp.print_warnings()
-    let run_rc = build_graph_rt_exec_binary(bin_path)
+    // Forward `with run prog.w a b` args to the program (space-joined argv).
+    let run_rc = if prog_args == "":
+        build_graph_rt_exec_binary(bin_path)
+    else:
+        build_graph_rt_exec_argv(bin_path ++ "\0" ++ prog_args)
     cleanup_binary_artifacts(bin_path)
     run_rc
 
