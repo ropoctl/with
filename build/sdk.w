@@ -587,7 +587,7 @@ fn sdk_jobs_arg(jobs: str) -> Vec[str]:
         out.push(jobs)
     out
 
-fn sdk_append_jobs(mut args: Vec[str], jobs: str) -> Vec[str]:
+fn sdk_append_jobs(args: Vec[str], jobs: str) -> Vec[str]:
     args.push("--parallel")
     if jobs.len() > 0:
         args.push(jobs)

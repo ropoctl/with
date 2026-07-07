@@ -972,19 +972,19 @@ pub fn ToolFs.write_binary(self: &Self, path: str, bytes: Vec[u8]) -> i32:
         out.push_byte(bytes.get(i as i64))
     with_fs_write_file(self.resolve_path(path), out.to_str())
 
-fn tool_tar_append_zeroes(mut out: Vec[u8], count: i64) -> Vec[u8]:
+fn tool_tar_append_zeroes(out: Vec[u8], count: i64) -> Vec[u8]:
     var i: i64 = 0
     while i < count:
         out.push(0 as u8)
         i = i + 1
     out
 
-fn tool_tar_append_bytes(mut out: Vec[u8], bytes: &Vec[u8]) -> Vec[u8]:
+fn tool_tar_append_bytes(out: Vec[u8], bytes: &Vec[u8]) -> Vec[u8]:
     for i in 0..bytes.len() as i32:
         out.push(bytes.get(i as i64))
     out
 
-fn tool_tar_append_str_padded(mut out: Vec[u8], value: str, width: i64) -> Vec[u8]:
+fn tool_tar_append_str_padded(out: Vec[u8], value: str, width: i64) -> Vec[u8]:
     if value.len() > width:
         return Vec.new()
     for i in 0..value.len() as i32:
@@ -1011,7 +1011,7 @@ fn tool_tar_octal_digits(value: i64) -> str:
         out.push_byte(reversed.byte_at(i) as u8)
     out.to_str()
 
-fn tool_tar_append_octal_nul(mut out: Vec[u8], value: i64, width: i64) -> Vec[u8]:
+fn tool_tar_append_octal_nul(out: Vec[u8], value: i64, width: i64) -> Vec[u8]:
     if value < 0:
         return Vec.new()
     let digits = tool_tar_octal_digits(value)
@@ -1026,7 +1026,7 @@ fn tool_tar_append_octal_nul(mut out: Vec[u8], value: i64, width: i64) -> Vec[u8
     out.push(0 as u8)
     out
 
-fn tool_tar_append_checksum(mut out: Vec[u8], checksum: i64) -> Vec[u8]:
+fn tool_tar_append_checksum(out: Vec[u8], checksum: i64) -> Vec[u8]:
     let digits = tool_tar_octal_digits(checksum)
     if digits.len() > 6:
         return Vec.new()
@@ -1156,12 +1156,12 @@ fn ToolFs.tar_bytes(self: &Self, entries: &Vec[ArchiveEntry]) -> Vec[u8]:
     out = tool_tar_append_zeroes(out, 1024)
     out
 
-fn tool_gzip_append_u16_le(mut out: Vec[u8], value: i32) -> Vec[u8]:
+fn tool_gzip_append_u16_le(out: Vec[u8], value: i32) -> Vec[u8]:
     out.push((value & 0xff) as u8)
     out.push(((value >> 8) & 0xff) as u8)
     out
 
-fn tool_gzip_append_u32_le(mut out: Vec[u8], value: u32) -> Vec[u8]:
+fn tool_gzip_append_u32_le(out: Vec[u8], value: u32) -> Vec[u8]:
     out.push((value & (0xff as u32)) as u8)
     out.push(((value >> (8 as u32)) & (0xff as u32)) as u8)
     out.push(((value >> (16 as u32)) & (0xff as u32)) as u8)

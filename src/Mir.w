@@ -2020,7 +2020,7 @@ fn dump_drop_plan_module(mir_mod: &MirModule, pool: &InternPool, sema: &Sema) ->
 // The decision is computed read-only first — using the exact dataflow walk the
 // `--dump-drop-plan` diagnostic rides on — so the transfer functions observe the
 // original drops; the Nops are applied afterward.
-pub fn mir_elaborate_dead_drops(mut body: MirBody) -> MirBody:
+pub fn mir_elaborate_dead_drops(body: MirBody) -> MirBody:
     // Cheap pre-scan: a body with no Drop statements has nothing to elaborate, so
     // skip the dataflow entirely (#614 perf — avoids the per-body walk for the
     // overwhelming majority of functions, which have no drops).

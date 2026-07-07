@@ -3,7 +3,7 @@
 use std.alloc
 
 @[no_alloc]
-fn use_arena(mut scope: ArenaScope) -> i32:
+fn use_arena(scope: ArenaScope) -> i32:
     let ptr = scope.alloc(4)
     let value_ptr = ptr as *mut i32
     unsafe:

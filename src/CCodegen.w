@@ -639,7 +639,7 @@ fn cc_str_vec_contains(values: &Vec[str], needle: str) -> bool:
             return true
     false
 
-fn cc_push_unique_str(mut values: Vec[str], value: str) -> Vec[str]:
+fn cc_push_unique_str(values: Vec[str], value: str) -> Vec[str]:
     if cc_str_vec_contains(&values, value):
         return values
     values.push(value)
@@ -7691,7 +7691,7 @@ type CollectFnTypes {
 fn CollectFnTypes.new -> CollectFnTypes:
     CollectFnTypes { out: Vec.new(), seen_names: HashMap.new(), seen_types: HashMap.new() }
 
-fn CCodegen.collect_struct_types_from_tid(self: CCodegen, mut acc: CollectStructTypes, tid: i32) -> CollectStructTypes:
+fn CCodegen.collect_struct_types_from_tid(self: CCodegen, acc: CollectStructTypes, tid: i32) -> CollectStructTypes:
     let resolved = self.sema.resolve_alias(tid)
     if resolved == 0:
         return acc

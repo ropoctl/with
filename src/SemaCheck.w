@@ -8691,7 +8691,7 @@ fn Sema.autoderef_type_has_method(self: Sema, ty: TypeId, method: i32) -> i32:
         return self.pipeline_generic_builtin_method_exists(owner, method)
     0
 
-fn Sema.autoderef_next_type(self: Sema, current: TypeId, node: i32, mut step_fns: Vec[i32], mut step_tys: Vec[i32]) -> TypeId:
+fn Sema.autoderef_next_type(self: Sema, current: TypeId, node: i32, step_fns: Vec[i32], step_tys: Vec[i32]) -> TypeId:
     let tk = self.get_type_kind(current)
     if tk == TypeKind.TY_PTR or tk == TypeKind.TY_REF:
         let inner = self.get_type_d0(current)

@@ -7547,8 +7547,12 @@ fn Parser.parse_param_list(self: Parser) -> i32:
         let param_flags = self.parse_param_attrs()
         var is_mut = 0
         var is_move = 0
+        var mut_tok_start = 0
+        var mut_tok_end = 0
         if self.peek() == TokenKind.TK_KW_MUT:
             is_mut = 1
+            mut_tok_start = self.current_start()
+            mut_tok_end = self.current_end()
             self.advance()
         else if self.peek() == TokenKind.TK_KW_MOVE:
             is_move = 1
@@ -7572,6 +7576,15 @@ fn Parser.parse_param_list(self: Parser) -> i32:
         // docs/mut.md Rev 8 §5.1 / docs/mutability.md — receiver-place modes.
         // Tag the param so later sema phases can enforce receiver constraints.
         let is_self_param = name != 0 and self.intern.resolve(name) == "self"
+        // #645 / docs/mutability.md: parameters are implicitly rebindable; there
+        // is NO `mut x: T` parameter modifier (`mut self` is the only place `mut`
+        // is meaningful). Reject `mut` on a non-self parameter loudly instead of
+        // silently discarding it.
+        if is_mut == 1 and is_self_param == 0:
+            let mut_span = Span { file: self.file_id, start: mut_tok_start, end: mut_tok_end }
+            var mdiag = Diagnostic.err("`mut` is not a parameter modifier — parameters are already rebindable", mut_span)
+            mdiag.add_help("remove `mut`; to mutate an independent copy, bind a local `var` inside the function body")
+            self.diags.emit(mdiag)
         if is_mut == 1 and is_self_param:
             extra_flags = extra_flags + FN_PARAM_FLAG_MUT_SELF
         if is_move == 1 and is_self_param:

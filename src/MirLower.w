@@ -12657,7 +12657,7 @@ fn mir_fn_is_generic_template_at(sema: &Sema, ast_pool: AstPool, pool: InternPoo
     let sema_sym = sema.pool_lookup_symbol(pool.resolve_symbol(fn_sym))
     sema_sym != 0 and sema.get_sig(sema_sym) < 0 and sema.generic_fn_node_for_symbol(sema_sym) != 0
 
-fn lower_module(mut sema: Sema, ast_pool: AstPool, pool: InternPool) -> MirModule:
+fn lower_module(sema: Sema, ast_pool: AstPool, pool: InternPool) -> MirModule:
     var mir_mod = MirModule.init()
     // Snapshot sema type tables before any MirBuilder copy can realloc/free the buffer
     mir_mod.snapshot_sema_types(&sema)

@@ -590,7 +590,7 @@ fn cli_synthetic_source_new -> CliSyntheticSource:
         source_texts: Vec.new(),
     }
 
-fn cli_synthetic_add_mapping(mut syn: CliSyntheticSource, start: i32, text: str, source_name: str) -> CliSyntheticSource:
+fn cli_synthetic_add_mapping(syn: CliSyntheticSource, start: i32, text: str, source_name: str) -> CliSyntheticSource:
     syn.gen_starts.push(start)
     syn.gen_ends.push(start + text.len() as i32 + 1)
     syn.source_names.push(source_name)
