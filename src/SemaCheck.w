@@ -1305,7 +1305,12 @@ fn Sema.check_fn_body_with_sig_at(self: Sema, node: i32, sig_idx: i32, decl_inde
         let eff_pc = self.ast.fn_meta_param_count(meta)
         for pi in 0..eff_pc:
             self.current_fn_param_syms.push(self.ast.fn_param_name(eff_ps, pi))
-            self.current_fn_param_effs.push(0)
+            // §9.5/G2 (D6): a `move self` receiver is CONSUMED by the callee, so
+            // seed its effect with CONSUME. assign_share_place_abi then classifies
+            // it OWNED (not share-place), matching how the MIR already treats it —
+            // so the FnAbi descriptor / --dump-abi agree with the drop discipline.
+            let g2_seed = if pi == 0 and fn_param_is_move_self(self.ast.fn_param_flags(eff_ps, pi)) != 0: EFF_CONSUME else: 0
+            self.current_fn_param_effs.push(g2_seed)
             self.current_fn_param_origins.push(0)
             self.current_fn_param_view_nodes.push(0)
     self.current_fn_sig_idx = sig_idx

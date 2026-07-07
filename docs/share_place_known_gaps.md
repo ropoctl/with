@@ -55,7 +55,16 @@ OWNED with `--dump-abi`.
 
 ---
 
-## G2 — move-self receiver: Sema label vs MIR behavior divergence
+## G2 — move-self receiver: Sema label vs MIR behavior divergence — RESOLVED
+
+**RESOLVED:** `fn_param_uses_value_ref_abi` (SemaDecl.w) classified *any*
+receiver-typed param as share-place, ignoring receiver mode. Now a `move self`
+receiver returns 0 (OWNED) — `mut self` / `&self` / plain `self` stay share-place.
+The move-self param's effect is also seeded with CONSUME (SemaCheck.w). `--dump-abi`
+now shows `move self` as `eff=[consume] value_ref_abi=0 -> OWNED`, matching the
+MIR's drop discipline (D6). Verified: drop-audit 0 fail, full suite green, fixpoint
+holds. History below for reference.
+
 
 `--dump-abi` reports a `move self` receiver as `value_ref_abi=1 -> SHARE-PLACE`
 (because a read-only move-self body infers effect READ). The **behavior** is

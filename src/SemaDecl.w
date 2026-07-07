@@ -1102,9 +1102,13 @@ fn Sema.fn_param_uses_value_ref_abi(self: Sema, param_start: i32, param_idx: i32
             p_sym = self.ast.get_data0(p_base)
     else:
         return 0
-    if p_sym == self.syms.self_type:
-        return 1
-    if p_sym == method_owner_sym:
+    if p_sym == self.syms.self_type or p_sym == method_owner_sym:
+        // §9.5/G2 (D6): a `move self` receiver is CONSUMED (owned) — it is dropped
+        // by the callee, so it does NOT use the value-ref (IndirectPlace /
+        // share-place) ABI. `mut self` / `&self` / plain `self` remain share-place
+        // borrows of the caller's place.
+        if fn_param_is_move_self(self.ast.fn_param_flags(param_start, param_idx)) != 0:
+            return 0
         return 1
     0
 
