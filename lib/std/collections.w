@@ -50,104 +50,107 @@ pub type BTreeSet[T] {
 pub fn BTreeMap.new[K, V]() -> BTreeMap[K, V]:
     BTreeMap { entries: Vec.new() }
 
-pub fn BTreeMap.len[K: Ord, V](self: &BTreeMap[K, V]) -> i64:
-    self.entries.len()
+impl[K: Ord, V] BTreeMap[K, V]:
+    pub fn len() -> i64:
+        self.entries.len()
 
-pub fn BTreeMap.is_empty[K, V](self: &BTreeMap[K, V]) -> bool:
-    self.entries.len() == 0
+impl[K, V] BTreeMap[K, V]:
+    pub fn is_empty() -> bool:
+        self.entries.len() == 0
 
-pub fn BTreeMap.clear[K, V](mut self: BTreeMap[K, V]) -> Unit:
-    self.entries.clear()
+    pub mut fn clear() -> Unit:
+        self.entries.clear()
 
-fn BTreeMap.last_index_of[K: Ord, V](self: &BTreeMap[K, V], key: K) -> i64:
-    var found = -1
-    var i = 0
-    while i < self.entries.len():
-        let (existing, _) = self.entries.get(i)
-        if not (existing < key) and not (existing > key):
-            found = i
-        i = i + 1
-    found
-
-pub fn BTreeMap.contains[K: Ord, V](self: &BTreeMap[K, V], key: K) -> bool:
-    var i = 0
-    while i < self.entries.len():
-        let (existing, _) = self.entries.get(i)
-        if not (existing < key) and not (existing > key):
-            return true
-        i = i + 1
-    false
-
-pub fn BTreeMap.get[K: Ord, V](self: &BTreeMap[K, V], key: K) -> Option[V]:
-    let idx = self.last_index_of(key)
-    if idx < 0:
-        return None
-    let (_, value) = self.entries.get(idx)
-    Some(value)
-
-pub fn BTreeMap.insert[K: Ord, V](mut self: BTreeMap[K, V], key: K, value: V) -> Unit:
-    var i = 0
-    while i < self.entries.len():
-        let (existing, _) = self.entries.get(i)
-        if not (existing < key) and not (existing > key):
-            with self.entries.slot(i) as mut slot:
-                slot.set((key, value))
-            return
-        if existing > key:
-            self.entries.push((key, value))
-            var j = self.entries.len() - 1
-            while j > i:
-                let left = self.entries.get(j - 1)
-                let right = self.entries.get(j)
-                with self.entries.slot(j - 1) as mut left_slot:
-                    left_slot.set(right)
-                with self.entries.slot(j) as mut right_slot:
-                    right_slot.set(left)
-                j = j - 1
-            return
-        i = i + 1
-    self.entries.push((key, value))
-
-pub fn BTreeMap.remove[K: Ord, V](mut self: BTreeMap[K, V], key: K) -> Option[V]:
-    let idx = self.last_index_of(key)
-    if idx < 0:
-        return None
-    let (_, removed_value) = self.entries.get(idx)
-    var i = 0
-    while i < self.entries.len():
-        let (existing, _) = self.entries.get(i)
-        if not (existing < key) and not (existing > key):
-            let _ = self.entries.remove(i)
-        else:
+impl[K: Ord, V] BTreeMap[K, V]:
+    fn last_index_of(key: K) -> i64:
+        var found = -1
+        var i = 0
+        while i < self.entries.len():
+            let (existing, _) = self.entries.get(i)
+            if not (existing < key) and not (existing > key):
+                found = i
             i = i + 1
-    Some(removed_value)
+        found
 
-pub fn BTreeMap.keys[K: Ord, V](self: &BTreeMap[K, V]) -> Vec[K]:
-    let out: Vec[K] = Vec.new()
-    var entry_i = 0
-    while entry_i < self.entries.len():
-        let (key, _) = self.entries.get(entry_i)
-        out.push(key)
-        entry_i = entry_i + 1
-    out
+    pub fn contains(key: K) -> bool:
+        var i = 0
+        while i < self.entries.len():
+            let (existing, _) = self.entries.get(i)
+            if not (existing < key) and not (existing > key):
+                return true
+            i = i + 1
+        false
 
-pub fn BTreeMap.values[K: Ord, V](self: &BTreeMap[K, V]) -> Vec[V]:
-    let out: Vec[V] = Vec.new()
-    var entry_i = 0
-    while entry_i < self.entries.len():
-        let (_, value) = self.entries.get(entry_i)
-        out.push(value)
-        entry_i = entry_i + 1
-    out
+    pub fn get(key: K) -> Option[V]:
+        let idx = self.last_index_of(key)
+        if idx < 0:
+            return None
+        let (_, value) = self.entries.get(idx)
+        Some(value)
 
-pub fn BTreeMap.items[K: Ord, V](self: &BTreeMap[K, V]) -> Vec[(K, V)]:
-    let out: Vec[(K, V)] = Vec.new()
-    var entry_i = 0
-    while entry_i < self.entries.len():
-        let (key, value) = self.entries.get(entry_i)
-        out.push((key, value))
-        entry_i = entry_i + 1
-    out
+    pub mut fn insert(key: K, value: V) -> Unit:
+        var i = 0
+        while i < self.entries.len():
+            let (existing, _) = self.entries.get(i)
+            if not (existing < key) and not (existing > key):
+                with self.entries.slot(i) as mut slot:
+                    slot.set((key, value))
+                return
+            if existing > key:
+                self.entries.push((key, value))
+                var j = self.entries.len() - 1
+                while j > i:
+                    let left = self.entries.get(j - 1)
+                    let right = self.entries.get(j)
+                    with self.entries.slot(j - 1) as mut left_slot:
+                        left_slot.set(right)
+                    with self.entries.slot(j) as mut right_slot:
+                        right_slot.set(left)
+                    j = j - 1
+                return
+            i = i + 1
+        self.entries.push((key, value))
+
+    pub mut fn remove(key: K) -> Option[V]:
+        let idx = self.last_index_of(key)
+        if idx < 0:
+            return None
+        let (_, removed_value) = self.entries.get(idx)
+        var i = 0
+        while i < self.entries.len():
+            let (existing, _) = self.entries.get(i)
+            if not (existing < key) and not (existing > key):
+                let _ = self.entries.remove(i)
+            else:
+                i = i + 1
+        Some(removed_value)
+
+    pub fn keys() -> Vec[K]:
+        let out: Vec[K] = Vec.new()
+        var entry_i = 0
+        while entry_i < self.entries.len():
+            let (key, _) = self.entries.get(entry_i)
+            out.push(key)
+            entry_i = entry_i + 1
+        out
+
+    pub fn values() -> Vec[V]:
+        let out: Vec[V] = Vec.new()
+        var entry_i = 0
+        while entry_i < self.entries.len():
+            let (_, value) = self.entries.get(entry_i)
+            out.push(value)
+            entry_i = entry_i + 1
+        out
+
+    pub fn items() -> Vec[(K, V)]:
+        let out: Vec[(K, V)] = Vec.new()
+        var entry_i = 0
+        while entry_i < self.entries.len():
+            let (key, value) = self.entries.get(entry_i)
+            out.push((key, value))
+            entry_i = entry_i + 1
+        out
 
 impl[K: Ord, V] IntoIter[(K, V)] for BTreeMap[K, V]:
     mut fn iter() -> VecIter[(K, V)]:
@@ -156,77 +159,80 @@ impl[K: Ord, V] IntoIter[(K, V)] for BTreeMap[K, V]:
 pub fn BTreeSet.new[T]() -> BTreeSet[T]:
     BTreeSet { values: Vec.new() }
 
-pub fn BTreeSet.len[T: Ord](self: &BTreeSet[T]) -> i64:
-    self.values.len()
+impl[T: Ord] BTreeSet[T]:
+    pub fn len() -> i64:
+        self.values.len()
 
-pub fn BTreeSet.is_empty[T](self: &BTreeSet[T]) -> bool:
-    self.values.len() == 0
+impl[T] BTreeSet[T]:
+    pub fn is_empty() -> bool:
+        self.values.len() == 0
 
-pub fn BTreeSet.clear[T](mut self: BTreeSet[T]) -> Unit:
-    self.values.clear()
+    pub mut fn clear() -> Unit:
+        self.values.clear()
 
-fn BTreeSet.index_of[T: Ord](self: &BTreeSet[T], value: T) -> i64:
-    var i = 0
-    while i < self.values.len():
-        let existing = self.values.get(i)
-        if not (existing < value) and not (existing > value):
-            return i
-        i = i + 1
-    -1
-
-pub fn BTreeSet.contains[T: Ord](self: &BTreeSet[T], value: T) -> bool:
-    var i = 0
-    while i < self.values.len():
-        let existing = self.values.get(i)
-        if not (existing < value) and not (existing > value):
-            return true
-        i = i + 1
-    false
-
-pub fn BTreeSet.insert[T: Ord](mut self: BTreeSet[T], value: T) -> Unit:
-    var i = 0
-    while i < self.values.len():
-        let existing = self.values.get(i)
-        if not (existing < value) and not (existing > value):
-            with self.values.slot(i) as mut slot:
-                slot.set(value)
-            return
-        if existing > value:
-            self.values.push(value)
-            var j = self.values.len() - 1
-            while j > i:
-                let left = self.values.get(j - 1)
-                let right = self.values.get(j)
-                with self.values.slot(j - 1) as mut left_slot:
-                    left_slot.set(right)
-                with self.values.slot(j) as mut right_slot:
-                    right_slot.set(left)
-                j = j - 1
-            return
-        i = i + 1
-    self.values.push(value)
-
-pub fn BTreeSet.remove[T: Ord](mut self: BTreeSet[T], value: T) -> bool:
-    let idx = self.index_of(value)
-    if idx < 0:
-        return false
-    var i = 0
-    while i < self.values.len():
-        let existing = self.values.get(i)
-        if not (existing < value) and not (existing > value):
-            let _ = self.values.remove(i)
-        else:
+impl[T: Ord] BTreeSet[T]:
+    fn index_of(value: T) -> i64:
+        var i = 0
+        while i < self.values.len():
+            let existing = self.values.get(i)
+            if not (existing < value) and not (existing > value):
+                return i
             i = i + 1
-    true
+        -1
 
-pub fn BTreeSet.items[T: Ord](self: &BTreeSet[T]) -> Vec[T]:
-    let out: Vec[T] = Vec.new()
-    var value_i = 0
-    while value_i < self.values.len():
-        let value = self.values.get(value_i)
-        out.push(value)
-        value_i = value_i + 1
-    out
+    pub fn contains(value: T) -> bool:
+        var i = 0
+        while i < self.values.len():
+            let existing = self.values.get(i)
+            if not (existing < value) and not (existing > value):
+                return true
+            i = i + 1
+        false
+
+    pub mut fn insert(value: T) -> Unit:
+        var i = 0
+        while i < self.values.len():
+            let existing = self.values.get(i)
+            if not (existing < value) and not (existing > value):
+                with self.values.slot(i) as mut slot:
+                    slot.set(value)
+                return
+            if existing > value:
+                self.values.push(value)
+                var j = self.values.len() - 1
+                while j > i:
+                    let left = self.values.get(j - 1)
+                    let right = self.values.get(j)
+                    with self.values.slot(j - 1) as mut left_slot:
+                        left_slot.set(right)
+                    with self.values.slot(j) as mut right_slot:
+                        right_slot.set(left)
+                    j = j - 1
+                return
+            i = i + 1
+        self.values.push(value)
+
+    pub mut fn remove(value: T) -> bool:
+        let idx = self.index_of(value)
+        if idx < 0:
+            return false
+        var i = 0
+        while i < self.values.len():
+            let existing = self.values.get(i)
+            if not (existing < value) and not (existing > value):
+                let _ = self.values.remove(i)
+            else:
+                i = i + 1
+        true
+
+    pub fn items() -> Vec[T]:
+        let out: Vec[T] = Vec.new()
+        var value_i = 0
+        while value_i < self.values.len():
+            let value = self.values.get(value_i)
+            out.push(value)
+            value_i = value_i + 1
+        out
 
 pub fn BTreeSet.union[T: Ord](self: &BTreeSet[T], other: &BTreeSet[T]) -> BTreeSet[T]:
     let out: BTreeSet[T] = BTreeSet[T].new()
@@ -242,25 +248,26 @@ pub fn BTreeSet.union[T: Ord](self: &BTreeSet[T], other: &BTreeSet[T]) -> BTreeS
         other_i = other_i + 1
     out
 
-pub fn BTreeSet.intersection[T: Ord](self: &BTreeSet[T], other: &BTreeSet[T]) -> BTreeSet[T]:
-    let out: BTreeSet[T] = BTreeSet[T].new()
-    var self_i = 0
-    while self_i < self.values.len():
-        let value = self.values.get(self_i)
-        if other.contains(value):
-            out.insert(value)
-        self_i = self_i + 1
-    out
+impl[T: Ord] BTreeSet[T]:
+    pub fn intersection(other: &BTreeSet[T]) -> BTreeSet[T]:
+        let out: BTreeSet[T] = BTreeSet[T].new()
+        var self_i = 0
+        while self_i < self.values.len():
+            let value = self.values.get(self_i)
+            if other.contains(value):
+                out.insert(value)
+            self_i = self_i + 1
+        out
 
-pub fn BTreeSet.difference[T: Ord](self: &BTreeSet[T], other: &BTreeSet[T]) -> BTreeSet[T]:
-    let out: BTreeSet[T] = BTreeSet[T].new()
-    var self_i = 0
-    while self_i < self.values.len():
-        let value = self.values.get(self_i)
-        if not other.contains(value):
-            out.insert(value)
-        self_i = self_i + 1
-    out
+    pub fn difference(other: &BTreeSet[T]) -> BTreeSet[T]:
+        let out: BTreeSet[T] = BTreeSet[T].new()
+        var self_i = 0
+        while self_i < self.values.len():
+            let value = self.values.get(self_i)
+            if not other.contains(value):
+                out.insert(value)
+            self_i = self_i + 1
+        out
 
 impl[T: Ord] IntoIter[T] for BTreeSet[T]:
     mut fn iter() -> VecIter[T]:
