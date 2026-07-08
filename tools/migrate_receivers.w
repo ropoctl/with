@@ -8,7 +8,11 @@
 //
 // SKIPPED (need relocation into an impl block, not yet handled): top-level dotted
 // methods `fn Type.method(self: T)` — recognised by the `.` after the fn name.
-// Associated / free functions (no `self` first param) are left untouched.
+// Associated / free functions (no `self` first param) are left untouched. A plain
+// read-borrow `self: &Self` is migrated ONLY inside an inherent `impl`/`extend`
+// (where D7 P2 synthesizes it); in a trait def or trait impl (`impl T for U`) the
+// trait dictates the receiver, so read borrows there keep the explicit `self`.
+// `mut fn`/`move fn` synthesize regardless, so those migrate in any block.
 //
 // Accurate because it tokenizes with the compiler's own Lexer, so comments and
 // strings are never mistaken for code. Always re-run the gate afterward — the
@@ -22,6 +26,13 @@ use Token
 
 extern fn with_fs_read_file(path: str) -> str
 extern fn with_fs_write_file(path: str, data: str) -> i32
+
+// 0-based column of a byte offset (distance from the start of its line, 10 = '\n').
+fn col_of(text: str, offset: i32):
+    var j = offset - 1
+    while j >= 0 and (text.byte_at(j as i64) as i32) != 10:
+        j = j - 1
+    offset - (j + 1)
 
 fn migrate_file(path: str) -> i32:
     let text = unsafe { with_fs_read_file(path) }
@@ -37,9 +48,33 @@ fn migrate_file(path: str) -> i32:
     var ends: Vec[i32] = Vec.new()
     var repls: Vec[str] = Vec.new()
 
+    // Track the enclosing block: 0 = top level, 1 = inherent impl / extend,
+    // 2 = trait def or trait impl (`impl T for U`). Read-borrow `self` is only
+    // synthesized inside an inherent impl/extend (D7 P2), so a plain read method
+    // migrates only when block_kind == 1; `mut`/`move fn` synthesize anywhere.
+    var block_kind = 0
+    var block_col = -1
     var i = 0
     while i < n:
-        if tokens.get_tag(i) != TokenKind.TK_KW_FN:
+        let tag_i = tokens.get_tag(i)
+        if tag_i == TokenKind.TK_KW_IMPL or tag_i == TokenKind.TK_KW_EXTEND or tag_i == TokenKind.TK_KW_TRAIT:
+            block_col = col_of(text, tokens.get_start(i))
+            if tag_i == TokenKind.TK_KW_TRAIT:
+                block_kind = 2
+            else if tag_i == TokenKind.TK_KW_EXTEND:
+                block_kind = 1
+            else:
+                // `impl` is a trait impl iff a `for` appears on its header line.
+                block_kind = 1
+                var c = i + 1
+                while c < n and tokens.get_tag(c) != TokenKind.TK_NEWLINE:
+                    if tokens.get_tag(c) == TokenKind.TK_KW_FOR:
+                        block_kind = 2
+                        break
+                    c = c + 1
+            i = i + 1
+            continue
+        if tag_i != TokenKind.TK_KW_FN:
             i = i + 1
             continue
         let fn_pos = tokens.get_start(i)
@@ -81,6 +116,13 @@ fn migrate_file(path: str) -> i32:
             i = i + 1
             continue
         if text.slice(tokens.get_start(p) as i64, tokens.get_end(p) as i64) != "self":
+            i = i + 1
+            continue
+        // A read borrow only synthesizes inside an inherent impl/extend (D7 P2);
+        // in a trait def/impl or at top level, leave the explicit `self` alone.
+        // `mut`/`move fn` synthesize regardless, so they migrate anywhere.
+        let here_kind = if col_of(text, fn_pos) > block_col: block_kind else: 0
+        if mode == 0 and here_kind != 1:
             i = i + 1
             continue
 
