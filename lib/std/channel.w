@@ -24,9 +24,9 @@ pub type Sender[T] { handle: i64 }
 pub type Receiver[T] { handle: i64 }
 
 impl[T] Drop for Sender[T]:
-    fn drop(move self: Self):
+    move fn drop():
         with_channel_release_sender(self.handle)
 
 impl[T] Drop for Receiver[T]:
-    fn drop(move self: Self):
+    move fn drop():
         with_channel_release_receiver(self.handle)

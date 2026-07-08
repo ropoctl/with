@@ -31,7 +31,7 @@ impl[T] Deref[T] for Box[T]:
         unsafe { *(self as *const *const T) as &T }
 
 impl[T] Drop for Box[T]:
-    fn drop(move self: Self):
+    move fn drop():
         let ptr = self as *mut T
         let value = unsafe { *ptr }
         drop(value)

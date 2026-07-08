@@ -54,7 +54,7 @@ pub enum ControlFlow[B, C]:
 /// fast paths with the same semantics; user carriers provide both directions
 /// explicitly so early return can rebuild the enclosing carrier.
 pub trait Try[T, E]:
-    fn branch(move self: Self) -> ControlFlow[E, T]
+    move fn branch() -> ControlFlow[E, T]
     fn from_break(value: E) -> Self
 
 /// Safe dereference protocol for pointer-like user types. Field and method
@@ -99,8 +99,7 @@ pub trait Drop:
 /// across calls. During the bridge phase (P1..P11), `mut self: Self` and
 /// consuming `self` produce the same MIR; existing impls written either
 /// way continue to satisfy this trait.
-pub trait Iter[T]:    fn next(mut self:
-    Self) -> Option[T]
+pub trait Iter[T]:    mut fn next() -> Option[T]
 
 /// Membership test. Implement to enable `x in collection` and
 /// `x not in collection`.
@@ -115,7 +114,7 @@ pub trait Scoped[T]:    fn with_enter(self:
 /// Scoped mutable access protocol used by guarded `with ... as mut`.
 pub trait ScopedMut[T]:    fn with_enter_mut(self:
     &Self) -> T
-    fn with_exit_mut(mut self: Self, value: T) -> Unit
+    mut fn with_exit_mut(value: T) -> Unit
 
 // Core trait impls for primitive types
 
@@ -261,7 +260,7 @@ pub trait MultiIndex[O]:
 /// Mutable multi-dimensional indexing. Implement to enable `a[i, j] = value`
 /// and slice assignment syntax.
 pub trait MultiIndexMut[V]:
-    fn multi_index_set(mut self: Self, specs: &[IndexSpec], count: i32, value: V) -> Unit
+    mut fn multi_index_set(specs: &[IndexSpec], count: i32, value: V) -> Unit
 
 /// Single-axis read-only indexing (docs/mut.md Rev 8 §2.4).
 /// `P[i]` on an `IndexGet`-only type returns a value, not a place — the
@@ -280,7 +279,7 @@ pub trait IndexGet[I, V]:    fn get(self: &Self, index:
 /// evolve; the minimal operational shape is value-read + value-write.
 pub trait IndexPlace[I, V]:    fn get(self: &Self, index:
     I) -> V
-    fn set(mut self: Self, index: I, value: V)
+    mut fn set(index: I, value: V)
 
 // Vec, Array, and Slice have IndexPlace semantics via the compiler's
 // hardcoded place-projection machinery (PK_INDEX in MIR, GEP in codegen).

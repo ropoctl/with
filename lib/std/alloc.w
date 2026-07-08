@@ -208,7 +208,7 @@ pub fn FrameArena.reset(mut self: FrameArena) -> Unit:
     self.offset = 0
 
 impl Drop for Arena:
-    fn drop(move self: Self) -> Unit:
+    move fn drop() -> Unit:
         for raw in self.blocks:
             if raw != 0:
                 free_mem(raw as *i8)
@@ -219,7 +219,7 @@ impl Drop for Arena:
         self.capacity = 0
 
 impl Drop for FrameArena:
-    fn drop(move self: Self) -> Unit:
+    move fn drop() -> Unit:
         for raw in self.blocks:
             if raw != 0:
                 free_mem(raw as *i8)
@@ -251,7 +251,7 @@ pub fn ArenaScope.reset(mut self: ArenaScope) -> Unit:
     self.allocations = 0
 
 impl Drop for ArenaScope:
-    fn drop(move self: Self) -> Unit:
+    move fn drop() -> Unit:
         // The owned `arena` field drops transitively (Arena: Drop); an
         // explicit self.arena.drop() here would double-free it.
         ()
@@ -292,7 +292,7 @@ pub fn TempArena.reset(mut self: TempArena) -> Unit:
     self.allocations = Vec.new()
 
 impl Drop for TempArena:
-    fn drop(move self: Self) -> Unit:
+    move fn drop() -> Unit:
         self.reset()
 
 fn pool_effective_item_size(size: i32) -> i32:
@@ -333,7 +333,7 @@ pub fn Pool.free(mut self: Pool, ptr: *i8) -> Unit:
         self.free_list.push(ptr as i64)
 
 impl Drop for Pool:
-    fn drop(move self: Self) -> Unit:
+    move fn drop() -> Unit:
         for raw in self.slabs:
             if raw != 0:
                 free_mem(raw as *i8)
@@ -347,7 +347,7 @@ pub fn PoolAllocator.free(mut self: PoolAllocator, ptr: *i8) -> Unit:
     self.pool.free(ptr)
 
 impl Drop for PoolAllocator:
-    fn drop(move self: Self) -> Unit:
+    move fn drop() -> Unit:
         // The owned `pool` field drops transitively (Pool: Drop); an explicit
         // self.pool.drop() here would double-free it.
         ()

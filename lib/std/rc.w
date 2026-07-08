@@ -41,7 +41,7 @@ impl[T] Deref[T] for Rc[T]:
         self.as_ref()
 
 impl[T] Drop for Rc[T]:
-    fn drop(move self: Self):
+    move fn drop():
         let ptr = self.ptr as *mut RcControl
         let next = (unsafe *ptr).strong - 1
         (unsafe *ptr).strong = next
@@ -84,7 +84,7 @@ impl[T] Deref[T] for Arc[T]:
         self.as_ref()
 
 impl[T] Drop for Arc[T]:
-    fn drop(move self: Self):
+    move fn drop():
         let ptr = self.ptr as *mut RcControl
         let strong = &raw mut (unsafe *ptr).strong as *mut Atomic[i64]
         let old = (unsafe *strong).fetch_sub(1, .AcqRel)

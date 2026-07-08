@@ -184,7 +184,7 @@ impl[T] ScopedMut[&mut T] for MutexGuardMut[T]:
         let state = self.ptr as *mut MutexState
         unsafe { (unsafe *state).value as &mut T }
 
-    fn with_exit_mut(move self: Self, value: &mut T) -> Unit:
+    move fn with_exit_mut(value: &mut T) -> Unit:
         let _ = value
         let state = self.ptr as *mut MutexState
         let locked = (&raw mut (unsafe *state).locked as *mut i32) as *mut Atomic[i32]
@@ -208,7 +208,7 @@ pub fn Mutex.set[T](self: &Self, value: T) -> Unit:
     (unsafe *locked).store(0, .Release)
 
 impl[T] Drop for Mutex[T]:
-    fn drop(move self: Self):
+    move fn drop():
         let state = self.ptr as *mut MutexState
         let value_ptr = (unsafe *state).value as *mut T
         let value = unsafe *value_ptr
@@ -284,7 +284,7 @@ impl[T] ScopedMut[&mut T] for RwWriteGuard[T]:
         let state = self.ptr as *mut RwLockState
         unsafe { (unsafe *state).value as &mut T }
 
-    fn with_exit_mut(move self: Self, value: &mut T) -> Unit:
+    move fn with_exit_mut(value: &mut T) -> Unit:
         let _ = value
         let state = self.ptr as *mut RwLockState
         let word = (&raw mut (unsafe *state).state as *mut i32) as *mut Atomic[i32]
@@ -311,7 +311,7 @@ pub fn RwLock.write[T](self: &Self, value: T) -> Unit:
     (unsafe *word).store(0, .Release)
 
 impl[T] Drop for RwLock[T]:
-    fn drop(move self: Self):
+    move fn drop():
         let state = self.ptr as *mut RwLockState
         let value_ptr = (unsafe *state).value as *mut T
         let value = unsafe *value_ptr
@@ -347,7 +347,7 @@ pub fn Once.call_once(self: &Self, init: fn() -> Unit) -> Unit:
         sync_wait_for_progress()
 
 impl Drop for Once:
-    fn drop(move self: Self):
+    move fn drop():
         with_free(self.ptr)
 
 pub fn Condvar.new() -> Condvar:
@@ -388,7 +388,7 @@ pub fn Condvar.notify_all(self: &Self) -> Unit:
         let _ = (unsafe *signals).fetch_add(count, .Release)
 
 impl Drop for Condvar:
-    fn drop(move self: Self):
+    move fn drop():
         with_free(self.ptr)
 
 pub fn Barrier.new(parties: i32) -> Barrier:
@@ -422,7 +422,7 @@ pub fn Barrier.wait(self: &Self) -> bool:
     false
 
 impl Drop for Barrier:
-    fn drop(move self: Self):
+    move fn drop():
         with_free(self.ptr)
 
 /// Compatibility alias for old code; prefer `Atomic[i64]`.

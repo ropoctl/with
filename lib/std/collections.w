@@ -19,7 +19,7 @@ pub type Vec[T]  {
 /// Clone for Vec[T]: produces a deep copy by cloning each element.
 impl[T:
     Clone] Clone for Vec[T]:
-    fn clone(self: &Self) -> Self:
+    fn clone() -> Self:
         var out: Vec[T] = Vec.new()
         for item in *self:
             out.push(item.clone())
@@ -150,7 +150,7 @@ pub fn BTreeMap.items[K: Ord, V](self: &BTreeMap[K, V]) -> Vec[(K, V)]:
     out
 
 impl[K: Ord, V] IntoIter[(K, V)] for BTreeMap[K, V]:
-    fn iter(mut self: BTreeMap[K, V]) -> VecIter[(K, V)]:
+    mut fn iter() -> VecIter[(K, V)]:
         self.entries.iter()
 
 pub fn BTreeSet.new[T]() -> BTreeSet[T]:
@@ -263,7 +263,7 @@ pub fn BTreeSet.difference[T: Ord](self: &BTreeSet[T], other: &BTreeSet[T]) -> B
     out
 
 impl[T: Ord] IntoIter[T] for BTreeSet[T]:
-    fn iter(mut self: BTreeSet[T]) -> VecIter[T]:
+    mut fn iter() -> VecIter[T]:
         self.values.iter()
 
 /// Type-safe generational handle into a SlotMap[T].
@@ -397,8 +397,7 @@ type FlatMapIter[I, C, J, T, U] ephemeral {
     has_current: bool,
 }
 
-impl[T] Iter[T] for VecIter[T]:    fn next(mut self:
-    Self) -> Option[T]:
+impl[T] Iter[T] for VecIter[T]:    mut fn next() -> Option[T]:
         self.next()
 
 /// Index specification for multi-dimensional indexing.

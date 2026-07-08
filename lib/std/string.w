@@ -121,7 +121,7 @@ pub enum CStringError:
 pub type CString { ptr: *mut u8, len: i64 }
 
 impl Drop for CString:
-    fn drop(move self: Self):
+    move fn drop():
         with_free(self.ptr)
 
 /// Convert to an owned C string, rejecting an interior NUL loudly (§16.3c):
