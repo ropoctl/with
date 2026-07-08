@@ -281,7 +281,7 @@ fn Sema.string_literal_has_interior_nul(self: Sema, node: i32) -> i32:
         i = i + 1
     0
 
-fn Sema.can_auto_ref_arg(self: Sema, expected: i32, actual: i32) -> i32:
+fn Sema.can_auto_ref_arg(self: &Self, expected: i32, actual: i32) -> i32:
     if expected == 0 or actual == 0:
         return 0
     let expected_resolved = self.resolve_alias(expected as TypeId)
@@ -417,7 +417,7 @@ fn Sema.check_mut_slice_call_exclusivity(self: Sema, mut_args: Vec[i32], all_arg
 
 // ── Type expression resolution ───────────────────────────────────
 
-fn Sema.resolve_type_expr(self: Sema, node: i32) -> TypeId:
+fn Sema.resolve_type_expr(self: &Self, node: i32) -> TypeId:
     if node == 0:
         return 0 as TypeId
 
@@ -589,7 +589,7 @@ fn Sema.resolve_type_expr(self: Sema, node: i32) -> TypeId:
 
     0 as TypeId
 
-fn Sema.resolve_type_level_arg_expr(self: Sema, node: i32) -> i32:
+fn Sema.resolve_type_level_arg_expr(self: &Self, node: i32) -> i32:
     if node == 0:
         return 0
     let kind = self.ast.kind(node)
@@ -6325,7 +6325,7 @@ fn Sema.resolve_impl_trait_arg_for_source(self: Sema, impl_node: i32, source_ty:
             return target_actual
     self.resolve_type_node_with_subst(arg_node, source_ty, subst_names, subst_types)
 
-fn Sema.resolve_user_deref_info(self: Sema, source_ty: i32, node: i32) -> SemaDerefInfo:
+fn Sema.resolve_user_deref_info(self: &Self, source_ty: i32, node: i32) -> SemaDerefInfo:
     let deref_trait_name = "Deref"
     if source_ty == 0:
         return sema_deref_info_none()
@@ -8446,7 +8446,7 @@ fn Sema.optional_chain_wrap_result_for_error_type(self: Sema, raw_ret: i32, err_
                 return raw_ret
     self.ensure_result_type_for(raw_ret, err_ty)
 
-fn Sema.optional_chain_result_type(self: Sema, base: i32, member: i32) -> i32:
+fn Sema.optional_chain_result_type(self: &Self, base: i32, member: i32) -> i32:
     if base == 0:
         return base
     let payload = self.optional_chain_payload_type(base)
@@ -10249,7 +10249,7 @@ fn Sema.error_conversion_variant(self: Sema, target_err_ty: i32, source_err_ty: 
         return chain.variant_syms.get(0)
     -1
 
-fn Sema.enum_variant_payload_types(self: Sema, enum_tid: i32, variant_name: i32) -> Vec[i32]:
+fn Sema.enum_variant_payload_types(self: &Self, enum_tid: i32, variant_name: i32) -> Vec[i32]:
     var result: Vec[i32] = Vec.new()
     let bare_variant_name = self.unqualified_enum_variant_sym(variant_name)
     let resolved = self.resolve_alias(enum_tid)
@@ -10475,7 +10475,7 @@ fn Sema.qualified_enum_variant_sym(self: Sema, enum_tid: i32, variant_name: i32)
         return qual_sym
     bare_variant_name
 
-fn Sema.unqualified_enum_variant_sym(self: Sema, variant_name: i32) -> i32:
+fn Sema.unqualified_enum_variant_sym(self: &Self, variant_name: i32) -> i32:
     if variant_name == 0:
         return 0
     let text = self.pool_resolve(variant_name)
@@ -10484,7 +10484,7 @@ fn Sema.unqualified_enum_variant_sym(self: Sema, variant_name: i32) -> i32:
         if text.byte_at(i as i64) == 46:
             dot = i
     if dot >= 0 and dot + 1 < text.len() as i32:
-        return self.pool_intern(text.slice((dot + 1) as i64, text.len() as i64))
+        return self.pool_lookup_symbol(text.slice((dot + 1) as i64, text.len() as i64))
     variant_name
 
 fn Sema.pattern_subject_shape_type(self: Sema, subject_type: i32) -> i32:
@@ -12859,7 +12859,7 @@ fn Sema.check_expr_statement_context(self: Sema, node: i32) -> TypeId:
     self.has_expected_type = saved_has
     out
 
-fn Sema.enum_has_variant(self: Sema, enum_tid: i32, variant_sym: i32) -> i32:
+fn Sema.enum_has_variant(self: &Self, enum_tid: i32, variant_sym: i32) -> i32:
     let resolved = self.resolve_alias(enum_tid)
     let resolved_kind = self.get_type_kind(resolved)
     let bare_variant_sym = self.unqualified_enum_variant_sym(variant_sym)
@@ -13457,15 +13457,10 @@ fn Sema.resolve_generic_return_type_node(self: Sema, ret_node: i32, tp_start: i3
 fn Sema.selection_cache_key(self: Sema, type_sym: i32, trait_sym: i32) -> i64:
     sema_pair_key(type_sym, trait_sym)
 
-fn Sema.blanket_guard_contains(self: Sema, key: i64) -> i32:
-    var i = 0
-    while i < self.blanket_guard.len() as i32:
-        if self.blanket_guard.get(i as i64) == key:
-            return 1
-        i = i + 1
-    0
+fn Sema.blanket_guard_contains(self: &Self, key: i64) -> i32:
+    if self.blanket_guard.contains(key): 1 else: 0
 
-fn Sema.select_trait_impl(self: Sema, type_sym: i32, trait_sym: i32) -> i32:
+fn Sema.select_trait_impl(self: &Self, type_sym: i32, trait_sym: i32) -> i32:
     let key = self.selection_cache_key(type_sym, trait_sym)
     if self.selection_cache.contains(key):
         return self.selection_cache.get(key).unwrap()
@@ -13486,7 +13481,8 @@ fn Sema.select_trait_impl(self: Sema, type_sym: i32, trait_sym: i32) -> i32:
 
     // Check blanket impls: impl[T: Bound] Trait for T
     if found == 0:
-        self.blanket_guard.push(key)
+        var __bg_in = self.blanket_guard
+        __bg_in.insert(key)
         for bi in 0..self.blanket_trait_syms.len() as i32:
             if self.blanket_trait_syms.get(bi as i64) != trait_sym:
                 continue
@@ -13508,9 +13504,11 @@ fn Sema.select_trait_impl(self: Sema, type_sym: i32, trait_sym: i32) -> i32:
                     all_satisfied = 0
             if all_satisfied != 0:
                 found = 1
-        self.blanket_guard.pop()
+        var __bg_out = self.blanket_guard
+        let _ = __bg_out.remove(key)
 
-    self.selection_cache.insert(key, found)
+    var __sc = self.selection_cache
+    __sc.insert(key, found)
     found
 
 fn Sema.subst_vec_lookup(self: Sema, names: &Vec[i32], types: &Vec[i32], name: i32) -> i32:
@@ -13913,7 +13911,7 @@ fn Sema.type_symbol_for_bounds(self: Sema, tid: i32) -> i32:
         return self.pool_intern("str")
     0
 
-fn Sema.method_owner_symbol_for_type(self: Sema, tid: i32) -> i32:
+fn Sema.method_owner_symbol_for_type(self: &Self, tid: i32) -> i32:
     let resolved = self.resolve_alias(tid)
     if self.get_type_kind(resolved) == TypeKind.TY_GENERIC_INST:
         return self.get_generic_inst_base(resolved as i32)
@@ -17445,7 +17443,7 @@ fn Sema.type_reflection_field_name(self: Sema, tid: i32, field_index: i32) -> i3
                 return self.type_extra.get((te_start + field_index * 3) as i64)
     0
 
-fn Sema.type_reflection_field_type(self: Sema, tid: i32, field_index: i32) -> i32:
+fn Sema.type_reflection_field_type(self: &Self, tid: i32, field_index: i32) -> i32:
     let resolved = self.resolve_alias(tid)
     let tk = self.get_type_kind(resolved)
     if tk == TypeKind.TY_STRUCT:
@@ -19003,7 +19001,7 @@ fn Sema.type_is_ephemeral_value(self: Sema, tid: i32) -> i32:
 
 // ── Helper functions ─────────────────────────────────────────────
 
-fn Sema.infer_for_element_type(self: Sema, iter_type: i32) -> i32:
+fn Sema.infer_for_element_type(self: &Self, iter_type: i32) -> i32:
     if iter_type == 0:
         return 0
     let resolved = self.resolve_alias(iter_type as TypeId)
@@ -19143,7 +19141,7 @@ fn Sema.reject_returned_drop_field_move(self: Sema, expr: i32):
     if field_ty != 0 and self.is_copy(field_ty as TypeId) == 0 and self.type_needs_drop(field_ty) != 0:
         self.mark_field_moved(expr)
 
-fn Sema.drop_owner_for_fn_symbol(self: Sema, fn_sym: i32) -> i32:
+fn Sema.drop_owner_for_fn_symbol(self: &Self, fn_sym: i32) -> i32:
     let text = self.pool_resolve(fn_sym)
     if text.len() == 0:
         return 0
@@ -19154,7 +19152,7 @@ fn Sema.drop_owner_for_fn_symbol(self: Sema, fn_sym: i32) -> i32:
     if method != "drop":
         return 0
     let owner_text = text.slice(0, dot as i64)
-    let owner_sym = self.pool_intern(owner_text)
+    let owner_sym = self.pool_lookup_symbol(owner_text)
     if owner_sym != 0 and self.has_drop_method(owner_sym) != 0:
         return owner_sym
     0

@@ -520,7 +520,11 @@ type Sema {
     obligation_nodes: Vec[i32],
     selection_cache: HashMap[i64, i32],
     // Blanket impl recursion guard: keys currently being resolved
-    blanket_guard: Vec[i64],
+    // Cycle-detection guard for select_trait_impl. A HashSet (heap handle), not a
+    // Vec, so it can be mutated through a copied handle from a `&Self` query method
+    // (D7: query methods are read; the guard is interior bookkeeping). See
+    // project_enforce_receiver_modes.
+    blanket_guard: HashSet[i64],
 
     // Local trait/type names
     local_trait_names: HashMap[i32, i32],
@@ -585,8 +589,11 @@ type Sema {
     method_symbol_flags: HashMap[i32, i32],
     method_lookup: SemaMethodLookup,
     drop_method_cache: HashMap[i32, i32],
-    copy_visit_stack: Vec[i32],
-    needs_drop_visit: Vec[i32],
+    // is_copy cycle guard — HashSet (heap handle) so is_copy can be `&Self` and
+    // mutate it through a copied handle (D7 interior-mutability recipe).
+    copy_visit_stack: HashSet[i32],
+    // type_needs_drop cycle guard — HashSet (heap handle) for `&Self` interior mut.
+    needs_drop_visit: HashSet[i32],
     current_drop_type_sym: i32,
     drop_control_flow_depth: i32,
     move_control_flow_depth: i32,
@@ -1550,7 +1557,7 @@ fn sema_empty_state(pool: InternPool, diags: DiagnosticList, ast: AstPool) -> Se
         obligation_type_syms: Vec.new(),
         obligation_nodes: Vec.new(),
         selection_cache,
-        blanket_guard: Vec.new(),
+        blanket_guard: HashSet.new(),
         local_trait_names,
         lang_trait_syms,
         local_type_names,
@@ -1599,8 +1606,8 @@ fn sema_empty_state(pool: InternPool, diags: DiagnosticList, ast: AstPool) -> Se
         method_symbol_flags,
         method_lookup,
         drop_method_cache,
-        copy_visit_stack: Vec.new(),
-        needs_drop_visit: Vec.new(),
+        copy_visit_stack: HashSet.new(),
+        needs_drop_visit: HashSet.new(),
         current_drop_type_sym: 0,
         drop_control_flow_depth: 0,
         move_control_flow_depth: 0,
@@ -3277,7 +3284,7 @@ fn Sema.type_allows_null_literal(self: Sema, tid: TypeId) -> i32:
         return 1
     0
 
-fn Sema.try_unwrapped_type(self: Sema, tid: i32) -> i32:
+fn Sema.try_unwrapped_type(self: &Self, tid: i32) -> i32:
     if tid <= 0:
         return 0
     let ok_payloads = self.enum_variant_payload_types(tid, self.syms.ok)
@@ -3399,7 +3406,7 @@ fn Sema.get_type_d2(self: Sema, tid: TypeId) -> i32:
         return 0
     self.type_d2.get(tid as i64)
 
-fn Sema.resolve_alias(self: Sema, tid: TypeId) -> TypeId:
+fn Sema.resolve_alias(self: &Self, tid: TypeId) -> TypeId:
     var current = tid
     for depth in 0..32:
         if self.get_type_kind(current) == TypeKind.TY_ALIAS:
@@ -4265,7 +4272,7 @@ fn Sema.type_has_drop_impl(self: Sema, tid: i32) -> i32:
 // construction and drop emission for the contents). Pointers/refs and primitives
 // stop the recursion, so by-value type graphs (which are acyclic) terminate; the
 // visit guard is defensive insurance against an unexpected cycle.
-fn Sema.type_needs_drop(self: Sema, tid: i32) -> i32:
+fn Sema.type_needs_drop(self: &Self, tid: i32) -> i32:
     if tid == 0:
         return 0
     let resolved = self.resolve_alias(tid as TypeId)
@@ -4282,10 +4289,10 @@ fn Sema.type_needs_drop(self: Sema, tid: i32) -> i32:
         let base_name = self.pool_resolve(base_sym)
         if base_name == "Sender" or base_name == "Receiver":
             return 1
-    for vi in 0..self.needs_drop_visit.len() as i32:
-        if self.needs_drop_visit.get(vi as i64) == resolved as i32:
-            return 0
-    self.needs_drop_visit.push(resolved as i32)
+    if self.needs_drop_visit.contains(resolved as i32):
+        return 0
+    var __ndv_in = self.needs_drop_visit
+    __ndv_in.insert(resolved as i32)
     var result = 0
     if tk == TypeKind.TY_TUPLE:
         let te_start = self.get_type_d0(resolved)
@@ -4312,7 +4319,8 @@ fn Sema.type_needs_drop(self: Sema, tid: i32) -> i32:
                         result = 1
                         break
                 vidx = vidx + 1
-    self.needs_drop_visit.pop()
+    var __ndv_out = self.needs_drop_visit
+    let _ = __ndv_out.remove(resolved as i32)
     result
 
 fn Sema.emit_implicit_drop_view_use_error(self: Sema, view_sym: i32, origin_sym: i32, origin_node: i32):
@@ -5206,7 +5214,7 @@ fn Sema.types_compatible_fast(self: Sema, expected: TypeId, actual: TypeId) -> i
         return 0
     0
 
-fn Sema.types_compatible(self: Sema, expected: TypeId, actual: TypeId) -> i32:
+fn Sema.types_compatible(self: &Self, expected: TypeId, actual: TypeId) -> i32:
     if self.types_compatible_fast(expected, actual) != 0:
         return 1
 
@@ -5382,7 +5390,7 @@ fn Sema.bitwise_result_type(self: Sema, lhs: TypeId, rhs: TypeId) -> TypeId:
         return lhs_numeric as TypeId
     rhs_numeric as TypeId
 
-fn Sema.is_copy(self: Sema, tid: TypeId) -> i32:
+fn Sema.is_copy(self: &Self, tid: TypeId) -> i32:
     if tid == 0:
         return 1
     let resolved = self.resolve_alias(tid)
@@ -5402,10 +5410,10 @@ fn Sema.is_copy(self: Sema, tid: TypeId) -> i32:
         return 0
     if tk == TypeKind.TY_ARRAY or tk == TypeKind.TY_TUPLE or tk == TypeKind.TY_RANGE:
         // Break copy-check recursion on cyclic type graphs.
-        for vi in 0..self.copy_visit_stack.len() as i32:
-            if self.copy_visit_stack.get(vi as i64) == resolved as i32:
-                return 0
-        self.copy_visit_stack.push(resolved as i32)
+        if self.copy_visit_stack.contains(resolved as i32):
+            return 0
+        var __cvs_in = self.copy_visit_stack
+        __cvs_in.insert(resolved as i32)
 
         var out = 1
         if tk == TypeKind.TY_ARRAY:
@@ -5420,7 +5428,8 @@ fn Sema.is_copy(self: Sema, tid: TypeId) -> i32:
         else: // TypeKind.TY_RANGE
             out = self.is_copy(self.get_type_d0(resolved))
 
-        self.copy_visit_stack.pop()
+        var __cvs_out = self.copy_visit_stack
+        let _ = __cvs_out.remove(resolved as i32)
         return out
     if tk == TypeKind.TY_ENUM:
         // Enums are non-Copy by default; opt-in via `impl Copy for T`.
@@ -5448,14 +5457,15 @@ fn Sema.is_copy(self: Sema, tid: TypeId) -> i32:
         return self.select_trait_impl_for_generic_inst(resolved as i32, self.syms.copy_trait)
     1
 
-fn Sema.has_drop_method(self: Sema, type_name: i32) -> i32:
+fn Sema.has_drop_method(self: &Self, type_name: i32) -> i32:
     if type_name <= 0:
         return 0
     if self.drop_method_cache.contains(type_name):
         return self.drop_method_cache.get(type_name).unwrap()
 
     let has = self.select_trait_impl(type_name, self.syms.drop)
-    self.drop_method_cache.insert(type_name, has)
+    var __dc = self.drop_method_cache
+    __dc.insert(type_name, has)
     has
 
 fn Sema.record_drop_consumed_field(self: Sema, owner_sym: i32, field_sym: i32):
