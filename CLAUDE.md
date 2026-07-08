@@ -403,7 +403,7 @@ With. With IS a scripting language; there is no "just a quick script" exception.
   the program, and may sit alongside helper `fn` definitions:
   ```
   use std.process
-  fn shout(s: str) -> str: s ++ "!"
+  fn shout(s: str): s ++ "!"        // return type inferred
   let argv = args()                      // std.process
   for i in 1..argv.len() as i32: print(shout(argv.get(i as i64)))
   ```
@@ -564,6 +564,22 @@ Read relevant source files. Confirm AST layouts. Verify naming
 conventions. When you can't find something, grep `examples/`,
 `src/`, and `docs/with-specification.md` before assuming it
 doesn't exist. Never rely on memory.
+
+### Code style — write the least ceremony
+
+Match the surrounding code, and follow the mission at the character level:
+
+- **Don't spell types the compiler can infer.** Omit a return type when the body
+  makes it obvious (`fn shout(s: str): s ++ "!"`, not `-> str`); omit a
+  local's type when the initializer gives it. Annotate only where inference
+  genuinely needs it (e.g. `var xs: Vec[i32] = Vec.new()`).
+- **Inline the colon when the body is very small.** `fn millis(ms: i32): ms`
+  and `fn get(): self.n` on one line — do NOT break a one-token/one-expression
+  body onto its own indented line. Use a block body only when the body is
+  actually multi-statement or long.
+- **Boy-scout the style: any time you touch an existing function, fix its style
+  too** — drop inferable types, inline tiny bodies. Leave the whole function
+  least-ceremony, not just the lines you came to change.
 
 ### One logical change at a time
 

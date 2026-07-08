@@ -348,7 +348,7 @@ violation as C in the compiler. Delete it and rewrite it in With. There is no
   program and may sit alongside helper `fn` definitions:
   ```
   use std.process
-  fn shout(s: str) -> str: s ++ "!"
+  fn shout(s: str): s ++ "!"        // return type inferred
   let argv = args()
   for i in 1..argv.len() as i32: print(shout(argv.get(i as i64)))
   ```
@@ -589,6 +589,19 @@ its retention policy: it is a short-lived checkpoint, not a history log.
 Prune stale completed entries while updating it, prefer GitHub issues
 for follow-ups and real docs/specs for durable design facts, and keep
 it concise.
+
+### Code style — write the least ceremony
+
+- **Don't spell types the compiler can infer.** Omit a return type when the body
+  makes it obvious (`fn shout(s: str): s ++ "!"`, not `-> str`); omit a local's
+  type when the initializer gives it. Annotate only where inference needs it
+  (e.g. `var xs: Vec[i32] = Vec.new()`).
+- **Inline the colon when the body is very small.** `fn millis(ms: i32): ms`,
+  `fn get(): self.n` on one line — never break a one-expression body onto its
+  own indented line. Block bodies are for genuinely multi-statement/long bodies.
+- **Boy-scout the style: any time you touch an existing function, fix its style
+  too** — drop inferable types, inline tiny bodies. Leave the whole function
+  least-ceremony, not just the lines you changed.
 
 ### One logical change at a time
 
