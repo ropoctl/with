@@ -399,6 +399,15 @@ With. With IS a scripting language; there is no "just a quick script" exception.
     stdin line with `line` bound (grep-like)
   - `... | with -p 'line = line ++ "!"'` — per-line transform, auto-printed
     (sed-like)
+- **Never `sed`/`awk`/`cut`/`perl` for text transforms — use a `with` one-liner.**
+  If a transform is genuinely impossible as a one-liner, that is a BUG to file, not
+  a reason to reach for sed.
+  - `sed 's/old/new/'`  →  `... | with -p 'line = line.replace("old", "new")'`
+  - `grep pat`          →  `... | with -n 'if line.contains("pat"): print(line)'`
+    (also `.starts_with`/`.ends_with`)
+  - `cut -f2`           →  `... | with -n 'print(line.split("\t").get(1))'`
+  - complex regex       →  `use std.regex` in a `with run tool.w` script
+    (`Regex.replace(text, repl)`); prefer str `slice`/`split`/`replace` first.
 - **Implicit main** — a `.w` file needs no `fn main`; top-level statements ARE
   the program, and may sit alongside helper `fn` definitions:
   ```

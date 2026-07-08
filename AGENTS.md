@@ -344,6 +344,11 @@ violation as C in the compiler. Delete it and rewrite it in With. There is no
     `line` bound (grep-like)
   - `... | with -p 'line = line ++ "!"'` — per-line transform, auto-printed
     (sed-like)
+- **No `sed`/`awk`/`cut`/`perl` for text transforms — use a `with` one-liner** (if
+  impossible as a one-liner, FILE A BUG): `sed 's/a/b/'` → `with -p 'line =
+  line.replace("a","b")'`; `grep pat` → `with -n 'if line.contains("pat"):
+  print(line)'`; `cut -f2` → `with -n 'print(line.split("\t").get(1))'`; complex
+  regex → `use std.regex` (`Regex.replace`) in a `with run` script.
 - **Implicit main** — a `.w` file needs no `fn main`; top-level statements are the
   program and may sit alongside helper `fn` definitions:
   ```
