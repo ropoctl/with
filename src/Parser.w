@@ -2857,7 +2857,7 @@ fn Parser.parse_trait_decl(self: Parser, vis: i32):
     var assoc_default_types: Vec[i32] = Vec.new()
     var assoc_bounds_flat: Vec[i32] = Vec.new()
 
-    while self.peek() == TokenKind.TK_KW_FN or self.peek() == TokenKind.TK_KW_PUB or self.peek() == TokenKind.TK_KW_TYPE or self.peek() == TokenKind.TK_KW_ASYNC or (trait_braced and self.peek() == TokenKind.TK_R_BRACE):
+    while self.peek() == TokenKind.TK_KW_FN or self.peek() == TokenKind.TK_KW_PUB or self.peek() == TokenKind.TK_KW_TYPE or self.peek() == TokenKind.TK_KW_ASYNC or self.peek() == TokenKind.TK_KW_MUT or self.peek() == TokenKind.TK_KW_MOVE or (trait_braced and self.peek() == TokenKind.TK_R_BRACE):
         if trait_braced and self.peek() == TokenKind.TK_R_BRACE:
             break
         if not trait_braced:
@@ -2901,11 +2901,23 @@ fn Parser.parse_trait_decl(self: Parser, vis: i32):
         if self.peek() == TokenKind.TK_KW_ASYNC:
             is_async_method = 1
             self.advance()
+        // D7: a `mut fn`/`move fn` trait method synthesizes its receiver, exactly
+        // like a trait impl. Plain `fn` stays explicit — a trait also declares
+        // static methods (`from()`, `default()`), so there is no read-borrow
+        // default here (same reason as trait impls).
+        var m_recv_mode = 0
+        if self.peek() == TokenKind.TK_KW_MUT:
+            m_recv_mode = 2
+            self.advance()
+        else if self.peek() == TokenKind.TK_KW_MOVE:
+            m_recv_mode = 3
+            self.advance()
         if self.expect(TokenKind.TK_KW_FN) == 0:
             break
         let mname = self.expect_ident_or_keyword()
         let m_tp_count = self.parse_type_params()
 
+        self.pending_receiver_mode = m_recv_mode
         var params_start = 0
         var param_count = 0
         if self.peek() == TokenKind.TK_L_PAREN:
@@ -2914,6 +2926,10 @@ fn Parser.parse_trait_decl(self: Parser, vis: i32):
             if param_count > 0:
                 params_start = self.pool.extra_len() - param_count * FN_PARAM_STRIDE
             self.expect(TokenKind.TK_R_PAREN)
+        else if self.pending_receiver_mode != 0:
+            param_count = self.flush_receiver_only_param()
+            if param_count > 0:
+                params_start = self.pool.extra_len() - param_count * FN_PARAM_STRIDE
 
         var ret_type: NodeId = 0 as NodeId
         if self.peek() == TokenKind.TK_ARROW:
