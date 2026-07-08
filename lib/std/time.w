@@ -11,26 +11,18 @@ extern fn with_usleep(usecs: i32) -> i32
 /// A duration in milliseconds.
 type Duration = i32
 
-extend Duration:
-    /// Create a Duration from milliseconds.
-    fn millis(ms: i32) -> Duration:
-        ms
-
-    /// Create a Duration from milliseconds.
-    fn from_millis(ms: i32) -> Duration:
-        ms
-
-    /// Create a Duration from seconds.
-    fn seconds(secs: i32) -> Duration:
-        secs * 1000
-
-    /// Create a Duration from seconds.
-    fn from_secs(secs: i32) -> Duration:
-        secs * 1000
-
-    /// Create a Duration from minutes.
-    fn minutes(mins: i32) -> Duration:
-        mins * 60 * 1000
+// Duration constructors are associated functions (no receiver), so under the D7
+// location rule they live at top level (`fn Duration.name`), not in a block.
+/// Create a Duration from milliseconds.
+fn Duration.millis(ms: i32): ms
+/// Create a Duration from milliseconds.
+fn Duration.from_millis(ms: i32): ms
+/// Create a Duration from seconds.
+fn Duration.seconds(secs: i32): secs * 1000
+/// Create a Duration from seconds.
+fn Duration.from_secs(secs: i32): secs * 1000
+/// Create a Duration from minutes.
+fn Duration.minutes(mins: i32): mins * 60 * 1000
 
 /// Get current time in seconds since Unix epoch.
 pub fn now -> i64:

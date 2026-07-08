@@ -3158,7 +3158,14 @@ fn Parser.parse_impl_block(self: Parser, vis: i32):
         var m_params_start = 0
         var param_count = 0
         var required_param_count = 0
-        self.pending_receiver_mode = m_recv_mode
+        // D7 P2: a plain `fn` inside an INHERENT impl / `extend` is a read-borrow
+        // instance method (`self: &Self`); `mut fn`/`move fn` set their own mode.
+        // In a TRAIT impl (`impl Trait for T`), the trait dictates each method's
+        // receiver — including static trait methods like `default()`/`from()` that
+        // take none — so plain `fn` there is left explicit (no read default);
+        // only the `mut`/`move` keyword forms synthesize. The receiver is skipped
+        // when an explicit `self` is already written (checked in parse_param_list).
+        self.pending_receiver_mode = if m_recv_mode != 0: m_recv_mode else if trait_name == 0: 1 else: 0
         if self.peek() == TokenKind.TK_L_PAREN:
             self.advance()
             param_count = self.parse_param_list()
@@ -7576,19 +7583,32 @@ fn Parser.parse_param_list(self: Parser) -> i32:
     self.last_param_pattern_count = 0
     self.last_param_required_count = 0
 
-    // D7: a pending receiver mode (`mut fn`/`move fn`/read) synthesizes `self`
-    // as param 0, before any comptime-with capabilities.
+    // D7: a pending receiver mode synthesizes `self` as param 0 (before any
+    // comptime-with capabilities) — UNLESS the method already writes an explicit
+    // `self` param (the transition form), in which case parse it normally.
     if self.pending_receiver_mode != 0:
-        let rmode = self.pending_receiver_mode
-        self.pending_receiver_mode = 0
-        let rflags = self.build_synth_receiver(rmode)
-        params.push(self.intern.intern("self"))
-        params.push(self.synth_recv_type)
-        params.push(rflags)
-        default_nodes.push(0)
-        self.pool.add_fn_param_pattern_value(0 as NodeId)
-        pattern_count = pattern_count + 1
-        required_count = required_count + 1
+        var pk = self.pos
+        while pk < self.tokens.len() and self.tokens.get_tag(pk) == TokenKind.TK_NEWLINE:
+            pk = pk + 1
+        if pk < self.tokens.len() and (self.tokens.get_tag(pk) == TokenKind.TK_KW_MUT or self.tokens.get_tag(pk) == TokenKind.TK_KW_MOVE):
+            pk = pk + 1
+        var has_explicit_self = false
+        if pk < self.tokens.len() and self.tokens.get_tag(pk) == TokenKind.TK_IDENT:
+            if self.source.slice(self.tokens.get_start(pk) as i64, self.tokens.get_end(pk) as i64) == "self":
+                has_explicit_self = true
+        if has_explicit_self:
+            self.pending_receiver_mode = 0
+        else:
+            let rmode = self.pending_receiver_mode
+            self.pending_receiver_mode = 0
+            let rflags = self.build_synth_receiver(rmode)
+            params.push(self.intern.intern("self"))
+            params.push(self.synth_recv_type)
+            params.push(rflags)
+            default_nodes.push(0)
+            self.pool.add_fn_param_pattern_value(0 as NodeId)
+            pattern_count = pattern_count + 1
+            required_count = required_count + 1
 
     let pending_count = self.pending_comptime_with_names.len() as i32
     for ci in 0..pending_count:
