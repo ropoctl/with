@@ -1520,13 +1520,13 @@ fn CCodegen.place_ref_target_tid(self: CCodegen, body: &MirBody, place_id: i32) 
                     tid = self.sema.ty_i64 as i32
                     continue
                 if field_name == "ptr":
-                    tid = self.sema.ensure_exact_type(TypeKind.TY_PTR, self.sema.ty_i8 as i32, 0, 0) as i32
+                    tid = self.sema.find_exact_type(TypeKind.TY_PTR, self.sema.ty_i8 as i32, 0, 0) as i32
                     continue
                 return 0
             return 0
         if pk == ProjKind.PK_INDEX:
             if tk == TypeKind.TY_STR:
-                return self.sema.ensure_exact_type(TypeKind.TY_PTR, self.sema.ty_i8 as i32, 0, 0) as i32
+                return self.sema.find_exact_type(TypeKind.TY_PTR, self.sema.ty_i8 as i32, 0, 0) as i32
             if tk == TypeKind.TY_ARRAY or tk == TypeKind.TY_SLICE:
                 tid = self.sema.get_type_d0(resolved)
                 continue
@@ -1847,7 +1847,7 @@ fn CCodegen.vec_synthetic_field_tid(self: CCodegen, vec_tid: i32, field_sym: i32
     let mut_ptr = self.sema.find_exact_type(TypeKind.TY_PTR, elem_tid, 1, 0) as i32
     if mut_ptr != 0:
         return mut_ptr
-    self.sema.ensure_exact_type(TypeKind.TY_PTR, elem_tid, 0, 0) as i32
+    self.sema.find_exact_type(TypeKind.TY_PTR, elem_tid, 0, 0) as i32
 
 fn CCodegen.vec_new_elem_size_text(self: CCodegen, body: &MirBody, dest_place: i32) -> str:
     var vec_tid = self.place_tid_no_infer(body, dest_place)
@@ -2937,7 +2937,7 @@ fn CCodegen.rvalue_tid(self: CCodegen, body: &MirBody, rval_id: i32) -> i32:
         let resolved = self.sema.resolve_alias(base_tid)
         let tk = self.sema.get_type_kind(resolved)
         if tk == TypeKind.TY_ARRAY:
-            return self.sema.ensure_exact_type(TypeKind.TY_SLICE, self.sema.get_type_d0(resolved), 0, 0) as i32
+            return self.sema.find_exact_type(TypeKind.TY_SLICE, self.sema.get_type_d0(resolved), 0, 0) as i32
         if tk == TypeKind.TY_SLICE:
             return resolved as i32
         return 0
@@ -5345,7 +5345,7 @@ fn CCodegen.infer_local_tid_impl(self: CCodegen, body: &MirBody, local_id: i32) 
                 let base_resolved = self.sema.resolve_alias(base_tid)
                 let base_kind = self.sema.get_type_kind(base_resolved)
                 if base_kind == TypeKind.TY_ARRAY:
-                    return self.sema.ensure_exact_type(TypeKind.TY_SLICE, self.sema.get_type_d0(base_resolved), 0, 0) as i32
+                    return self.sema.find_exact_type(TypeKind.TY_SLICE, self.sema.get_type_d0(base_resolved), 0, 0) as i32
                 if base_kind == TypeKind.TY_SLICE:
                     return base_resolved as i32
 

@@ -2701,7 +2701,7 @@ fn Sema.type_extra_matches(self: Sema, extra_start: i32, values: &Vec[i32], coun
             return 0
     1
 
-fn Sema.find_exact_type(self: Sema, kind: i32, d0: i32, d1: i32, d2: i32) -> TypeId:
+fn Sema.find_exact_type(self: &Self, kind: i32, d0: i32, d1: i32, d2: i32) -> TypeId:
     let type_count = self.type_kinds.len() as i32
     for ti in 0..type_count:
         if self.type_kinds.get(ti as i64) != kind:

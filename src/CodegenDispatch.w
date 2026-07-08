@@ -98,7 +98,7 @@ fn Codegen.mir_type_to_live_sema_type(self: Codegen, sema_ty: i32) -> i32:
         if bits == 32: return if signed != 0: self.sema.ty_i32 as i32 else: self.sema.ty_u32 as i32
         if bits == 64: return if signed != 0: self.sema.ty_i64 as i32 else: self.sema.ty_u64 as i32
         if bits == 128: return if signed != 0: self.sema.ty_i128 as i32 else: self.sema.ty_u128 as i32
-        return self.sema.ensure_exact_type(TypeKind.TY_INT, bits, signed, ptr_width) as i32
+        return self.sema.find_exact_type(TypeKind.TY_INT, bits, signed, ptr_width) as i32
     if tk == TypeKind.TY_FLOAT:
         return if self.mir_input.mir_get_type_d0(resolved) == 32: self.sema.ty_f32 as i32 else: self.sema.ty_f64 as i32
     if tk == TypeKind.TY_BOOL:
@@ -121,22 +121,22 @@ fn Codegen.mir_type_to_live_sema_type(self: Codegen, sema_ty: i32) -> i32:
         let inner = self.mir_type_to_live_sema_type(self.mir_input.mir_get_type_d0(resolved))
         if inner == 0:
             return 0
-        return self.sema.ensure_exact_type(tk, inner, self.mir_input.mir_get_type_d1(resolved), self.mir_input.mir_get_type_d2(resolved)) as i32
+        return self.sema.find_exact_type(tk, inner, self.mir_input.mir_get_type_d1(resolved), self.mir_input.mir_get_type_d2(resolved)) as i32
     if tk == TypeKind.TY_ARRAY:
         let elem = self.mir_type_to_live_sema_type(self.mir_input.mir_get_type_d0(resolved))
         if elem == 0:
             return 0
-        return self.sema.ensure_exact_type(TypeKind.TY_ARRAY, elem, self.mir_input.mir_get_type_d1(resolved), self.mir_input.mir_get_type_d2(resolved)) as i32
+        return self.sema.find_exact_type(TypeKind.TY_ARRAY, elem, self.mir_input.mir_get_type_d1(resolved), self.mir_input.mir_get_type_d2(resolved)) as i32
     if tk == TypeKind.TY_SLICE:
         let elem2 = self.mir_type_to_live_sema_type(self.mir_input.mir_get_type_d0(resolved))
         if elem2 == 0:
             return 0
-        return self.sema.ensure_exact_type(TypeKind.TY_SLICE, elem2, self.mir_input.mir_get_type_d1(resolved), self.mir_input.mir_get_type_d2(resolved)) as i32
+        return self.sema.find_exact_type(TypeKind.TY_SLICE, elem2, self.mir_input.mir_get_type_d1(resolved), self.mir_input.mir_get_type_d2(resolved)) as i32
     if tk == TypeKind.TY_RANGE:
         let elem3 = self.mir_type_to_live_sema_type(self.mir_input.mir_get_type_d0(resolved))
         if elem3 == 0:
             return 0
-        return self.sema.ensure_exact_type(TypeKind.TY_RANGE, elem3, self.mir_input.mir_get_type_d1(resolved), self.mir_input.mir_get_type_d2(resolved)) as i32
+        return self.sema.find_exact_type(TypeKind.TY_RANGE, elem3, self.mir_input.mir_get_type_d1(resolved), self.mir_input.mir_get_type_d2(resolved)) as i32
     if tk == TypeKind.TY_TUPLE:
         let start = self.mir_input.mir_get_type_d0(resolved)
         let count = self.mir_input.mir_get_type_d1(resolved)
@@ -10569,7 +10569,7 @@ fn Codegen.mir_iter_elem_tid(self: Codegen, iter_sema: i32) -> i32:
         return self.mir_generic_arg_tid(iter_sema, 0)
     if name == "VecIterRef":
         let elem_tid = self.mir_generic_arg_tid(iter_sema, 0)
-        return self.sema.ensure_exact_type(TypeKind.TY_REF, elem_tid, 0, 0) as i32
+        return self.sema.find_exact_type(TypeKind.TY_REF, elem_tid, 0, 0) as i32
     if name == "MapIter":
         return self.mir_generic_arg_tid(iter_sema, 2)
     if name == "FilterMapIter":

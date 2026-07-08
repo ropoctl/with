@@ -1958,7 +1958,7 @@ fn MirBuilder.fallback_expr_type(self: MirBuilder, node: i32) -> i32:
             let resolved = self.sema.resolve_alias(base_ty as TypeId)
             let tk = self.sema.get_type_kind(resolved)
             if tk == TypeKind.TY_ARRAY:
-                return self.sema.ensure_exact_type(TypeKind.TY_SLICE, self.sema.get_type_d0(resolved), 0, 0) as i32
+                return self.sema.find_exact_type(TypeKind.TY_SLICE, self.sema.get_type_d0(resolved), 0, 0) as i32
             if tk == TypeKind.TY_SLICE:
                 return resolved as i32
         return self.sema.ty_void as i32
@@ -2564,7 +2564,7 @@ fn MirBuilder.regex_captures_option_type(self: MirBuilder) -> i32:
 
 fn MirBuilder.regex_ref_operand(self: MirBuilder, regex_place: i32) -> i32:
     let regex_ty = self.sema.lookup_named_type_visible(self.sema.syms.regex)
-    let regex_ref_ty = self.sema.ensure_exact_type(TypeKind.TY_REF, regex_ty, 0, 0) as i32
+    let regex_ref_ty = self.sema.find_exact_type(TypeKind.TY_REF, regex_ty, 0, 0) as i32
     let regex_ref_tmp = self.new_temp(regex_ref_ty)
     let regex_ref_place = self.place_for_local(regex_ref_tmp)
     let regex_ref_rv = self.body.new_rvalue(RvalueKind.RK_REF, BorrowKind.SHARED, regex_place, 0)
@@ -2573,7 +2573,7 @@ fn MirBuilder.regex_ref_operand(self: MirBuilder, regex_place: i32) -> i32:
 
 fn MirBuilder.captures_ref_operand(self: MirBuilder, captures_place: i32) -> i32:
     let captures_ty = self.regex_captures_type()
-    let captures_ref_ty = self.sema.ensure_exact_type(TypeKind.TY_REF, captures_ty, 0, 0) as i32
+    let captures_ref_ty = self.sema.find_exact_type(TypeKind.TY_REF, captures_ty, 0, 0) as i32
     let captures_ref_tmp = self.new_temp(captures_ref_ty)
     let captures_ref_place = self.place_for_local(captures_ref_tmp)
     let captures_ref_rv = self.body.new_rvalue(RvalueKind.RK_REF, BorrowKind.SHARED, captures_place, 0)
@@ -4254,14 +4254,14 @@ fn MirBuilder.lower_field_access(self: MirBuilder, node: i32) -> i32:
     self.new_projected_field_place(base, field_idx, field_ty)
 
 fn MirBuilder.lower_user_deref_result_place(self: MirBuilder, place: i32, current_ty: i32, deref_info: SemaDerefInfo, node: i32) -> i32:
-    let result_ref_ty = if deref_info.target_ty != 0: self.sema.ensure_exact_type(TypeKind.TY_REF, deref_info.target_ty, 0, 0) as i32 else: deref_info.result_ref_ty
+    let result_ref_ty = if deref_info.target_ty != 0: self.sema.find_exact_type(TypeKind.TY_REF, deref_info.target_ty, 0, 0) as i32 else: deref_info.result_ref_ty
     var recv_ref_ty = 0
     if self.sema.generic_fn_node_for_symbol(deref_info.deref_fn) == 0:
         let sig_idx = self.sema.get_sig(deref_info.deref_fn)
         if sig_idx >= 0 and self.sema.sig_get_param_count(sig_idx) > 0:
             recv_ref_ty = self.sema.sig_param_type(sig_idx, 0)
     if recv_ref_ty == 0:
-        recv_ref_ty = self.sema.ensure_exact_type(TypeKind.TY_REF, current_ty, 0, 0) as i32
+        recv_ref_ty = self.sema.find_exact_type(TypeKind.TY_REF, current_ty, 0, 0) as i32
     let rv = self.body.new_rvalue(RvalueKind.RK_REF, BorrowKind.SHARED, place, 0)
     let recv_tmp = self.new_temp(recv_ref_ty)
     let recv_place = self.place_for_local(recv_tmp)
@@ -6585,7 +6585,7 @@ fn MirBuilder.lower_for_iter_ref(self: MirBuilder, for_node: i32, pat_or_sym: i3
     var ref_elem_ty = 0
     if self.sema.get_type_kind(resolved_vec) == TypeKind.TY_GENERIC_INST:
         let inner_ty = self.sema.get_generic_inst_arg(resolved_vec as i32, 0)
-        ref_elem_ty = self.sema.ensure_exact_type(TypeKind.TY_REF, inner_ty, 0, 0) as i32
+        ref_elem_ty = self.sema.find_exact_type(TypeKind.TY_REF, inner_ty, 0, 0) as i32
     if ref_elem_ty == 0:
         ref_elem_ty = self.sema.ty_i32 as i32
     let len_local = self.new_temp(self.sema.ty_i64)
@@ -6919,7 +6919,7 @@ fn MirBuilder.pattern_child_subject_place(self: MirBuilder, parent_place: i32, c
     let child_ty = self.place_local_type(child_place)
     if child_ty == 0 or child_ty == self.sema.ty_void as i32:
         return child_place
-    let ref_ty = self.sema.ensure_exact_type(TypeKind.TY_REF, child_ty, ref_mut, 0) as i32
+    let ref_ty = self.sema.find_exact_type(TypeKind.TY_REF, child_ty, ref_mut, 0) as i32
     let borrow_kind = if ref_mut != 0: BorrowKind.EXCLUSIVE else: BorrowKind.SHARED
     let ref_rv = self.body.new_rvalue(RvalueKind.RK_REF, borrow_kind, child_place, 0)
     let ref_local = self.new_temp(ref_ty)
@@ -8950,7 +8950,7 @@ fn MirBuilder.enum_accessor_payload_operand(self: MirBuilder, enum_place: i32, e
         let field_place = self.body.new_field_place(variant_place, pi, payload_ty)
         if accessor_kind == 3 or accessor_kind == 4:
             let ref_mut = if accessor_kind == 4: 1 else: 0
-            let elem_ty = if tuple_elem_start > 0: self.sema.type_extra.get((tuple_elem_start + pi) as i64) else: self.sema.ensure_exact_type(TypeKind.TY_REF, payload_ty, ref_mut, 0) as i32
+            let elem_ty = if tuple_elem_start > 0: self.sema.type_extra.get((tuple_elem_start + pi) as i64) else: self.sema.find_exact_type(TypeKind.TY_REF, payload_ty, ref_mut, 0) as i32
             let borrow_kind = if accessor_kind == 4: BorrowKind.EXCLUSIVE else: BorrowKind.SHARED
             let ref_rv = self.body.new_rvalue(RvalueKind.RK_REF, borrow_kind, field_place, 0)
             let ref_tmp = self.new_temp(elem_ty)
@@ -10020,7 +10020,7 @@ fn MirBuilder.lower_option_combinator_method(self: MirBuilder, self_expr: i32, m
             payload_op = self.lower_call_with_operand_args(mapper_op, call_args2, mapped_ty, node)
         else if method_name == "inspect":
             let inspect_args: Vec[i32] = Vec.new()
-            let ref_ty = self.sema.ensure_exact_type(TypeKind.TY_REF, payload_ty, 0, 0) as i32
+            let ref_ty = self.sema.find_exact_type(TypeKind.TY_REF, payload_ty, 0, 0) as i32
             inspect_args.push(self.operand_for_place_arg(payload_place, payload_ty, ref_ty, span))
             let _ = self.lower_call_with_operand_args(mapper_op, inspect_args, self.sema.ty_void as i32, node)
             payload_op = self.operand_for_place(payload_place, payload_ty)
@@ -10112,7 +10112,7 @@ fn MirBuilder.lower_result_combinator_method(self: MirBuilder, self_expr: i32, m
         return self.operand_for_place(result_place, result_ty)
     else if method_name == "inspect":
         let inspect_args: Vec[i32] = Vec.new()
-        let ok_ref_ty = self.sema.ensure_exact_type(TypeKind.TY_REF, source_ok_ty, 0, 0) as i32
+        let ok_ref_ty = self.sema.find_exact_type(TypeKind.TY_REF, source_ok_ty, 0, 0) as i32
         inspect_args.push(self.operand_for_place_arg(ok_payload_place, source_ok_ty, ok_ref_ty, span))
         let _ = self.lower_call_with_operand_args(mapper_op, inspect_args, self.sema.ty_void as i32, node)
         ok_fields.push(self.operand_for_place(ok_payload_place, source_ok_ty))
@@ -10148,7 +10148,7 @@ fn MirBuilder.lower_result_combinator_method(self: MirBuilder, self_expr: i32, m
         err_fields.push(self.lower_context_error_operand(message_op, source_op, result_err_ty, span))
     else if method_name == "inspect_err":
         let inspect_err_args: Vec[i32] = Vec.new()
-        let err_ref_ty = self.sema.ensure_exact_type(TypeKind.TY_REF, source_err_ty, 0, 0) as i32
+        let err_ref_ty = self.sema.find_exact_type(TypeKind.TY_REF, source_err_ty, 0, 0) as i32
         inspect_err_args.push(self.operand_for_place_arg(err_payload_place, source_err_ty, err_ref_ty, span))
         let _ = self.lower_call_with_operand_args(mapper_op, inspect_err_args, self.sema.ty_void as i32, node)
         err_fields.push(self.operand_for_place(err_payload_place, source_err_ty))

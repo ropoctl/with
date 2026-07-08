@@ -2426,11 +2426,11 @@ fn Codegen.type_expr_to_sema_type(self: Codegen, type_node: i32) -> i32:
         if inner == 0:
             return 0
         if kind == NodeKind.NK_TYPE_PTR:
-            return self.sema.ensure_exact_type(TypeKind.TY_PTR, inner, self.pool.get_data1(type_node), self.pool.get_data2(type_node)) as i32
+            return self.sema.find_exact_type(TypeKind.TY_PTR, inner, self.pool.get_data1(type_node), self.pool.get_data2(type_node)) as i32
         if kind == NodeKind.NK_TYPE_REF:
-            return self.sema.ensure_exact_type(TypeKind.TY_REF, inner, self.pool.get_data1(type_node), 0) as i32
+            return self.sema.find_exact_type(TypeKind.TY_REF, inner, self.pool.get_data1(type_node), 0) as i32
         if kind == NodeKind.NK_TYPE_SLICE:
-            return self.sema.ensure_exact_type(TypeKind.TY_SLICE, inner, self.pool.get_data1(type_node), 0) as i32
+            return self.sema.find_exact_type(TypeKind.TY_SLICE, inner, self.pool.get_data1(type_node), 0) as i32
         let option_sym = self.sema.pool_lookup_symbol("Option")
         if option_sym != 0:
             let args: Vec[i32] = Vec.new()
@@ -2441,7 +2441,7 @@ fn Codegen.type_expr_to_sema_type(self: Codegen, type_node: i32) -> i32:
         let elem = self.type_expr_to_sema_type(self.pool.get_data0(type_node))
         if elem == 0:
             return 0
-        return self.sema.ensure_exact_type(TypeKind.TY_ARRAY, elem, self.pool.get_data1(type_node), self.pool.get_data2(type_node)) as i32
+        return self.sema.find_exact_type(TypeKind.TY_ARRAY, elem, self.pool.get_data1(type_node), self.pool.get_data2(type_node)) as i32
     if kind == NodeKind.NK_TYPE_TUPLE:
         let start = self.pool.get_data0(type_node)
         let count = self.pool.get_data1(type_node)
@@ -2495,9 +2495,9 @@ fn Codegen.sema_type_of_node(self: Codegen, node: i32) -> i32:
             let inner_ty = self.sema_type_of_node(self.pool.get_data1(node))
             if inner_ty > 0:
                 if op == UnaryOp.UOP_REF:
-                    return self.sema.ensure_exact_type(TypeKind.TY_REF, inner_ty, 0, 0) as i32
+                    return self.sema.find_exact_type(TypeKind.TY_REF, inner_ty, 0, 0) as i32
                 let is_mut = if op == UnaryOp.UOP_RAW_REF_MUT: 1 else: 0
-                return self.sema.ensure_exact_type(TypeKind.TY_PTR, inner_ty, is_mut, 0) as i32
+                return self.sema.find_exact_type(TypeKind.TY_PTR, inner_ty, is_mut, 0) as i32
     // Literal types
     if nk == NodeKind.NK_STRING_LIT:
         return self.sema.ty_str as i32
@@ -2900,7 +2900,7 @@ fn Codegen.llvm_type_to_sema_type(self: Codegen, ty: i64) -> i32:
         if bits == 64: return self.sema.ty_i64 as i32
         if bits == 128: return self.sema.ty_i128 as i32
         if bits > 0:
-            return self.sema.ensure_exact_type(TypeKind.TY_INT, bits, 1, 0) as i32
+            return self.sema.find_exact_type(TypeKind.TY_INT, bits, 1, 0) as i32
     if kind == wl_float_type_kind():
         return self.sema.ty_f32 as i32
     if kind == wl_double_type_kind():
