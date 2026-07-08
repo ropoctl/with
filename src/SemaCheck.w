@@ -14654,6 +14654,24 @@ fn Sema.ensure_result_type_for(self: Sema, ok_ty: i32, err_ty: i32) -> i32:
     args.push(err_ty)
     self.ensure_generic_inst_type(self.syms.result, args, 2) as i32
 
+// Frozen-phase read twins of the ensure_*_type_for wrappers (D7): at codegen the
+// type already exists (preregister_mir_types), so these are pure lookups. A miss
+// returns 0, exactly as the ensure_* form does when types are frozen.
+fn Sema.find_vec_type_for(self: &Self, elem_ty: i32) -> i32: self.find_generic_inst(self.syms.vec, elem_ty)
+fn Sema.find_handle_type_for(self: &Self, elem_ty: i32) -> i32: self.find_generic_inst(self.syms.handle, elem_ty)
+fn Sema.find_slotmapslot_type_for(self: &Self, elem_ty: i32) -> i32: self.find_generic_inst(self.syms.slotmapslot, elem_ty)
+fn Sema.find_option_type_for(self: &Self, elem_ty: i32) -> i32: self.find_generic_inst(self.syms.option, elem_ty)
+fn Sema.find_option_ref_type_for(self: &Self, elem_ty: i32) -> i32:
+    let ref_ty = self.find_exact_type(TypeKind.TY_REF, elem_ty, 0, 0) as i32
+    if ref_ty == 0:
+        return 0
+    self.find_generic_inst(self.syms.option, ref_ty)
+fn Sema.find_result_type_for(self: &Self, ok_ty: i32, err_ty: i32) -> i32:
+    let args: Vec[i32] = Vec.new()
+    args.push(ok_ty)
+    args.push(err_ty)
+    self.find_generic_inst_type(self.syms.result, args, 2) as i32
+
 fn Sema.ensure_context_error_type_for(self: Sema, source_err_ty: i32) -> i32:
     let found = self.find_generic_inst(self.syms.context_error, source_err_ty)
     if found != 0:

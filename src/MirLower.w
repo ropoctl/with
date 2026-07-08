@@ -1565,19 +1565,19 @@ fn MirBuilder.intrinsic_return_type(self: MirBuilder, recv_type: i32, method_nam
             if tk == TypeKind.TY_GENERIC_INST:
                 let elem_ty = self.sema.get_generic_inst_arg(resolved, 0)
                 if method_name == "insert":
-                    return self.sema.ensure_handle_type_for(elem_ty)
+                    return self.sema.find_handle_type_for(elem_ty)
                 if method_name == "get":
-                    return self.sema.ensure_option_ref_type_for(elem_ty)
+                    return self.sema.find_option_ref_type_for(elem_ty)
                 if method_name == "slot":
-                    return self.sema.ensure_slotmapslot_type_for(elem_ty)
+                    return self.sema.find_slotmapslot_type_for(elem_ty)
                 if method_name == "get_disjoint":
-                    let slot_ty = self.sema.ensure_slotmapslot_type_for(elem_ty)
+                    let slot_ty = self.sema.find_slotmapslot_type_for(elem_ty)
                     let elems: Vec[i32] = Vec.new()
                     elems.push(slot_ty)
                     elems.push(slot_ty)
-                    return self.sema.ensure_tuple_type(elems, 2) as i32
+                    return self.sema.find_tuple_type(elems, 2) as i32
                 if method_name == "remove" or method_name == "replace":
-                    return self.sema.ensure_option_type_for(elem_ty)
+                    return self.sema.find_option_type_for(elem_ty)
                 if method_name == "contains":
                     return self.sema.ty_bool as i32
                 if len_method_ret != 0:
@@ -1600,14 +1600,14 @@ fn MirBuilder.intrinsic_return_type(self: MirBuilder, recv_type: i32, method_nam
                     if vs_tid == 0:
                         let vs_args: Vec[i32] = Vec.new()
                         vs_args.push(elem_ty)
-                        vs_tid = self.sema.ensure_generic_inst_type(vs_sym, vs_args, 1) as i32
+                        vs_tid = self.sema.find_generic_inst_type(vs_sym, vs_args, 1) as i32
                     let opt_sym = self.sema.pool_lookup_symbol("Option")
                     let opt_tid = self.sema.find_generic_inst(opt_sym, vs_tid)
                     if opt_tid != 0:
                         return opt_tid
                     let opt_args: Vec[i32] = Vec.new()
                     opt_args.push(vs_tid)
-                    return self.sema.ensure_generic_inst_type(opt_sym, opt_args, 1) as i32
+                    return self.sema.find_generic_inst_type(opt_sym, opt_args, 1) as i32
             return self.sema.ty_void as i32
         if type_name == "VecIter":
             if method_name == "next":
@@ -1631,13 +1631,13 @@ fn MirBuilder.intrinsic_return_type(self: MirBuilder, recv_type: i32, method_nam
                     return self.sema.get_generic_inst_arg(resolved, 1)
             if method_name == "values":
                 if tk == TypeKind.TY_GENERIC_INST:
-                    return self.sema.ensure_vec_type_for(self.sema.get_generic_inst_arg(resolved, 1))
+                    return self.sema.find_vec_type_for(self.sema.get_generic_inst_arg(resolved, 1))
             if method_name == "items":
                 if tk == TypeKind.TY_GENERIC_INST:
                     let elems: Vec[i32] = Vec.new()
                     elems.push(self.sema.get_generic_inst_arg(resolved, 0))
                     elems.push(self.sema.get_generic_inst_arg(resolved, 1))
-                    return self.sema.ensure_vec_type_for(self.sema.ensure_tuple_type(elems, 2) as i32)
+                    return self.sema.find_vec_type_for(self.sema.find_tuple_type(elems, 2) as i32)
             if method_name == "entry":
                 if tk == TypeKind.TY_GENERIC_INST:
                     let ek = self.sema.get_generic_inst_arg(resolved, 0)
@@ -1646,7 +1646,7 @@ fn MirBuilder.intrinsic_return_type(self: MirBuilder, recv_type: i32, method_nam
                     let he_args: Vec[i32] = Vec.new()
                     he_args.push(ek)
                     he_args.push(ev)
-                    return self.sema.ensure_generic_inst_type(he_sym, he_args, 2) as i32
+                    return self.sema.find_generic_inst_type(he_sym, he_args, 2) as i32
             return self.sema.ty_void as i32
         if type_name == "HashMapEntry":
             if method_name == "or_insert" or method_name == "get":
@@ -1701,7 +1701,7 @@ fn MirBuilder.intrinsic_return_type(self: MirBuilder, recv_type: i32, method_nam
             if method_name == "compare_exchange" or method_name == "compare_exchange_weak":
                 if tk == TypeKind.TY_GENERIC_INST:
                     let atomic_payload = self.sema.get_generic_inst_arg(resolved, 0)
-                    return self.sema.ensure_result_type_for(atomic_payload, atomic_payload)
+                    return self.sema.find_result_type_for(atomic_payload, atomic_payload)
             return self.sema.ty_void as i32
     if tk == TypeKind.TY_STR:
         if len_method_ret != 0: return len_method_ret
@@ -2560,7 +2560,7 @@ fn MirBuilder.regex_captures_option_type(self: MirBuilder) -> i32:
         return found
     let args: Vec[i32] = Vec.new()
     args.push(cap_ty)
-    self.sema.ensure_generic_inst_type(opt_sym, args, 1) as i32
+    self.sema.find_generic_inst_type(opt_sym, args, 1) as i32
 
 fn MirBuilder.regex_ref_operand(self: MirBuilder, regex_place: i32) -> i32:
     let regex_ty = self.sema.lookup_named_type_visible(self.sema.syms.regex)
@@ -4475,7 +4475,7 @@ fn MirBuilder.btree_storage_vec_type(self: MirBuilder, target_ty: i32) -> i32:
             return values_ty
         if self.sema.get_generic_inst_arg_count(resolved as i32) <= 0:
             return 0
-        return self.sema.ensure_vec_type_for(self.sema.get_generic_inst_arg(resolved as i32, 0))
+        return self.sema.find_vec_type_for(self.sema.get_generic_inst_arg(resolved as i32, 0))
     if self.is_btreemap_base_sym(base) != 0:
         let entries_ty = self.struct_field_type(target_ty, self.pool.intern("entries"))
         if entries_ty != 0:
@@ -4485,8 +4485,8 @@ fn MirBuilder.btree_storage_vec_type(self: MirBuilder, target_ty: i32) -> i32:
         let elems: Vec[i32] = Vec.new()
         elems.push(self.sema.get_generic_inst_arg(resolved as i32, 0))
         elems.push(self.sema.get_generic_inst_arg(resolved as i32, 1))
-        let pair_ty = self.sema.ensure_tuple_type(elems, 2) as i32
-        return self.sema.ensure_vec_type_for(pair_ty)
+        let pair_ty = self.sema.find_tuple_type(elems, 2) as i32
+        return self.sema.find_vec_type_for(pair_ty)
     0
 
 fn MirBuilder.emit_btree_new_into(self: MirBuilder, out_place: i32, target_ty: i32, span: i32):
@@ -6422,7 +6422,7 @@ fn MirBuilder.lower_for_hashmap(self: MirBuilder, for_node: i32, pat_or_sym: i32
     let map_op = self.lower_expr(iter_expr)
     let map_ty = self.expr_type(iter_expr)
     let elem_ty = self.sema.infer_for_element_type(map_ty)
-    let items_vec_ty = self.sema.ensure_vec_type_for(elem_ty)
+    let items_vec_ty = self.sema.find_vec_type_for(elem_ty)
 
     let map_place = self.materialize_operand(map_op, map_ty, self.ast.get_start(iter_expr))
     let items_local = self.new_temp(items_vec_ty)
@@ -9843,10 +9843,10 @@ fn MirBuilder.lower_vec_sequence_or_traverse_method(self: MirBuilder, self_expr:
     if method_name == "traverse":
         mapper_op = self.lower_method_arg_with_expected(recv_type, self.sema.syms.traverse, self.ast.get_extra(arg_start), 0)
         if wrapper_base == self.sema.syms.option:
-            wrapper_ty = self.sema.ensure_option_type_for(output_elem_ty)
+            wrapper_ty = self.sema.find_option_type_for(output_elem_ty)
         else:
             let result_err_ty = self.generic_inst_arg_type(result_ty, self.sema.syms.result, 1)
-            wrapper_ty = self.sema.ensure_result_type_for(output_elem_ty, result_err_ty)
+            wrapper_ty = self.sema.find_result_type_for(output_elem_ty, result_err_ty)
     let success_variant = if wrapper_base == self.sema.syms.option: self.sema.syms.some else: self.sema.syms.ok
     let failure_variant = if wrapper_base == self.sema.syms.option: self.sema.syms.none else: self.sema.syms.err
     let failure_payload_ty = if wrapper_base == self.sema.syms.result: self.generic_inst_arg_type(wrapper_ty, self.sema.syms.result, 1) else: 0
@@ -12491,7 +12491,7 @@ fn lower_generator_next_body(sema: &Sema, source: MirBody, fn_node: i32) -> MirB
     let next_sym = sema.generator_fn_next_syms.get(fn_sym).unwrap()
     let state_tid = sema.generator_fn_state_types.get(fn_sym).unwrap()
     let yield_ty = sema.generator_fn_yield_types.get(fn_sym).unwrap()
-    let opt_ty = sema.ensure_option_type_for(yield_ty)
+    let opt_ty = sema.find_option_type_for(yield_ty)
     var out = MirBody.init(next_sym, sema)
     out.local_type_ids.set_i32(0, opt_ty)
     let entry_bb = out.new_block()

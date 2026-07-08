@@ -2435,7 +2435,7 @@ fn Codegen.type_expr_to_sema_type(self: Codegen, type_node: i32) -> i32:
         if option_sym != 0:
             let args: Vec[i32] = Vec.new()
             args.push(inner)
-            return self.sema.ensure_generic_inst_type(option_sym, args, 1) as i32
+            return self.sema.find_generic_inst_type(option_sym, args, 1) as i32
         return 0
     if kind == NodeKind.NK_TYPE_ARRAY:
         let elem = self.type_expr_to_sema_type(self.pool.get_data0(type_node))
@@ -2451,7 +2451,7 @@ fn Codegen.type_expr_to_sema_type(self: Codegen, type_node: i32) -> i32:
             if elem == 0:
                 return 0
             elems.push(elem)
-        return self.sema.ensure_tuple_type(elems, count) as i32
+        return self.sema.find_tuple_type(elems, count) as i32
     if kind == NodeKind.NK_TYPE_GENERIC:
         let raw_base = self.pool.get_data0(type_node)
         let base_name = self.codegen_symbol_text(raw_base)
@@ -2465,7 +2465,7 @@ fn Codegen.type_expr_to_sema_type(self: Codegen, type_node: i32) -> i32:
             if arg == 0:
                 return 0
             args.push(arg)
-        return self.sema.ensure_generic_inst_type(base_sym, args, arg_count) as i32
+        return self.sema.find_generic_inst_type(base_sym, args, arg_count) as i32
     if kind == NodeKind.NK_INDEX:
         return self.ast_static_type_expr(type_node)
     0
@@ -2943,7 +2943,7 @@ fn Codegen.llvm_type_to_sema_type(self: Codegen, ty: i64) -> i32:
                     if arg_sema == 0:
                         return 0
                     sema_args.push(arg_sema)
-                let found = self.sema.ensure_generic_inst_type(mono_base_opt.unwrap(), sema_args, tp_count)
+                let found = self.sema.find_generic_inst_type(mono_base_opt.unwrap(), sema_args, tp_count)
                 if found != 0:
                     return found as i32
         let enum_sym_opt = self.enum_by_llvm.get(ty)

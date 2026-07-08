@@ -1923,7 +1923,7 @@ fn CCodegen.option_tid_for_payload(self: CCodegen, payload_tid: i32) -> i32:
         return 0
     let args: Vec[i32] = Vec.new()
     args.push(payload_tid)
-    self.sema.ensure_generic_inst_type(self.sema.syms.option, args, 1) as i32
+    self.sema.find_generic_inst_type(self.sema.syms.option, args, 1) as i32
 
 fn CCodegen.call_hashmap_get_option_tid(self: CCodegen, body: &MirBody, args_id: i32) -> i32:
     let recv_operand = self.call_arg_operand(body, args_id, 0)
@@ -4961,7 +4961,7 @@ fn CCodegen.call_builtin_ret_tid(self: CCodegen, body: &MirBody, callee_operand:
         let args: Vec[i32] = Vec.new()
         args.push(payload)
         args.push(payload)
-        return self.sema.ensure_generic_inst_type(self.sema.syms.result, args, 2) as i32
+        return self.sema.find_generic_inst_type(self.sema.syms.result, args, 2) as i32
     if kind == CcBuiltin.ATOMIC_STORE:
         return self.sema.ty_void as i32
     if kind == CcBuiltin.ATOMIC_FENCE:

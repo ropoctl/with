@@ -146,7 +146,7 @@ fn Codegen.mir_type_to_live_sema_type(self: Codegen, sema_ty: i32) -> i32:
             if elem == 0:
                 return 0
             elems.push(elem)
-        return self.sema.ensure_tuple_type(elems, count) as i32
+        return self.sema.find_tuple_type(elems, count) as i32
     if tk == TypeKind.TY_GENERIC_INST:
         let raw_base = self.mir_input.mir_get_type_d0(resolved)
         let base_text = self.sema_symbol_text(raw_base)
@@ -161,7 +161,7 @@ fn Codegen.mir_type_to_live_sema_type(self: Codegen, sema_ty: i32) -> i32:
             if arg == 0:
                 return 0
             args.push(arg)
-        return self.sema.ensure_generic_inst_type(live_base, args, arg_count) as i32
+        return self.sema.find_generic_inst_type(live_base, args, arg_count) as i32
     0
 
 fn Codegen.mir_sema_type_to_llvm(self: Codegen, sema_ty: i32) -> i64:
@@ -10585,7 +10585,7 @@ fn Codegen.mir_iter_elem_tid(self: Codegen, iter_sema: i32) -> i32:
             let elems: Vec[i32] = Vec.new()
             elems.push(left)
             elems.push(right)
-            return self.sema.ensure_tuple_type(elems, 2) as i32
+            return self.sema.find_tuple_type(elems, 2) as i32
         return 0
     if name == "EnumerateIter":
         let elem = self.mir_generic_arg_tid(iter_sema, 1)
@@ -10593,7 +10593,7 @@ fn Codegen.mir_iter_elem_tid(self: Codegen, iter_sema: i32) -> i32:
             let elems2: Vec[i32] = Vec.new()
             elems2.push(self.sema.ty_i64 as i32)
             elems2.push(elem)
-            return self.sema.ensure_tuple_type(elems2, 2) as i32
+            return self.sema.find_tuple_type(elems2, 2) as i32
         return 0
     if name == "ZipWithIter":
         return self.mir_generic_arg_tid(iter_sema, 4)

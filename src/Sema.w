@@ -2723,7 +2723,7 @@ fn Sema.ensure_exact_type(self: Sema, kind: i32, d0: i32, d1: i32, d2: i32) -> T
         return 0 as TypeId
     self.add_type(kind, d0, d1, d2)
 
-fn Sema.find_tuple_type(self: Sema, elems: &Vec[i32], elem_count: i32) -> TypeId:
+fn Sema.find_tuple_type(self: &Self, elems: &Vec[i32], elem_count: i32) -> TypeId:
     let type_count = self.type_kinds.len() as i32
     for ti in 0..type_count:
         if self.type_kinds.get(ti as i64) != TypeKind.TY_TUPLE:
@@ -2865,7 +2865,7 @@ fn sema_generic_inst_hash(base_sym: i32, args: &Vec[i32], arg_count: i32) -> i64
         h = (h *% 31) +% (args.get(ai as i64) as i64)
     h
 
-fn Sema.find_generic_inst_type(self: Sema, base_sym: i32, args: &Vec[i32], arg_count: i32) -> TypeId:
+fn Sema.find_generic_inst_type(self: &Self, base_sym: i32, args: &Vec[i32], arg_count: i32) -> TypeId:
     let key = sema_generic_inst_hash(base_sym, args, arg_count)
     if self.generic_inst_cache.contains(key):
         let cached = self.generic_inst_cache.get(key).unwrap()
@@ -2889,7 +2889,10 @@ fn Sema.find_generic_inst_type(self: Sema, base_sym: i32, args: &Vec[i32], arg_c
             continue
         let te_start = self.type_d1.get(ti as i64)
         if self.type_extra_matches(te_start, args, arg_count) != 0:
-            self.generic_inst_cache.insert(key, ti)
+            // interior-mut cache: HashMap is a stable heap handle, so inserting
+            // through a copy of the handle keeps `self` a read borrow (D7).
+            var gic = self.generic_inst_cache
+            gic.insert(key, ti)
             return ti as TypeId
     0 as TypeId
 
@@ -2909,7 +2912,7 @@ fn Sema.ensure_generic_inst_type(self: Sema, base_sym: i32, args: Vec[i32], arg_
 
 // Look up an existing TypeKind.TY_GENERIC_INST(base_sym, [arg_tid]) in the cache.
 // Returns the TypeId, or 0 if not found.
-fn Sema.find_generic_inst(self: Sema, base_sym: i32, arg_tid: i32) -> i32:
+fn Sema.find_generic_inst(self: &Self, base_sym: i32, arg_tid: i32) -> i32:
     let args: Vec[i32] = Vec.new()
     args.push(arg_tid)
     self.find_generic_inst_type(base_sym, args, 1) as i32
