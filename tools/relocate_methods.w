@@ -30,6 +30,44 @@ fn col_of(text: str, offset: i32):
 
 fn slice(text: str, a: i32, b: i32): text.slice(a as i64, b as i64)
 
+fn trim(s: str):
+    let m = s.len() as i32
+    var a = 0
+    while a < m and (s.byte_at(a as i64) as i32) == 32:
+        a = a + 1
+    var b = m
+    while b > a and (s.byte_at((b - 1) as i64) as i32) == 32:
+        b = b - 1
+    slice(s, a, b)
+
+// Names from a type-param inner text ("K: Ord, V" -> "K, V"): each top-level
+// comma segment's identifier, stripped of its optional `: Bound`.
+fn tparam_names(inner: str):
+    var parts: Vec[str] = Vec.new()
+    let m = inner.len() as i32
+    var seg_start = 0
+    var depth = 0
+    var i = 0
+    while i <= m:
+        let at_end = i == m
+        let c = if at_end: 44 else: inner.byte_at(i as i64) as i32
+        if c == 91:
+            depth = depth + 1
+        else if c == 93:
+            depth = depth - 1
+        else if c == 44 and depth == 0:
+            var colon = seg_start
+            while colon < i and (inner.byte_at(colon as i64) as i32) != 58:
+                colon = colon + 1
+            let nm = trim(slice(inner, seg_start, colon))
+            if nm.len() as i32 > 0:
+                parts.push(nm)
+            seg_start = i + 1
+        if at_end:
+            break
+        i = i + 1
+    parts.join(", ")
+
 // Prefix `pad` to every non-empty line of `text` (blank lines stay blank).
 fn reindent(text: str, pad: str):
     var parts: Vec[str] = Vec.new()
@@ -187,14 +225,27 @@ fn relocate_file(path: str, report_only: bool) -> i32:
                 break
             q = q + 1
         var recv_type = slice(text, recv_start, tokens.get_start(q))
-        // strip a leading `&` (borrow) — the target type is the same
+        // strip a leading `&` (borrow) and spaces
         var rti = 0
         let rlen = recv_type.len() as i32
         while rti < rlen and (recv_type.byte_at(rti as i64) as i32) == 38:   // &
             rti = rti + 1
         while rti < rlen and (recv_type.byte_at(rti as i64) as i32) == 32:   // space
             rti = rti + 1
-        let target = slice(recv_type, rti, rlen)
+        // Target type = the DOTTED type name + the receiver's generic args `[...]`
+        // if any. The receiver base is often spelled `Self` (an alias for the
+        // dotted type), so the base MUST come from the dotted name, never the
+        // receiver spelling — else every `self: &Self` method yields `impl Self:`.
+        var target = type_name
+        var bpos = rti
+        while bpos < rlen and (recv_type.byte_at(bpos as i64) as i32) != 91:   // '['
+            bpos = bpos + 1
+        if bpos < rlen:
+            target = type_name ++ slice(recv_type, bpos, rlen)   // explicit `Type[Args]`
+        else if has_tp:
+            // receiver is `Self` (no explicit args) but the method is generic —
+            // the target args are the method's type-param names.
+            target = type_name ++ "[" ++ tparam_names(slice(text, tp_inner_a, tp_inner_b)) ++ "]"
 
         // self param deletion end
         var self_del_end = tokens.get_start(q)
