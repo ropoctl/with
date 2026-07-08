@@ -544,6 +544,48 @@ fn main:
         fe = fe + 1
     print(f"  => {nfront} frontier edge(s)")
 
+    // ============ ROOT SET: frozen entry methods, pure vs impure ============
+    // The deciding measurement (per Eric): mark the whole SCC `mut fn`; the only
+    // methods that then need a read-twin / eager-materialized table are the frozen
+    // ENTRY methods (roots) that can reach a genuine mutator. Pure roots read as-is.
+    // reaches-mutator = reverse-reachability from the genuine-mutator set.
+    var rmut: HashMap[i32, i32] = HashMap.new()
+    let mks = mutator.keys()
+    var kmi = 0
+    while kmi < mks.len() as i32:
+        rmut.insert(mks.get(kmi as i64), 1)
+        kmi = kmi + 1
+    var rmc = true
+    while rmc:
+        rmc = false
+        var i = 0
+        while i < ne:
+            let f = e_from.get(i as i64)
+            let t = e_to.get(i as i64)
+            if t >= 0 and rmut.contains(t) and (not rmut.contains(f)):
+                rmut.insert(f, 1)
+                rmc = true
+            i = i + 1
+    var npure = 0
+    var nimpure = 0
+    var ai2 = 0
+    while ai2 < nm:
+        if pred.get(ai2 as i64) == -2:
+            if rmut.contains(ai2):
+                nimpure = nimpure + 1
+            else:
+                npure = npure + 1
+        ai2 = ai2 + 1
+    print("")
+    print("================ ROOT SET (frozen entry methods = the read-twin work list) ================")
+    print(f"  total frozen roots: {npure + nimpure}   pure(read as-is): {npure}   IMPURE(need read-twin/eager-table): {nimpure}")
+    print("  --- IMPURE frozen roots (each needs a pure read accessor backed by an eager table) ---")
+    var ai3 = 0
+    while ai3 < nm:
+        if pred.get(ai3 as i64) == -2 and rmut.contains(ai3):
+            print(f"    {mname.get(ai3 as i64)}  ({mfile.get(ai3 as i64)})  [{mode_name(mmode.get(ai3 as i64))}]")
+        ai3 = ai3 + 1
+
     // ============ reverse reachability: which roots reach a sink method? ============
     // For each `sink:METHOD`, the frozen entry points that re-enter it are the roots
     // among its ancestors in the self-call graph. Those are the call sites to sever.
