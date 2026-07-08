@@ -3069,15 +3069,21 @@ fn Parser.parse_impl_block(self: Parser, vis: i32):
                     break
         self.skip_newlines()
         self.expect(TokenKind.TK_R_BRACKET)
-        if self.peek() != TokenKind.TK_KW_FOR:
-            self.emit_error("expected 'for' after trait generic arguments in impl")
-            return
-        self.advance()
-        trait_name = first_name
-        type_name = self.expect_ident()
-        if type_name == 0:
-            return
-        target_type_node = self.parse_optional_impl_target_args(type_name)
+        if self.peek() == TokenKind.TK_KW_FOR:
+            self.advance()
+            trait_name = first_name
+            type_name = self.expect_ident()
+            if type_name == 0:
+                return
+            target_type_node = self.parse_optional_impl_target_args(type_name)
+        else:
+            // No `for` → inherent generic impl `impl[..] Name[args]:` — `Name[args]`
+            // is the TARGET type, not a trait. The bracket args (already in extra at
+            // trait_arg_extra_start) become the target type's generic arguments.
+            type_name = first_name
+            target_type_node = self.pool.add_node(NodeKind.NK_TYPE_GENERIC, start, self.prev_end(), first_name, trait_arg_extra_start, trait_arg_count)
+            trait_arg_extra_start = 0
+            trait_arg_count = 0
     else if self.peek() == TokenKind.TK_KW_FOR:
         self.advance()
         trait_name = first_name
