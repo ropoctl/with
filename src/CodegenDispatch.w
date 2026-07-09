@@ -3953,7 +3953,7 @@ fn Codegen.mir_emit_drop_tuple_ptr(self: Codegen, ptr: i64, ty: i64, tuple_sema_
     var i = elem_count - 1
     while i >= 0:
         let elem_sema = self.mir_project_field_sema_type(tuple_sema_ty, i)
-        if elem_sema > 0 and self.sema.type_needs_drop(elem_sema) != 0:
+        if elem_sema > 0 and self.sema.type_needs_drop_frozen(elem_sema) != 0:
             let elem_llvm = self.mir_sema_type_to_llvm(elem_sema)
             let elem_ptr = wl_build_struct_gep(self.builder, ty, ptr, i)
             self.mir_emit_drop_ptr_for_sema_type(elem_ptr, elem_llvm, elem_sema)
@@ -3966,7 +3966,7 @@ fn Codegen.mir_emit_drop_array_ptr(self: Codegen, ptr: i64, ty: i64, array_sema_
     if ptr == 0 or ty == 0:
         return
     let elem_sema = self.sema.get_type_d0(array_sema_ty as TypeId)
-    if elem_sema <= 0 or self.sema.type_needs_drop(elem_sema) == 0:
+    if elem_sema <= 0 or self.sema.type_needs_drop_frozen(elem_sema) == 0:
         return
     let elem_count = self.sema.get_type_d1(array_sema_ty as TypeId)
     let elem_llvm = wl_get_element_type(ty)
@@ -4001,7 +4001,7 @@ fn Codegen.mir_emit_drop_enum_ptr(self: Codegen, ptr: i64, ty: i64, enum_sema_ty
         let pc = self.mir_enum_variant_payload_count(enum_sema_ty, vc)
         var pf = 0
         while pf < pc:
-            if self.sema.type_needs_drop(self.mir_enum_payload_sema_type(enum_sema_ty, vc, pf)) != 0:
+            if self.sema.type_needs_drop_frozen(self.mir_enum_payload_sema_type(enum_sema_ty, vc, pf)) != 0:
                 any_drops = true
             pf = pf + 1
         vc = vc + 1
@@ -4018,7 +4018,7 @@ fn Codegen.mir_emit_drop_enum_ptr(self: Codegen, ptr: i64, ty: i64, enum_sema_ty
         var variant_has_drop = false
         var pf2 = 0
         while pf2 < pc:
-            if self.sema.type_needs_drop(self.mir_enum_payload_sema_type(enum_sema_ty, vi, pf2)) != 0:
+            if self.sema.type_needs_drop_frozen(self.mir_enum_payload_sema_type(enum_sema_ty, vi, pf2)) != 0:
                 variant_has_drop = true
             pf2 = pf2 + 1
         if variant_has_drop:
@@ -4031,13 +4031,13 @@ fn Codegen.mir_emit_drop_enum_ptr(self: Codegen, ptr: i64, ty: i64, enum_sema_ty
             let payload_ty = self.mir_enum_variant_payload_llvm_type(enum_sema_ty, vi)
             if pc == 1:
                 let psema = self.mir_enum_payload_sema_type(enum_sema_ty, vi, 0)
-                if self.sema.type_needs_drop(psema) != 0 and payload_ty != 0:
+                if self.sema.type_needs_drop_frozen(psema) != 0 and payload_ty != 0:
                     self.mir_emit_drop_ptr_for_sema_type(data_ptr, payload_ty, psema)
             else if payload_ty != 0 and wl_get_type_kind(payload_ty) == wl_struct_type_kind():
                 var pf3 = 0
                 while pf3 < pc:
                     let psema = self.mir_enum_payload_sema_type(enum_sema_ty, vi, pf3)
-                    if self.sema.type_needs_drop(psema) != 0:
+                    if self.sema.type_needs_drop_frozen(psema) != 0:
                         let field_llvm = wl_struct_get_type_at(payload_ty, pf3)
                         let field_ptr = wl_build_struct_gep(self.builder, payload_ty, data_ptr, pf3)
                         self.mir_emit_drop_ptr_for_sema_type(field_ptr, field_llvm, psema)
@@ -4103,7 +4103,7 @@ fn Codegen.mir_emit_vec_element_drops_ptr(self: Codegen, ptr: i64, vec_sema_ty: 
     if ptr == 0 or vec_sema_ty <= 0:
         return
     let elem_sema = self.mir_vec_elem_sema_type_from_sema_type(vec_sema_ty)
-    if elem_sema <= 0 or self.sema.type_needs_drop(elem_sema) == 0:
+    if elem_sema <= 0 or self.sema.type_needs_drop_frozen(elem_sema) == 0:
         return
     let elem_ty = self.mir_sema_type_to_llvm(elem_sema)
     if elem_ty == 0:
@@ -4177,7 +4177,7 @@ fn Codegen.mir_emit_drop_vec_ptr(self: Codegen, ptr: i64, sema_ty: i32) -> bool:
     if not self.mir_sema_type_is_std_vec(sema_ty):
         return false
     let elem_sema = self.mir_vec_elem_sema_type_from_sema_type(sema_ty)
-    if elem_sema <= 0 or self.sema.type_needs_drop(elem_sema) == 0:
+    if elem_sema <= 0 or self.sema.type_needs_drop_frozen(elem_sema) == 0:
         return false
     self.mir_emit_vec_element_drops_ptr(ptr, sema_ty)
     self.mir_emit_vec_free_ptr(ptr)

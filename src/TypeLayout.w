@@ -405,3 +405,13 @@ fn Sema.is_copy_frozen(self: &Self, tid: TypeId) -> i32:
         return self.is_copy_cache.get(tid as i32).unwrap()
     with_eprint("BUG: is_copy_frozen miss — type not preregistered")
     0
+
+// D7 frozen read twin of type_needs_drop (filled in preregister_mir_types). Pure &Self
+// lookup, complete by construction; a miss is a loud phase violation. Default 0 (no drop)
+// is the memory-safe choice on the dead miss path — at worst a leak, never a spurious
+// drop / double-free.
+fn Sema.type_needs_drop_frozen(self: &Self, tid: i32) -> i32:
+    if self.needs_drop_result_cache.contains(tid):
+        return self.needs_drop_result_cache.get(tid).unwrap()
+    with_eprint("BUG: type_needs_drop_frozen miss — type not preregistered")
+    0

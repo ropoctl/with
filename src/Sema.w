@@ -757,6 +757,7 @@ type Sema {
     layout_size_cache: HashMap[i32, i64],
     layout_align_cache: HashMap[i32, i64],
     is_copy_cache: HashMap[i32, i32],
+    needs_drop_result_cache: HashMap[i32, i32],
 
     // Associated type bindings from current impl (for Self.Name resolution)
     assoc_type_bindings: HashMap[i32, i32],
@@ -1182,6 +1183,7 @@ pub fn Sema.prepare_comptime_eval_copy(mut self: Sema) -> Sema:
     self.layout_size_cache = HashMap.new()
     self.layout_align_cache = HashMap.new()
     self.is_copy_cache = sema_new_map_i32_i32()
+    self.needs_drop_result_cache = sema_new_map_i32_i32()
     self.generic_subst_param_syms = sema_clone_i32_vec(&self.generic_subst_param_syms)
     self.generic_subst_type_ids = sema_clone_i32_vec(&self.generic_subst_type_ids)
     self.source_text_file_ids = sema_clone_i32_vec(&self.source_text_file_ids)
@@ -1469,6 +1471,7 @@ fn sema_empty_state(pool: InternPool, diags: DiagnosticList, ast: AstPool) -> Se
     let layout_size_cache: HashMap[i32, i64] = HashMap.new()
     let layout_align_cache: HashMap[i32, i64] = HashMap.new()
     let is_copy_cache = sema_new_map_i32_i32()
+    let needs_drop_result_cache = sema_new_map_i32_i32()
     var s = Sema {
         pool: pool,
         diags: diags,
@@ -1738,6 +1741,7 @@ fn sema_empty_state(pool: InternPool, diags: DiagnosticList, ast: AstPool) -> Se
         layout_size_cache,
         layout_align_cache,
         is_copy_cache,
+        needs_drop_result_cache,
         assoc_type_bindings: sema_new_map_i32_i32(),
         symbols_frozen: 0,
         types_frozen: 0,
@@ -3065,9 +3069,11 @@ fn Sema.preregister_mir_types(self: Sema):
                 let lt_sz = self.type_layout_size_of(lti)
                 let lt_al = self.type_layout_align_of(lti)
                 let lt_cp = self.is_copy(lti as TypeId)
+                let lt_nd = self.type_needs_drop(lti)
                 self.layout_size_cache.insert(lti, lt_sz)
                 self.layout_align_cache.insert(lti, lt_al)
                 self.is_copy_cache.insert(lti, lt_cp)
+                self.needs_drop_result_cache.insert(lti, lt_nd)
         if self.type_kinds.len() as i32 == lt_n:
             layout_pass_done = true
 

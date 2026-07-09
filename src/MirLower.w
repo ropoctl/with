@@ -548,14 +548,14 @@ fn MirBuilder.emit_drop_place_respecting_moved_fields(self: MirBuilder, place: i
         var fi = field_count - 1
         while fi >= 0:
             let field_ty = self.partial_drop_field_type(sema_ty, fi)
-            if field_ty > 0 and self.sema.type_needs_drop(field_ty) != 0:
+            if field_ty > 0 and self.sema.type_needs_drop_frozen(field_ty) != 0:
                 let field_token = self.partial_drop_field_token(sema_ty, fi)
                 if field_token != 0 or self.sema.get_type_kind(self.sema.resolve_alias(sema_ty as TypeId)) == TypeKind.TY_TUPLE:
                     let field_place = self.new_projected_field_place(place, field_token, field_ty)
                     self.emit_drop_place_respecting_moved_fields(field_place, field_ty)
             fi = fi - 1
         return
-    if self.sema.type_needs_drop(sema_ty) != 0:
+    if self.sema.type_needs_drop_frozen(sema_ty) != 0:
         self.emit_drop_stmt(place, "scope-exit", 0)
 
 fn MirBuilder.emit_drop_stmt(self: MirBuilder, place: i32, origin_kind: str, span: i32):
@@ -626,7 +626,7 @@ fn MirBuilder.consume_moved_operand(self: MirBuilder, operand_id: i32) -> Unit:
         // statement boundary (flush_stmt_temp_frame) zeroes it so its later
         // drops — drop-before-overwrite, scope-exit — free nothing. The reset
         // is unconditional, so it does not depend on the move analysis below.
-        if self.sema.type_needs_drop(self.local_type(local_id)) != 0:
+        if self.sema.type_needs_drop_frozen(self.local_type(local_id)) != 0:
             self.pending_reset_locals.push(local_id)
             // Stage 4 (§2.5.2): this local is reset-on-move, so its drop must
             // keep its null guard. Locals never recorded here are never reset,
@@ -651,7 +651,7 @@ fn MirBuilder.consume_moved_operand(self: MirBuilder, operand_id: i32) -> Unit:
         // reset above; scoped via flush_pending_resets_since so a conditional
         // field move resets only on the moving path.
         let field_ty = self.place_local_type(place)
-        if self.field_move_in_branch > 0 and field_ty > 0 and self.sema.type_needs_drop(field_ty) != 0:
+        if self.field_move_in_branch > 0 and field_ty > 0 and self.sema.type_needs_drop_frozen(field_ty) != 0:
             self.pending_reset_field_places.push(place)
             self.pending_reset_field_types.push(field_ty)
             // The owner's drop must keep its niche guard, so the per-field guarded
@@ -4786,7 +4786,7 @@ fn MirBuilder.lower_assign(self: MirBuilder, place_expr: i32, rhs_expr: i32):
         self.expected_type = dest_ty
     let rhs = self.lower_expr(rhs_expr)
     self.expected_type = saved_expected
-    if dest_ty != 0 and self.sema.is_copy_frozen(dest_ty) == 0 and self.sema.type_needs_drop(dest_ty) != 0:
+    if dest_ty != 0 and self.sema.is_copy_frozen(dest_ty) == 0 and self.sema.type_needs_drop_frozen(dest_ty) != 0:
         self.emit_drop_place_respecting_moved_fields(place, dest_ty)
     self.assign_operand_to_place(place, rhs, self.ast.get_start(place_expr))
 
@@ -11000,7 +11000,7 @@ fn MirBuilder.lower_expr(self: MirBuilder, node: i32) -> i32:
         let place = self.lower_field_access(node)
         self.mark_string_place_copied(place)
         let fa_val_ty = self.expr_type(node)
-        if fa_val_ty != 0 and self.sema.type_needs_drop(fa_val_ty) != 0:
+        if fa_val_ty != 0 and self.sema.type_needs_drop_frozen(fa_val_ty) != 0:
             return self.body.new_operand(OperandKind.OK_MOVE, place)
         return self.body.new_operand(OperandKind.OK_COPY, place)
 
@@ -11127,7 +11127,7 @@ fn MirBuilder.lower_expr(self: MirBuilder, node: i32) -> i32:
         let rhs_op = self.lower_expr(rhs_node)
         self.expected_type = saved_expected
         let place = self.lower_expr_place(target)
-        if target_ty != 0 and self.sema.is_copy_frozen(target_ty) == 0 and self.sema.type_needs_drop(target_ty) != 0:
+        if target_ty != 0 and self.sema.is_copy_frozen(target_ty) == 0 and self.sema.type_needs_drop_frozen(target_ty) != 0:
             self.emit_drop_place_respecting_moved_fields(place, target_ty)
         self.assign_operand_to_place(place, rhs_op, self.ast.get_start(target))
         return rhs_op
@@ -11406,7 +11406,7 @@ fn MirBuilder.lower_expr(self: MirBuilder, node: i32) -> i32:
             // Drop impl: non-Drop value types are left to copy, which the
             // codebase relies on to share data across constructions and which is
             // harmless without a destructor.
-            if self.sema.type_needs_drop(f_ty) != 0:
+            if self.sema.type_needs_drop_frozen(f_ty) != 0:
                 self.consume_moved_operand(f_op)
         if self.sema.type_decl_nodes.contains(sl_name_sym):
             let sl_td_node = self.sema.type_decl_nodes.get(sl_name_sym).unwrap()
@@ -11513,7 +11513,7 @@ fn MirBuilder.lower_expr(self: MirBuilder, node: i32) -> i32:
             // source so its destructor is not also run at its scope exit (which
             // would double-free). Paired with the tuple's element-drop
             // (mir_emit_drop_tuple_ptr) — both land together.
-            if self.sema.type_needs_drop(elem_ty) != 0:
+            if self.sema.type_needs_drop_frozen(elem_ty) != 0:
                 self.consume_moved_operand(elem_op)
         let tup_fid = self.body.new_agg_fields(tup_fields, tup_names)
         let tup_rv = self.body.new_rvalue(RvalueKind.RK_AGGREGATE, 0, tup_fid, 0)
@@ -11577,7 +11577,7 @@ fn MirBuilder.lower_expr(self: MirBuilder, node: i32) -> i32:
             // #605/#606: move a Drop element into the array; consume the source so
             // it is not also dropped at scope exit. Paired with the array's
             // element-drop (mir_emit_drop_array_ptr) — both land together.
-            if self.sema.type_needs_drop(self.expr_type(elem_node)) != 0:
+            if self.sema.type_needs_drop_frozen(self.expr_type(elem_node)) != 0:
                 self.consume_moved_operand(arr_elem_op)
         let arr_fid = self.body.new_agg_fields(arr_fields, arr_names)
         let arr_rv = self.body.new_rvalue(RvalueKind.RK_AGGREGATE, 0, arr_fid, 0)
@@ -11637,7 +11637,7 @@ fn MirBuilder.lower_expr(self: MirBuilder, node: i32) -> i32:
             // source so it is not also dropped at scope exit. Paired with the
             // enum's variant-aware payload drop (mir_emit_drop_enum_ptr).
             let vs_arg_drop_ty = if vs_payload_ty != 0: vs_payload_ty else: self.expr_type(vs_arg)
-            if self.sema.type_needs_drop(vs_arg_drop_ty) != 0:
+            if self.sema.type_needs_drop_frozen(vs_arg_drop_ty) != 0:
                 self.consume_moved_operand(vs_arg_op)
         let vs_fid = self.body.new_agg_fields(vs_fields, vs_names)
         let vs_rv = self.body.new_rvalue(RvalueKind.RK_AGGREGATE, 1, vs_fid, vs_variant_idx)
