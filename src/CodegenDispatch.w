@@ -16548,7 +16548,7 @@ fn Codegen.gen_closure(self: Codegen, node: i32) -> i64:
             by_ref = 1
         else if can_capture_by_ref:
             let sema_ty = self.lookup_capture_sema_type(sym)
-            if sema_ty == 0 or self.sema.is_copy(sema_ty as TypeId) == 0:
+            if sema_ty == 0 or self.sema.is_copy_frozen(sema_ty as TypeId) == 0:
                 by_ref = 1
         capture_ref_modes.push(by_ref)
 

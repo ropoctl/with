@@ -574,7 +574,7 @@ fn MirBuilder.stmt_temp_needs_drop(self: MirBuilder, type_id: i32) -> i32:
         return 0
     if self.type_is_channel_endpoint(type_id) != 0:
         return 1
-    if self.sema.is_copy(type_id as TypeId) != 0:
+    if self.sema.is_copy_frozen(type_id as TypeId) != 0:
         return 0
     if self.sema.type_is_task(type_id) != 0 or self.sema.type_is_scoped_task(type_id) != 0 or self.sema.type_is_scoped_join_handle(type_id) != 0:
         return 0
@@ -595,7 +595,7 @@ fn MirBuilder.type_is_channel_endpoint(self: MirBuilder, type_id: i32) -> i32:
 fn MirBuilder.type_needs_value_drop(self: MirBuilder, type_id: i32) -> i32:
     if self.type_is_channel_endpoint(type_id) != 0:
         return 1
-    if self.sema.is_copy(type_id) == 0:
+    if self.sema.is_copy_frozen(type_id) == 0:
         return 1
     0
 
@@ -2990,7 +2990,7 @@ fn MirBuilder.lower_var(self: MirBuilder, sym: i32, type_id: i32, node_id: i32) 
     let local = self.lookup_local(sym)
     if local >= 0:
         let place = self.body.new_place(local)
-        if self.sema.is_copy(type_id) != 0:
+        if self.sema.is_copy_frozen(type_id) != 0:
             if self.local_type_is_str(local) != 0:
                 self.mark_string_local_copied(local)
             else:
@@ -3483,7 +3483,7 @@ fn MirBuilder.lower_str_concat_chain(self: MirBuilder, node: i32, parts: &Vec[i3
     let place = self.place_for_local(temp)
     self.body.push_stmt(self.cur_bb, StmtKind.Assign, place, rv, self.ast.get_start(node))
     self.set_string_local_flags(temp, 2)
-    if self.sema.is_copy(ty) != 0:
+    if self.sema.is_copy_frozen(ty) != 0:
         return self.body.new_operand(OperandKind.OK_COPY, place)
     self.body.new_operand(OperandKind.OK_MOVE, place)
 
@@ -3801,7 +3801,7 @@ fn MirBuilder.lower_bin_op(self: MirBuilder, op: i32, lhs_expr: i32, rhs_expr: i
     self.body.push_stmt(self.cur_bb, StmtKind.Assign, place, rv, self.ast.get_start(node))
     if op == BinaryOp.OP_CONCAT and self.type_id_is_str(ty) != 0:
         self.set_string_local_flags(temp, 2)
-    if self.sema.is_copy(ty) != 0:
+    if self.sema.is_copy_frozen(ty) != 0:
         return self.body.new_operand(OperandKind.OK_COPY, place)
     self.body.new_operand(OperandKind.OK_MOVE, place)
 
@@ -4436,7 +4436,7 @@ fn MirBuilder.lower_vec_literal(self: MirBuilder, node: i32, vec_ty: i32) -> i32
     self.lower_vec_literal_push(vec_place, first_elem, elem_ty)
     if second_elem != 0:
         self.lower_vec_literal_push(vec_place, second_elem, elem_ty)
-    if self.sema.is_copy(vec_ty) != 0:
+    if self.sema.is_copy_frozen(vec_ty) != 0:
         return self.body.new_operand(OperandKind.OK_COPY, vec_place)
     self.body.new_operand(OperandKind.OK_MOVE, vec_place)
 
@@ -4547,7 +4547,7 @@ fn MirBuilder.lower_btree_seq_literal(self: MirBuilder, node: i32, elem_ty: i32)
         let elem_op = self.lower_expr(elem_node)
         self.expected_type = saved_expected
         self.emit_btree_set_insert(out_place, elem_op, elem_node)
-    if self.sema.is_copy(target_ty) != 0:
+    if self.sema.is_copy_frozen(target_ty) != 0:
         return self.body.new_operand(OperandKind.OK_COPY, out_place)
     self.body.new_operand(OperandKind.OK_MOVE, out_place)
 
@@ -4575,7 +4575,7 @@ fn MirBuilder.lower_btree_map_literal(self: MirBuilder, node: i32, key_ty: i32, 
         let val_op = self.lower_expr(val_node)
         self.expected_type = saved_expected
         self.emit_btree_map_insert(out_place, key_op, val_op, key_node)
-    if self.sema.is_copy(target_ty) != 0:
+    if self.sema.is_copy_frozen(target_ty) != 0:
         return self.body.new_operand(OperandKind.OK_COPY, out_place)
     self.body.new_operand(OperandKind.OK_MOVE, out_place)
 
@@ -4598,7 +4598,7 @@ fn MirBuilder.lower_btree_new(self: MirBuilder, node: i32, fallback_ty: i32) -> 
     let out_local = self.new_temp(target_ty)
     let out_place = self.place_for_local(out_local)
     self.emit_btree_new_into(out_place, target_ty, self.ast.get_start(node))
-    if self.sema.is_copy(target_ty) != 0:
+    if self.sema.is_copy_frozen(target_ty) != 0:
         return self.body.new_operand(OperandKind.OK_COPY, out_place)
     self.body.new_operand(OperandKind.OK_MOVE, out_place)
 
@@ -4613,7 +4613,7 @@ fn MirBuilder.lower_collection_literal_call(self: MirBuilder, node: i32, intrins
     self.body.set_call_intrinsic(args_id, intrinsic)
     self.body.set_call_ast_node(args_id, node)
     self.switch_to(next_bb)
-    if self.sema.is_copy(ret_type) != 0:
+    if self.sema.is_copy_frozen(ret_type) != 0:
         return self.body.new_operand(OperandKind.OK_COPY, result_place)
     self.body.new_operand(OperandKind.OK_MOVE, result_place)
 
@@ -4786,7 +4786,7 @@ fn MirBuilder.lower_assign(self: MirBuilder, place_expr: i32, rhs_expr: i32):
         self.expected_type = dest_ty
     let rhs = self.lower_expr(rhs_expr)
     self.expected_type = saved_expected
-    if dest_ty != 0 and self.sema.is_copy(dest_ty) == 0 and self.sema.type_needs_drop(dest_ty) != 0:
+    if dest_ty != 0 and self.sema.is_copy_frozen(dest_ty) == 0 and self.sema.type_needs_drop(dest_ty) != 0:
         self.emit_drop_place_respecting_moved_fields(place, dest_ty)
     self.assign_operand_to_place(place, rhs, self.ast.get_start(place_expr))
 
@@ -4898,7 +4898,7 @@ fn MirBuilder.lower_let_binding(self: MirBuilder, node: i32):
 
     let bind_ty = self.binding_type(node)
     if mutable == 0:
-        if self.sema.is_copy(bind_ty) == 0:
+        if self.sema.is_copy_frozen(bind_ty) == 0:
             let alias_place = self.lower_binding_alias_place(rhs_expr)
             if alias_place >= 0:
                 self.bind_alias_place(name_sym, alias_place, bind_ty)
@@ -4909,7 +4909,7 @@ fn MirBuilder.lower_let_binding(self: MirBuilder, node: i32):
     let storage_d1 = if rhs_expr == 0: bind_ty else: 0
     self.body.push_stmt(self.cur_bb, StmtKind.StorageLive, local_id, storage_d1, self.ast.get_start(node))
     var scheduled_drop_kind = DropKind.DK_VALUE
-    if self.sema.is_copy(bind_ty) == 0:
+    if self.sema.is_copy_frozen(bind_ty) == 0:
         scheduled_drop_kind = self.task_drop_kind_for_binding(node, bind_ty)
         if is_discard_binding == 0:
             self.schedule_drop(local_id, scheduled_drop_kind)
@@ -4926,7 +4926,7 @@ fn MirBuilder.lower_let_binding(self: MirBuilder, node: i32):
         // non-aliasing RHS; idempotent for already-consumed moved idents.
         self.cancel_scheduled_value_drop_for_receiver_expr(rhs_expr)
     if is_discard_binding != 0:
-        if self.sema.is_copy(bind_ty) == 0:
+        if self.sema.is_copy_frozen(bind_ty) == 0:
             self.emit_drop_entry(local_id, scheduled_drop_kind)
         else:
             self.body.push_stmt(self.cur_bb, StmtKind.StorageDead, local_id, 0, self.ast.get_start(node))
@@ -5289,7 +5289,7 @@ fn MirBuilder.lower_if(self: MirBuilder, cond_expr: i32, then_expr: i32, else_ex
     if want_result == 0:
         return self.unit_operand()
     self.register_stmt_temp(result_local, result_ty)
-    if self.sema.is_copy(result_ty) != 0:
+    if self.sema.is_copy_frozen(result_ty) != 0:
         return self.body.new_operand(OperandKind.OK_COPY, result_place)
     self.body.new_operand(OperandKind.OK_MOVE, result_place)
 
@@ -5338,7 +5338,7 @@ fn MirBuilder.lower_if_let(self: MirBuilder, pat: i32, scrutinee_expr: i32, then
     self.switch_to(join_bb)
     self.forget_string_flow_facts()
     self.register_stmt_temp(result_local, result_ty)
-    if self.sema.is_copy(result_ty) != 0:
+    if self.sema.is_copy_frozen(result_ty) != 0:
         return self.body.new_operand(OperandKind.OK_COPY, result_place)
     self.body.new_operand(OperandKind.OK_MOVE, result_place)
 
@@ -5373,7 +5373,7 @@ fn MirBuilder.lower_loop(self: MirBuilder, body_expr: i32, node: i32) -> i32:
     self.switch_to(break_bb)
     self.forget_string_flow_facts()
     if has_result:
-        if self.sema.is_copy(loop_ty as TypeId) != 0:
+        if self.sema.is_copy_frozen(loop_ty as TypeId) != 0:
             return self.body.new_operand(OperandKind.OK_COPY, result_place)
         return self.body.new_operand(OperandKind.OK_MOVE, result_place)
     self.unit_operand()
@@ -5625,7 +5625,7 @@ fn MirBuilder.bind_for_element(self: MirBuilder, for_node: i32, pat_or_sym: i32,
         let bind_local = self.body.new_local(elem_ty, 0, pat_or_sym, 1)
         self.bind_local(pat_or_sym, bind_local)
         self.body.push_stmt(self.cur_bb, StmtKind.StorageLive, bind_local, 0, self.ast.get_start(body_expr))
-        if self.sema.is_copy(elem_ty) == 0:
+        if self.sema.is_copy_frozen(elem_ty) == 0:
             self.schedule_drop(bind_local, DropKind.DK_VALUE)
         let bind_place = self.place_for_local(bind_local)
         let item_op = self.body.new_operand(OperandKind.OK_COPY, item_place)
@@ -5648,7 +5648,7 @@ fn MirBuilder.bind_comprehension_element(self: MirBuilder, comp_node: i32, pat_o
         let bind_local = self.body.new_local(elem_ty, 0, pat_or_sym, 1)
         self.bind_local(pat_or_sym, bind_local)
         self.body.push_stmt(self.cur_bb, StmtKind.StorageLive, bind_local, 0, self.ast.get_start(span_node))
-        if self.sema.is_copy(elem_ty) == 0:
+        if self.sema.is_copy_frozen(elem_ty) == 0:
             self.schedule_drop(bind_local, DropKind.DK_VALUE)
         let bind_place = self.place_for_local(bind_local)
         let item_op = self.body.new_operand(OperandKind.OK_COPY, item_place)
@@ -6103,7 +6103,7 @@ fn MirBuilder.lower_array_comprehension(self: MirBuilder, comp_node: i32) -> i32
         self.emit_vec_new_into(out_place, self.ast.get_start(comp_node))
     self.lower_comprehension_clause(comp_node, 0, out_place, elem_ty)
 
-    if self.sema.is_copy(out_ty) != 0:
+    if self.sema.is_copy_frozen(out_ty) != 0:
         return self.body.new_operand(OperandKind.OK_COPY, out_place)
     self.body.new_operand(OperandKind.OK_MOVE, out_place)
 
@@ -7326,9 +7326,9 @@ fn MirBuilder.lower_pattern(self: MirBuilder, pat_node: i32, scrutinee_place: i3
             let local_id = self.body.new_local(bind_ty, 0, raw, 1)
             self.bind_local(raw, local_id)
             self.body.push_stmt(self.cur_bb, StmtKind.StorageLive, local_id, 0, self.ast.get_start(pat_node))
-            if self.sema.is_copy(bind_ty) == 0:
+            if self.sema.is_copy_frozen(bind_ty) == 0:
                 self.schedule_drop(local_id, DropKind.DK_VALUE)
-            let src_op = self.body.new_operand(if self.sema.is_copy(bind_ty) != 0: OperandKind.OK_COPY else: OperandKind.OK_MOVE, child_place)
+            let src_op = self.body.new_operand(if self.sema.is_copy_frozen(bind_ty) != 0: OperandKind.OK_COPY else: OperandKind.OK_MOVE, child_place)
             self.assign_operand_to_place(self.place_for_local(local_id), src_op, self.ast.get_start(pat_node))
             out.push(local_id)
             out.push(child_place)
@@ -7379,9 +7379,9 @@ fn MirBuilder.lower_pattern(self: MirBuilder, pat_node: i32, scrutinee_place: i3
                 let local_id = self.body.new_local(bind_ty, 0, field_name, 1)
                 self.bind_local(field_name, local_id)
                 self.body.push_stmt(self.cur_bb, StmtKind.StorageLive, local_id, 0, self.ast.get_start(pat_node))
-                if self.sema.is_copy(bind_ty) == 0:
+                if self.sema.is_copy_frozen(bind_ty) == 0:
                     self.schedule_drop(local_id, DropKind.DK_VALUE)
-                let src_op = self.body.new_operand(if self.sema.is_copy(bind_ty) != 0: OperandKind.OK_COPY else: OperandKind.OK_MOVE, child_place)
+                let src_op = self.body.new_operand(if self.sema.is_copy_frozen(bind_ty) != 0: OperandKind.OK_COPY else: OperandKind.OK_MOVE, child_place)
                 self.assign_operand_to_place(self.place_for_local(local_id), src_op, self.ast.get_start(pat_node))
                 out.push(local_id)
                 out.push(child_place)
@@ -7473,7 +7473,7 @@ fn MirBuilder.lower_pattern(self: MirBuilder, pat_node: i32, scrutinee_place: i3
             let local_id = self.body.new_local(sp_elem_ty, 0, sym, 1)
             self.bind_local(sym, local_id)
             self.body.push_stmt(self.cur_bb, StmtKind.StorageLive, local_id, 0, self.ast.get_start(pat_node))
-            let src_op = self.body.new_operand(if self.sema.is_copy(sp_elem_ty) != 0: OperandKind.OK_COPY else: OperandKind.OK_MOVE, field_place)
+            let src_op = self.body.new_operand(if self.sema.is_copy_frozen(sp_elem_ty) != 0: OperandKind.OK_COPY else: OperandKind.OK_MOVE, field_place)
             self.assign_operand_to_place(self.place_for_local(local_id), src_op, self.ast.get_start(pat_node))
             out.push(local_id)
             out.push(field_place)
@@ -7498,7 +7498,7 @@ fn MirBuilder.lower_pattern(self: MirBuilder, pat_node: i32, scrutinee_place: i3
             let local_id = self.body.new_local(sp_elem_ty, 0, sym, 1)
             self.bind_local(sym, local_id)
             self.body.push_stmt(self.cur_bb, StmtKind.StorageLive, local_id, 0, self.ast.get_start(pat_node))
-            let src_op = self.body.new_operand(if self.sema.is_copy(sp_elem_ty) != 0: OperandKind.OK_COPY else: OperandKind.OK_MOVE, field_place)
+            let src_op = self.body.new_operand(if self.sema.is_copy_frozen(sp_elem_ty) != 0: OperandKind.OK_COPY else: OperandKind.OK_MOVE, field_place)
             self.assign_operand_to_place(self.place_for_local(local_id), src_op, self.ast.get_start(pat_node))
             out.push(local_id)
             out.push(field_place)
@@ -7619,7 +7619,7 @@ fn MirBuilder.lower_match(self: MirBuilder, scrutinee_expr: i32, arms_start: i32
     self.forget_string_flow_facts()
     if result_is_void != 0:
         return self.unit_operand()
-    if self.sema.is_copy(result_ty) != 0:
+    if self.sema.is_copy_frozen(result_ty) != 0:
         return self.body.new_operand(OperandKind.OK_COPY, result_place)
     self.body.new_operand(OperandKind.OK_MOVE, result_place)
 
@@ -7679,7 +7679,7 @@ fn MirBuilder.lower_call(self: MirBuilder, fn_expr: i32, arg_exprs_start: i32, a
     self.switch_to(next_bb)
     self.register_stmt_temp(result_local, actual_ret_type_id)
 
-    if self.sema.is_copy(actual_ret_type_id) != 0:
+    if self.sema.is_copy_frozen(actual_ret_type_id) != 0:
         return self.body.new_operand(OperandKind.OK_COPY, result_place)
     self.body.new_operand(OperandKind.OK_MOVE, result_place)
 
@@ -7705,7 +7705,7 @@ fn MirBuilder.lower_call_redirected(self: MirBuilder, fn_op: i32, fn_sym: i32, a
     self.terminate(TermKind.TK_CALL, fn_op, args_id, result_place, next_bb)
     self.switch_to(next_bb)
     self.register_stmt_temp(result_local, actual_ret_type_id)
-    if self.sema.is_copy(actual_ret_type_id) != 0:
+    if self.sema.is_copy_frozen(actual_ret_type_id) != 0:
         return self.body.new_operand(OperandKind.OK_COPY, result_place)
     self.body.new_operand(OperandKind.OK_MOVE, result_place)
 
@@ -7747,7 +7747,7 @@ fn MirBuilder.lower_call_with_arg_nodes_recv(self: MirBuilder, fn_op: i32, calle
     self.terminate(TermKind.TK_CALL, fn_op, args_id, result_place, next_bb)
     self.switch_to(next_bb)
     self.register_stmt_temp(result_local, actual_ret_type_id)
-    if self.sema.is_copy(actual_ret_type_id) != 0:
+    if self.sema.is_copy_frozen(actual_ret_type_id) != 0:
         return self.body.new_operand(OperandKind.OK_COPY, result_place)
     self.body.new_operand(OperandKind.OK_MOVE, result_place)
 
@@ -8660,7 +8660,7 @@ fn MirBuilder.lower_method_call(self: MirBuilder, self_expr: i32, method_sym: i3
         let dyn_next = self.new_block()
         self.terminate(TermKind.TK_CALL, dyn_fn_op, dyn_args_id, dyn_place, dyn_next)
         self.switch_to(dyn_next)
-        if self.sema.is_copy(dyn_ret_ty) != 0:
+        if self.sema.is_copy_frozen(dyn_ret_ty) != 0:
             return self.body.new_operand(OperandKind.OK_COPY, dyn_place)
         return self.body.new_operand(OperandKind.OK_MOVE, dyn_place)
 
@@ -8867,7 +8867,7 @@ fn MirBuilder.lower_intrinsic_call(self: MirBuilder, intrinsic: MirIntrinsic, se
     let call_id = self.body.call_arg_starts.len() as i32 - 1
     self.body.set_call_intrinsic(call_id, intrinsic)
 
-    if self.sema.is_copy(ret_type) != 0:
+    if self.sema.is_copy_frozen(ret_type) != 0:
         return self.body.new_operand(OperandKind.OK_COPY, result_place)
     self.body.new_operand(OperandKind.OK_MOVE, result_place)
 
@@ -8907,7 +8907,7 @@ fn MirBuilder.cancel_scheduled_value_drop_for_receiver_expr(self: MirBuilder, ex
         // owning/aliasing (non-Copy) field read carries the receiver's buffer out
         // (the #606 self-aliasing case).
         let field_ty = self.expr_type(expr)
-        if field_ty != 0 and self.sema.is_copy(field_ty) != 0:
+        if field_ty != 0 and self.sema.is_copy_frozen(field_ty) != 0:
             return
         let recv_place = self.lower_expr_place(expr)
         self.mark_place_field_moved(recv_place)
@@ -8939,7 +8939,7 @@ fn MirBuilder.enum_accessor_payload_operand(self: MirBuilder, enum_place: i32, e
             let ref_place = self.place_for_local(ref_tmp)
             self.body.push_stmt(self.cur_bb, StmtKind.Assign, ref_place, ref_rv, span)
             return self.body.new_operand(OperandKind.OK_COPY, ref_place)
-        let op_kind = if self.sema.is_copy(payload_ty) != 0: OperandKind.OK_COPY else: OperandKind.OK_MOVE
+        let op_kind = if self.sema.is_copy_frozen(payload_ty) != 0: OperandKind.OK_COPY else: OperandKind.OK_MOVE
         return self.body.new_operand(op_kind, field_place)
 
     let tuple_fields: Vec[i32] = Vec.new()
@@ -8958,7 +8958,7 @@ fn MirBuilder.enum_accessor_payload_operand(self: MirBuilder, enum_place: i32, e
             self.body.push_stmt(self.cur_bb, StmtKind.Assign, ref_place, ref_rv, span)
             tuple_fields.push(self.body.new_operand(OperandKind.OK_COPY, ref_place))
         else:
-            let op_kind = if self.sema.is_copy(payload_ty) != 0: OperandKind.OK_COPY else: OperandKind.OK_MOVE
+            let op_kind = if self.sema.is_copy_frozen(payload_ty) != 0: OperandKind.OK_COPY else: OperandKind.OK_MOVE
             tuple_fields.push(self.body.new_operand(op_kind, field_place))
         tuple_names.push(0)
     let tuple_fid = self.body.new_agg_fields(tuple_fields, tuple_names)
@@ -8966,7 +8966,7 @@ fn MirBuilder.enum_accessor_payload_operand(self: MirBuilder, enum_place: i32, e
     let tuple_tmp = self.new_temp(unwrapped_ty)
     let tuple_place = self.place_for_local(tuple_tmp)
     self.body.push_stmt(self.cur_bb, StmtKind.Assign, tuple_place, tuple_rv, span)
-    self.body.new_operand(if self.sema.is_copy(unwrapped_ty) != 0: OperandKind.OK_COPY else: OperandKind.OK_MOVE, tuple_place)
+    self.body.new_operand(if self.sema.is_copy_frozen(unwrapped_ty) != 0: OperandKind.OK_COPY else: OperandKind.OK_MOVE, tuple_place)
 
 fn MirBuilder.assign_enum_variant_to_place(self: MirBuilder, result_place: i32, result_ty: i32, variant_sym: i32, fields: Vec[i32], span: i32):
     let names: Vec[i32] = Vec.new()
@@ -9050,7 +9050,7 @@ fn MirBuilder.lower_enum_accessor_call(self: MirBuilder, self_expr: i32, method_
     self.terminate(TermKind.TK_SWITCH_INT, disc, table, none_bb, 0)
 
     self.switch_to(none_bb)
-    if accessor_kind == 2 and self.sema.is_copy(enum_ty) == 0:
+    if accessor_kind == 2 and self.sema.is_copy_frozen(enum_ty) == 0:
         self.emit_drop_stmt(recv_place, "enum-accessor", span)
     let none_fields: Vec[i32] = Vec.new()
     self.assign_enum_variant_to_place(result_place, result_ty, self.sema.syms.none, none_fields, span)
@@ -9065,7 +9065,7 @@ fn MirBuilder.lower_enum_accessor_call(self: MirBuilder, self_expr: i32, method_
 
     self.switch_to(join_bb)
     self.forget_string_flow_facts()
-    self.body.new_operand(if self.sema.is_copy(result_ty) != 0: OperandKind.OK_COPY else: OperandKind.OK_MOVE, result_place)
+    self.body.new_operand(if self.sema.is_copy_frozen(result_ty) != 0: OperandKind.OK_COPY else: OperandKind.OK_MOVE, result_place)
 
 fn MirBuilder.emit_cleanup_awaits_from(self: MirBuilder, task_ops: &Vec[i32], start_idx: i32, node: i32):
     var ci = start_idx
@@ -9164,13 +9164,13 @@ fn MirBuilder.lower_question_mark_value(self: MirBuilder, value_op: i32, value_t
     let result_place = self.place_for_local(result_local)
     let downcast_place = self.body.new_downcast_place(value_place, self.success_variant_index(), value_ty)
     let payload_place = self.body.new_field_place(downcast_place, 0, result_ty)
-    let pass_op = self.body.new_operand(if self.sema.is_copy(result_ty) != 0: OperandKind.OK_COPY else: OperandKind.OK_MOVE, payload_place)
+    let pass_op = self.body.new_operand(if self.sema.is_copy_frozen(result_ty) != 0: OperandKind.OK_COPY else: OperandKind.OK_MOVE, payload_place)
     self.assign_operand_to_place(result_place, pass_op, self.ast.get_start(span_node))
     self.terminate(TermKind.TK_GOTO, join_bb, 0, 0, 0)
 
     self.switch_to(join_bb)
     self.forget_string_flow_facts()
-    if self.sema.is_copy(result_ty) != 0:
+    if self.sema.is_copy_frozen(result_ty) != 0:
         return self.body.new_operand(OperandKind.OK_COPY, result_place)
     self.body.new_operand(OperandKind.OK_MOVE, result_place)
 
@@ -9208,7 +9208,7 @@ fn MirBuilder.lower_tuple_await_question_mark(self: MirBuilder, await_node: i32,
     let tmp = self.new_temp(result_tuple_ty)
     let place = self.place_for_local(tmp)
     self.body.push_stmt(self.cur_bb, StmtKind.Assign, place, rv, self.ast.get_start(question_node))
-    self.body.new_operand(if self.sema.is_copy(result_tuple_ty) != 0: OperandKind.OK_COPY else: OperandKind.OK_MOVE, place)
+    self.body.new_operand(if self.sema.is_copy_frozen(result_tuple_ty) != 0: OperandKind.OK_COPY else: OperandKind.OK_MOVE, place)
 
 fn MirBuilder.lower_question_mark(self: MirBuilder, expr: i32, node: i32) -> i32:
     if self.sema.try_branch_fns.contains(node):
@@ -9254,7 +9254,7 @@ fn MirBuilder.lower_double_question(self: MirBuilder, expr: i32, default_expr: i
     self.switch_to(some_bb)
     let downcast_place = self.body.new_downcast_place(value_place, self.success_variant_index(), value_ty)
     let payload_place = self.body.new_field_place(downcast_place, 0, result_ty)
-    let some_op = self.body.new_operand(if self.sema.is_copy(result_ty) != 0: OperandKind.OK_COPY else: OperandKind.OK_MOVE, payload_place)
+    let some_op = self.body.new_operand(if self.sema.is_copy_frozen(result_ty) != 0: OperandKind.OK_COPY else: OperandKind.OK_MOVE, payload_place)
     self.assign_operand_to_place(result_place, some_op, self.ast.get_start(expr))
     self.terminate(TermKind.TK_GOTO, join_bb, 0, 0, 0)
 
@@ -9265,7 +9265,7 @@ fn MirBuilder.lower_double_question(self: MirBuilder, expr: i32, default_expr: i
 
     self.switch_to(join_bb)
     self.forget_string_flow_facts()
-    if self.sema.is_copy(result_ty) != 0:
+    if self.sema.is_copy_frozen(result_ty) != 0:
         return self.body.new_operand(OperandKind.OK_COPY, result_place)
     self.body.new_operand(OperandKind.OK_MOVE, result_place)
 
@@ -9560,7 +9560,7 @@ fn MirBuilder.tuple_operand_from_fields(self: MirBuilder, fields: Vec[i32], resu
     self.operand_for_place(place, result_ty)
 
 fn MirBuilder.clone_or_copy_place(self: MirBuilder, payload_place: i32, payload_ty: i32, node: i32) -> i32:
-    if self.sema.is_copy(payload_ty) != 0:
+    if self.sema.is_copy_frozen(payload_ty) != 0:
         return self.operand_for_place(payload_place, payload_ty)
     let resolved = self.sema.resolve_alias(payload_ty)
     let type_sym = self.sema.get_type_name(resolved)
@@ -10216,7 +10216,7 @@ fn MirBuilder.lower_unwrap_or_method(self: MirBuilder, self_expr: i32, arg_start
     self.switch_to(some_bb)
     let downcast_place = self.body.new_downcast_place(value_place, self.success_variant_index(), value_ty)
     let payload_place = self.body.new_field_place(downcast_place, 0, result_ty)
-    let some_op = self.body.new_operand(if self.sema.is_copy(result_ty) != 0: OperandKind.OK_COPY else: OperandKind.OK_MOVE, payload_place)
+    let some_op = self.body.new_operand(if self.sema.is_copy_frozen(result_ty) != 0: OperandKind.OK_COPY else: OperandKind.OK_MOVE, payload_place)
     self.assign_operand_to_place(result_place, some_op, self.ast.get_start(self_expr))
     self.terminate(TermKind.TK_GOTO, join_bb, 0, 0, 0)
 
@@ -10227,7 +10227,7 @@ fn MirBuilder.lower_unwrap_or_method(self: MirBuilder, self_expr: i32, arg_start
 
     self.switch_to(join_bb)
     self.forget_string_flow_facts()
-    if self.sema.is_copy(result_ty) != 0:
+    if self.sema.is_copy_frozen(result_ty) != 0:
         return self.body.new_operand(OperandKind.OK_COPY, result_place)
     self.body.new_operand(OperandKind.OK_MOVE, result_place)
 
@@ -10355,7 +10355,7 @@ fn MirBuilder.lower_with_binding(self: MirBuilder, sym: i32, rhs_expr: i32, body
     let local = self.body.new_local(ty, is_mut, sym, 1)
     self.bind_local(sym, local)
     self.body.push_stmt(self.cur_bb, StmtKind.StorageLive, local, 0, span)
-    if self.sema.is_copy(ty) == 0:
+    if self.sema.is_copy_frozen(ty) == 0:
         self.schedule_drop(local, DropKind.DK_VALUE)
     let rhs = self.lower_expr(rhs_expr)
     self.assign_operand_to_place(self.place_for_local(local), rhs, self.ast.get_start(rhs_expr))
@@ -10416,7 +10416,7 @@ fn MirBuilder.lower_with_form2_3(self: MirBuilder, pat_or_name: i32, rhs_expr: i
         let local = self.body.new_local(ty, 0, sym, 1)
         self.bind_local(sym, local)
         self.body.push_stmt(self.cur_bb, StmtKind.StorageLive, local, 0, self.ast.get_start(pat_or_name))
-        if self.sema.is_copy(ty) == 0:
+        if self.sema.is_copy_frozen(ty) == 0:
             self.schedule_drop(local, DropKind.DK_VALUE)
         let rhs = self.lower_expr(rhs_expr)
         self.assign_operand_to_place(self.place_for_local(local), rhs, self.ast.get_start(rhs_expr))
@@ -10429,7 +10429,7 @@ fn MirBuilder.lower_with_form2_3(self: MirBuilder, pat_or_name: i32, rhs_expr: i
 fn MirBuilder.lower_record_update(self: MirBuilder, base_expr: i32, field_updates_start: i32, field_updates_count: i32, node: i32) -> i32:
     let ty = self.expr_type(node)
     let base_place = self.lower_expr_place(base_expr)
-    if ty != 0 and self.sema.is_copy(ty) == 0 and base_place >= 0 and base_place < self.body.place_locals.len() as i32:
+    if ty != 0 and self.sema.is_copy_frozen(ty) == 0 and base_place >= 0 and base_place < self.body.place_locals.len() as i32:
         if self.body.place_proj_counts.get(base_place as i64) == 0:
             self.cancel_scheduled_value_drop_for_local(self.body.place_locals.get(base_place as i64))
     let resolved_ty = self.sema.resolve_alias(ty)
@@ -10468,7 +10468,7 @@ fn MirBuilder.lower_record_update(self: MirBuilder, base_expr: i32, field_update
                 update_idx = ui
                 break
         if update_idx >= 0:
-            if field_ty != 0 and self.sema.is_copy(field_ty) == 0:
+            if field_ty != 0 and self.sema.is_copy_frozen(field_ty) == 0:
                 let old_field_tmp = self.new_temp(field_ty)
                 let old_field_place = self.place_for_local(old_field_tmp)
                 let old_field_op = self.body.new_operand(OperandKind.OK_MOVE, src_field_place)
@@ -10476,7 +10476,7 @@ fn MirBuilder.lower_record_update(self: MirBuilder, base_expr: i32, field_update
                 self.emit_drop_stmt(old_field_place, "record-update", self.ast.get_start(node))
             result_fields.push(update_ops.get(update_idx as i64))
         else:
-            let op_kind = if field_ty != 0 and self.sema.is_copy(field_ty) != 0: OperandKind.OK_COPY else: OperandKind.OK_MOVE
+            let op_kind = if field_ty != 0 and self.sema.is_copy_frozen(field_ty) != 0: OperandKind.OK_COPY else: OperandKind.OK_MOVE
             let field_op = self.body.new_operand(op_kind, src_field_place)
             result_fields.push(field_op)
         result_names.push(f_name_sym)
@@ -10581,7 +10581,7 @@ fn MirBuilder.lower_optional_chain_field(self: MirBuilder, result_place: i32, re
         return
 
     let field_place = self.body.new_field_place(payload_place, member_sym, field_ty)
-    let field_op_kind = if self.sema.is_copy(field_ty) != 0: OperandKind.OK_COPY else: OperandKind.OK_MOVE
+    let field_op_kind = if self.sema.is_copy_frozen(field_ty) != 0: OperandKind.OK_COPY else: OperandKind.OK_MOVE
     let field_op = self.body.new_operand(field_op_kind, field_place)
     if field_ty == result_ty:
         self.assign_operand_to_place(result_place, field_op, span)
@@ -10609,7 +10609,7 @@ fn MirBuilder.lower_intrinsic_call_with_receiver_operand(self: MirBuilder, intri
     self.terminate(TermKind.TK_CALL, fn_op, args_id, result_place, next_bb)
     self.switch_to(next_bb)
     self.body.set_call_intrinsic(args_id, intrinsic)
-    if self.sema.is_copy(ret_type) != 0:
+    if self.sema.is_copy_frozen(ret_type) != 0:
         return self.body.new_operand(OperandKind.OK_COPY, result_place)
     self.body.new_operand(OperandKind.OK_MOVE, result_place)
 
@@ -10622,11 +10622,11 @@ fn MirBuilder.lower_optional_chain_receiver_operand(self: MirBuilder, payload_pl
             let temp_place = self.place_for_local(temp)
             self.body.push_stmt(self.cur_bb, StmtKind.Assign, temp_place, rv, span)
             return self.body.new_operand(OperandKind.OK_COPY, temp_place)
-    let op_kind = if self.sema.is_copy(payload_ty) != 0: OperandKind.OK_COPY else: OperandKind.OK_MOVE
+    let op_kind = if self.sema.is_copy_frozen(payload_ty) != 0: OperandKind.OK_COPY else: OperandKind.OK_MOVE
     self.body.new_operand(op_kind, payload_place)
 
 fn MirBuilder.operand_for_place(self: MirBuilder, place: i32, type_id: i32) -> i32:
-    let op_kind = if self.sema.is_copy(type_id) != 0: OperandKind.OK_COPY else: OperandKind.OK_MOVE
+    let op_kind = if self.sema.is_copy_frozen(type_id) != 0: OperandKind.OK_COPY else: OperandKind.OK_MOVE
     self.body.new_operand(op_kind, place)
 
 fn MirBuilder.lower_call_with_operand_args(self: MirBuilder, fn_op: i32, args: Vec[i32], ret_type: i32, node: i32) -> i32:
@@ -10640,7 +10640,7 @@ fn MirBuilder.lower_call_with_operand_args(self: MirBuilder, fn_op: i32, args: V
     self.terminate(TermKind.TK_CALL, fn_op, args_id, result_place, next_bb)
     self.switch_to(next_bb)
     self.register_stmt_temp(result_local, ret_type)
-    if self.sema.is_copy(ret_type) != 0:
+    if self.sema.is_copy_frozen(ret_type) != 0:
         return self.body.new_operand(OperandKind.OK_COPY, result_place)
     self.body.new_operand(OperandKind.OK_MOVE, result_place)
 
@@ -10658,7 +10658,7 @@ fn MirBuilder.lower_resolved_call_with_operand_args(self: MirBuilder, fn_sym: i3
     self.terminate(TermKind.TK_CALL, fn_op, args_id, result_place, next_bb)
     self.switch_to(next_bb)
     self.register_stmt_temp(result_local, ret_type)
-    if self.sema.is_copy(ret_type) != 0:
+    if self.sema.is_copy_frozen(ret_type) != 0:
         return self.body.new_operand(OperandKind.OK_COPY, result_place)
     self.body.new_operand(OperandKind.OK_MOVE, result_place)
 
@@ -10677,7 +10677,7 @@ fn MirBuilder.lower_call_with_receiver_operand(self: MirBuilder, fn_op: i32, cal
     self.terminate(TermKind.TK_CALL, fn_op, args_id, result_place, next_bb)
     self.switch_to(next_bb)
     self.register_stmt_temp(result_local, ret_type)
-    if self.sema.is_copy(ret_type) != 0:
+    if self.sema.is_copy_frozen(ret_type) != 0:
         return self.body.new_operand(OperandKind.OK_COPY, result_place)
     self.body.new_operand(OperandKind.OK_MOVE, result_place)
 
@@ -10696,7 +10696,7 @@ fn MirBuilder.lower_optional_chain_method(self: MirBuilder, result_place: i32, r
 
     let intrinsic = self.classify_intrinsic(payload_ty, method_name)
     if intrinsic != MirIntrinsic.NONE:
-        let payload_op_kind = if self.sema.is_copy(payload_ty) != 0: OperandKind.OK_COPY else: OperandKind.OK_MOVE
+        let payload_op_kind = if self.sema.is_copy_frozen(payload_ty) != 0: OperandKind.OK_COPY else: OperandKind.OK_MOVE
         let payload_op = self.body.new_operand(payload_op_kind, payload_place)
         raw_op = self.lower_intrinsic_call_with_receiver_operand(intrinsic, payload_op, payload_ty, member_sym, arg_start, arg_count, raw_ret_ty, node)
     else:
@@ -10817,7 +10817,7 @@ fn MirBuilder.lower_optional_chain(self: MirBuilder, node: i32) -> i32:
 
     self.switch_to(join_bb)
     self.forget_string_flow_facts()
-    if self.sema.is_copy(result_ty) != 0:
+    if self.sema.is_copy_frozen(result_ty) != 0:
         return self.body.new_operand(OperandKind.OK_COPY, result_place)
     self.body.new_operand(OperandKind.OK_MOVE, result_place)
 
@@ -11043,7 +11043,7 @@ fn MirBuilder.lower_expr(self: MirBuilder, node: i32) -> i32:
         // Tightly scoped to a plain array-local base — Vec/slice/map indexing is
         // unaffected.
         let idx_val_ty = self.expr_type(node)
-        if idx_val_ty != 0 and self.sema.is_copy(idx_val_ty as TypeId) == 0:
+        if idx_val_ty != 0 and self.sema.is_copy_frozen(idx_val_ty as TypeId) == 0:
             let idx_base_local = self.place_base_local(place)
             if idx_base_local >= 0 and idx_base_local < self.body.local_type_ids.len() as i32:
                 let idx_base_ty = self.body.local_type_ids.get(idx_base_local as i64)
@@ -11127,7 +11127,7 @@ fn MirBuilder.lower_expr(self: MirBuilder, node: i32) -> i32:
         let rhs_op = self.lower_expr(rhs_node)
         self.expected_type = saved_expected
         let place = self.lower_expr_place(target)
-        if target_ty != 0 and self.sema.is_copy(target_ty) == 0 and self.sema.type_needs_drop(target_ty) != 0:
+        if target_ty != 0 and self.sema.is_copy_frozen(target_ty) == 0 and self.sema.type_needs_drop(target_ty) != 0:
             self.emit_drop_place_respecting_moved_fields(place, target_ty)
         self.assign_operand_to_place(place, rhs_op, self.ast.get_start(target))
         return rhs_op
@@ -12046,7 +12046,7 @@ fn lower_fn_with_sig(builder: MirBuilder, fn_node: i32, sig_idx: i32) -> MirBody
             // owned params (consume/escape_value → not value_ref_abi, and move-self
             // receivers) are dropped by the callee.
             let share_place_param = sig_idx >= 0 and builder.sema.sig_param_uses_value_ref_abi(sig_idx, i) != 0 and not move_self_receiver
-            if builder.sema.is_copy(p_ty) == 0 and drop_receiver_self == 0 and not borrowed_receiver and not share_place_param:
+            if builder.sema.is_copy_frozen(p_ty) == 0 and drop_receiver_self == 0 and not borrowed_receiver and not share_place_param:
                 builder.schedule_drop(local_id, DropKind.DK_VALUE)
             param_locals.push(local_id)
         builder.body.n_params = param_count
@@ -12158,7 +12158,7 @@ fn lower_fn_clause_dispatcher(sema: &Sema, ast_pool: AstPool, pool: InternPool, 
         // #D5/P1: share-place (value_ref_abi) params are borrows — not callee-dropped.
         // A move-self receiver is owned (§9.5/#D5) and dropped by the callee.
         let clause_share_place = sig_idx >= 0 and sema.sig_param_uses_value_ref_abi(sig_idx, pi) != 0 and not clause_move_self
-        if sema.is_copy(p_ty) == 0 and not clause_borrowed_receiver and not clause_share_place:
+        if sema.is_copy_frozen(p_ty) == 0 and not clause_borrowed_receiver and not clause_share_place:
             builder.schedule_drop(local_id, DropKind.DK_VALUE)
         param_locals.push(local_id)
     builder.body.n_params = param_count
@@ -12198,7 +12198,7 @@ fn lower_fn_clause_dispatcher(sema: &Sema, ast_pool: AstPool, pool: InternPool, 
         for pi2 in 0..param_count:
             let p_ty = sema.sig_param_type(sig_idx, pi2)
             let place = builder.place_for_local(param_locals.get(pi2 as i64))
-            args.push(builder.body.new_operand(if sema.is_copy(p_ty) != 0: OperandKind.OK_COPY else: OperandKind.OK_MOVE, place))
+            args.push(builder.body.new_operand(if sema.is_copy_frozen(p_ty) != 0: OperandKind.OK_COPY else: OperandKind.OK_MOVE, place))
         let args_id = builder.body.new_call_args(args)
         let call_ret_local = builder.new_temp(ret_ty)
         let call_ret_place = builder.place_for_local(call_ret_local)
@@ -12206,7 +12206,7 @@ fn lower_fn_clause_dispatcher(sema: &Sema, ast_pool: AstPool, pool: InternPool, 
         builder.terminate(TermKind.TK_CALL, fn_op, args_id, call_ret_place, after_call_bb)
         builder.switch_to(after_call_bb)
         if ret_ty != sema.ty_void:
-            let ret_op = builder.body.new_operand(if sema.is_copy(ret_ty) != 0: OperandKind.OK_COPY else: OperandKind.OK_MOVE, call_ret_place)
+            let ret_op = builder.body.new_operand(if sema.is_copy_frozen(ret_ty) != 0: OperandKind.OK_COPY else: OperandKind.OK_MOVE, call_ret_place)
             builder.assign_operand_to_place(builder.place_for_local(0), ret_op, ast_pool.get_start(clause_node))
         builder.emit_drops_for_return()
         builder.terminate(TermKind.TK_RETURN, 0, 0, 0, 0)
@@ -12922,7 +12922,7 @@ fn tailrec_drop_binding_sym(sema: &Sema, node: i32) -> i32:
         bind_ty = sema.typed_binding_types.get(node).unwrap()
     if bind_ty == 0:
         return 0
-    if sema.is_copy(bind_ty as TypeId) != 0:
+    if sema.is_copy_frozen(bind_ty as TypeId) != 0:
         return 0
     let owner_sym = sema.method_owner_symbol_for_type(sema.resolve_alias(bind_ty as TypeId) as i32)
     if owner_sym != 0 and sema.has_drop_method(owner_sym) != 0:
@@ -12953,7 +12953,7 @@ fn tailrec_call_consumes_active_drop(sema: &Sema, node: i32, callee_sym: i32, st
         if tailrec_consumed_ident_sym(sema, arg) != state.first_sym:
             continue
         let param_ty = sema.sig_param_type(sig_idx, ai)
-        if param_ty != 0 and sema.is_copy(param_ty as TypeId) == 0:
+        if param_ty != 0 and sema.is_copy_frozen(param_ty as TypeId) == 0:
             return true
     false
 

@@ -751,10 +751,12 @@ type Sema {
     generic_subst_type_ids: Vec[i32],
     generic_specialization_cache: HashMap[str, i32],
     generic_inst_cache: HashMap[i64, i32],
-    // D7: eager layout tables filled in preregister_mir_types (before freeze) so the
-    // frozen consumers read sizes/aligns via &Self twins instead of re-deriving them.
+    // D7: eager tables filled in preregister_mir_types (before freeze) so the frozen
+    // consumers read answers via &Self twins instead of re-deriving them through the
+    // mutating checker. is_copy_cache[tid] = 0/1 copy-ness.
     layout_size_cache: HashMap[i32, i64],
     layout_align_cache: HashMap[i32, i64],
+    is_copy_cache: HashMap[i32, i32],
 
     // Associated type bindings from current impl (for Self.Name resolution)
     assoc_type_bindings: HashMap[i32, i32],
@@ -1179,6 +1181,7 @@ pub fn Sema.prepare_comptime_eval_copy(mut self: Sema) -> Sema:
     self.generic_inst_cache = sema_new_map_i64_i32()
     self.layout_size_cache = HashMap.new()
     self.layout_align_cache = HashMap.new()
+    self.is_copy_cache = sema_new_map_i32_i32()
     self.generic_subst_param_syms = sema_clone_i32_vec(&self.generic_subst_param_syms)
     self.generic_subst_type_ids = sema_clone_i32_vec(&self.generic_subst_type_ids)
     self.source_text_file_ids = sema_clone_i32_vec(&self.source_text_file_ids)
@@ -1465,6 +1468,7 @@ fn sema_empty_state(pool: InternPool, diags: DiagnosticList, ast: AstPool) -> Se
     let generic_inst_cache = sema_new_map_i64_i32()
     let layout_size_cache: HashMap[i32, i64] = HashMap.new()
     let layout_align_cache: HashMap[i32, i64] = HashMap.new()
+    let is_copy_cache = sema_new_map_i32_i32()
     var s = Sema {
         pool: pool,
         diags: diags,
@@ -1733,6 +1737,7 @@ fn sema_empty_state(pool: InternPool, diags: DiagnosticList, ast: AstPool) -> Se
         generic_inst_cache,
         layout_size_cache,
         layout_align_cache,
+        is_copy_cache,
         assoc_type_bindings: sema_new_map_i32_i32(),
         symbols_frozen: 0,
         types_frozen: 0,
@@ -3059,8 +3064,10 @@ fn Sema.preregister_mir_types(self: Sema):
             if not self.layout_size_cache.contains(lti):
                 let lt_sz = self.type_layout_size_of(lti)
                 let lt_al = self.type_layout_align_of(lti)
+                let lt_cp = self.is_copy(lti as TypeId)
                 self.layout_size_cache.insert(lti, lt_sz)
                 self.layout_align_cache.insert(lti, lt_al)
+                self.is_copy_cache.insert(lti, lt_cp)
         if self.type_kinds.len() as i32 == lt_n:
             layout_pass_done = true
 

@@ -395,3 +395,13 @@ fn Sema.type_layout_align_of_frozen(self: &Self, tid: i32) -> i64:
         return self.layout_align_cache.get(tid).unwrap()
     with_eprint("BUG: type_layout_align_of_frozen miss — layout not preregistered")
     1
+
+// D7 frozen read twin of is_copy. The is_copy_cache is filled for every type in
+// preregister_mir_types (before freeze), so this is a pure &Self lookup — no re-entry
+// into trait selection / the checker. Complete by construction (the eager loop covers
+// every tid in 0..type_count); a miss is a phase violation (loud). Non-copy default.
+fn Sema.is_copy_frozen(self: &Self, tid: TypeId) -> i32:
+    if self.is_copy_cache.contains(tid as i32):
+        return self.is_copy_cache.get(tid as i32).unwrap()
+    with_eprint("BUG: is_copy_frozen miss — type not preregistered")
+    0
