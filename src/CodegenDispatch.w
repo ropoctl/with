@@ -7651,8 +7651,8 @@ fn Codegen.mir_emit_map_intrinsic_call(self: Codegen, body: &MirBody, intrinsic:
                 let pair_start = self.mir_input.mir_get_type_d0(pair_resolved)
                 let tuple_key_tid = self.mir_input.mir_get_type_extra(pair_start)
                 let tuple_val_tid = self.mir_input.mir_get_type_extra(pair_start + 1)
-                val_offset = self.sema.type_layout_size_of(tuple_key_tid)
-                let tuple_val_align = self.sema.type_layout_align_of(tuple_val_tid)
+                val_offset = self.sema.type_layout_size_of_frozen(tuple_key_tid)
+                let tuple_val_align = self.sema.type_layout_align_of_frozen(tuple_val_tid)
                 if tuple_val_align > 1:
                     let tuple_rem = val_offset % tuple_val_align
                     if tuple_rem != 0:
@@ -10182,7 +10182,7 @@ fn Codegen.mir_emit_ext_channel_scope_intrinsic_call(self: Codegen, body: &MirBo
                     let elem_tid = self.mir_input.mir_get_type_extra(args_start_ch)
                     if elem_tid > 0:
                         chan_elem_sema_ty = elem_tid
-                        let sema_size = self.sema.type_layout_size_of(elem_tid)
+                        let sema_size = self.sema.type_layout_size_of_frozen(elem_tid)
                         if sema_size > 0:
                             chan_elem_size = sema_size
         var chan_drop_fn = wl_const_null(ptr_ty)
@@ -13127,7 +13127,7 @@ fn Codegen.mir_emit_call_term(self: Codegen, body: &MirBody, callee_operand: i32
                                             let chan_t_tid = self.mir_input.mir_get_type_extra(chan_gi_start)
                                             if chan_t_tid > 0:
                                                 chan_elem_sema_ty = chan_t_tid
-                                                let chan_t_size = self.sema.type_layout_size_of(chan_t_tid)
+                                                let chan_t_size = self.sema.type_layout_size_of_frozen(chan_t_tid)
                                                 if chan_t_size > 0:
                                                     chan_elem_size = chan_t_size
                     // Get capacity argument
@@ -17568,7 +17568,7 @@ fn Codegen.gen_sizeof_alignof(self: Codegen, name_sym: i32, node: i32) -> i64:
     if tp_kind == NodeKind.NK_IDENT or tp_kind == NodeKind.NK_TYPE_NAMED:
         let ty_sym = self.pool.get_data0(tp_node)
         if self.sema.named_types.contains(ty_sym):
-            let model_align = self.sema.type_layout_align_of(self.sema.named_types.get(ty_sym).unwrap())
+            let model_align = self.sema.type_layout_align_of_frozen(self.sema.named_types.get(ty_sym).unwrap())
             if model_align > 0:
                 return wl_const_int(wl_i64_type(self.context), model_align, 0)
     wl_const_int(wl_i64_type(self.context), wl_abi_align_of(dl, type_val) as i64, 0)

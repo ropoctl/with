@@ -3404,8 +3404,8 @@ fn Codegen.declare_union_type(self: Codegen, name_sym: i32, type_node: i32):
         self.struct_field_defaults.push(f_default)
         self.struct_llvm_field_indices.push(0)
         let f_tid = self.sema.resolve_type_expr(f_type_node)
-        let f_size = if f_tid > 0: self.sema.type_layout_size_of(f_tid) else: self.abi_size_of(f_ty)
-        let f_align = if f_tid > 0: self.sema.type_layout_align_of(f_tid) else: 1
+        let f_size = if f_tid > 0: self.sema.type_layout_size_of_frozen(f_tid) else: self.abi_size_of(f_ty)
+        let f_align = if f_tid > 0: self.sema.type_layout_align_of_frozen(f_tid) else: 1
         if f_size > max_size:
             max_size = f_size
         if f_align > max_align:

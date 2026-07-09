@@ -751,6 +751,10 @@ type Sema {
     generic_subst_type_ids: Vec[i32],
     generic_specialization_cache: HashMap[str, i32],
     generic_inst_cache: HashMap[i64, i32],
+    // D7: eager layout tables filled in preregister_mir_types (before freeze) so the
+    // frozen consumers read sizes/aligns via &Self twins instead of re-deriving them.
+    layout_size_cache: HashMap[i32, i64],
+    layout_align_cache: HashMap[i32, i64],
 
     // Associated type bindings from current impl (for Self.Name resolution)
     assoc_type_bindings: HashMap[i32, i32],
@@ -1173,6 +1177,8 @@ pub fn Sema.prepare_comptime_eval_copy(mut self: Sema) -> Sema:
     self.type_d2 = sema_clone_i32_vec(&self.type_d2)
     self.type_extra = sema_clone_i32_vec(&self.type_extra)
     self.generic_inst_cache = sema_new_map_i64_i32()
+    self.layout_size_cache = HashMap.new()
+    self.layout_align_cache = HashMap.new()
     self.generic_subst_param_syms = sema_clone_i32_vec(&self.generic_subst_param_syms)
     self.generic_subst_type_ids = sema_clone_i32_vec(&self.generic_subst_type_ids)
     self.source_text_file_ids = sema_clone_i32_vec(&self.source_text_file_ids)
@@ -1457,6 +1463,8 @@ fn sema_empty_state(pool: InternPool, diags: DiagnosticList, ast: AstPool) -> Se
     let typed_dump_seen_nodes = sema_new_map_i32_i32()
     let generic_specialization_cache = sema_new_map_str_i32()
     let generic_inst_cache = sema_new_map_i64_i32()
+    let layout_size_cache: HashMap[i32, i64] = HashMap.new()
+    let layout_align_cache: HashMap[i32, i64] = HashMap.new()
     var s = Sema {
         pool: pool,
         diags: diags,
@@ -1723,6 +1731,8 @@ fn sema_empty_state(pool: InternPool, diags: DiagnosticList, ast: AstPool) -> Se
         generic_subst_type_ids: Vec.new(),
         generic_specialization_cache,
         generic_inst_cache,
+        layout_size_cache,
+        layout_align_cache,
         assoc_type_bindings: sema_new_map_i32_i32(),
         symbols_frozen: 0,
         types_frozen: 0,
@@ -3038,6 +3048,21 @@ fn Sema.preregister_mir_types(self: Sema):
         self.type_extra.push(self.ty_str as i32)
         let tid = self.add_type(TypeKind.TY_GENERIC_INST, vi_sym, te_start, 1)
         self.generic_inst_cache.insert(vi_str_key, tid as i32)
+
+    // D7 eager layout tables: compute size/align for every type now (types_frozen is
+    // still 0, so a layout that needs a dependent type may create it), then the frozen
+    // consumers read them via &Self twins. Loop until stable in case layout adds a type.
+    var layout_pass_done = false
+    while not layout_pass_done:
+        let lt_n = self.type_kinds.len() as i32
+        for lti in 0..lt_n:
+            if not self.layout_size_cache.contains(lti):
+                let lt_sz = self.type_layout_size_of(lti)
+                let lt_al = self.type_layout_align_of(lti)
+                self.layout_size_cache.insert(lti, lt_sz)
+                self.layout_align_cache.insert(lti, lt_al)
+        if self.type_kinds.len() as i32 == lt_n:
+            layout_pass_done = true
 
 // TypeKind.TY_GENERIC_INST: d0=base_sym, d1=extra_start, d2=arg_count
 // Type args stored in type_extra[extra_start..extra_start+arg_count] as TypeIds.

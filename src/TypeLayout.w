@@ -380,3 +380,18 @@ fn Sema.type_layout_size_of(self: Sema, tid: i32) -> i64:
                 return self.type_layout_enum_size_of(resolved as i32)
         return 0
     0
+
+// D7 frozen read twins of the layout queries. At codegen the layout tables are filled
+// (preregister_mir_types, before freeze), so these are pure &Self lookups. A miss is a
+// phase violation (loud); size 0 / align 1 is the conservative fallback.
+fn Sema.type_layout_size_of_frozen(self: &Self, tid: i32) -> i64:
+    if self.layout_size_cache.contains(tid):
+        return self.layout_size_cache.get(tid).unwrap()
+    with_eprint("BUG: type_layout_size_of_frozen miss — layout not preregistered")
+    0
+
+fn Sema.type_layout_align_of_frozen(self: &Self, tid: i32) -> i64:
+    if self.layout_align_cache.contains(tid):
+        return self.layout_align_cache.get(tid).unwrap()
+    with_eprint("BUG: type_layout_align_of_frozen miss — layout not preregistered")
+    1
