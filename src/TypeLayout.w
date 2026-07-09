@@ -415,3 +415,12 @@ fn Sema.type_needs_drop_frozen(self: &Self, tid: i32) -> i32:
         return self.needs_drop_result_cache.get(tid).unwrap()
     with_eprint("BUG: type_needs_drop_frozen miss — type not preregistered")
     0
+
+// D7 frozen read twin of try_unwrapped_type (Result/Option payload unwrap), filled in
+// preregister_mir_types. Pure &Self lookup, complete by construction; miss = loud BUG,
+// default 0 (= not unwrappable) matches the query's own not-found return.
+fn Sema.try_unwrapped_type_frozen(self: &Self, tid: i32) -> i32:
+    if self.unwrapped_type_cache.contains(tid):
+        return self.unwrapped_type_cache.get(tid).unwrap()
+    with_eprint("BUG: try_unwrapped_type_frozen miss — type not preregistered")
+    0

@@ -2045,7 +2045,7 @@ fn MirBuilder.fallback_expr_type(self: MirBuilder, node: i32) -> i32:
         if uop == UnaryOp.UOP_TRY:
             let inner_node = self.ast.get_data1(node)
             let inner_ty = self.expr_type(inner_node)
-            let unwrapped = self.sema.try_unwrapped_type(inner_ty) as i32
+            let unwrapped = self.sema.try_unwrapped_type_frozen(inner_ty) as i32
             if unwrapped != 0:
                 return unwrapped
             return inner_ty
@@ -8922,7 +8922,7 @@ fn MirBuilder.cancel_scheduled_value_drop_for_receiver_expr(self: MirBuilder, ex
 fn MirBuilder.enum_accessor_payload_operand(self: MirBuilder, enum_place: i32, enum_ty: i32, variant_sym: i32, variant_index: i32, accessor_kind: i32, result_ty: i32, span: i32) -> i32:
     let payloads = self.sema.enum_variant_payload_types(enum_ty, variant_sym)
     let payload_count = payloads.len() as i32
-    let unwrapped_ty = self.sema.try_unwrapped_type(result_ty) as i32
+    let unwrapped_ty = self.sema.try_unwrapped_type_frozen(result_ty) as i32
     if payload_count <= 0 or unwrapped_ty == 0:
         with_eprint("error: enum accessor lowering missing payload type")
         self.mark_unsupported()
@@ -9156,7 +9156,7 @@ fn MirBuilder.lower_question_mark_value(self: MirBuilder, value_op: i32, value_t
     // Extract Ok payload via ProjKind.PK_DOWNCAST + field access
     var result_ty = result_ty_hint
     if result_ty == 0 or result_ty == self.sema.ty_void:
-        result_ty = self.sema.try_unwrapped_type(value_ty)
+        result_ty = self.sema.try_unwrapped_type_frozen(value_ty)
     if result_ty == 0 or result_ty == self.sema.ty_void:
         result_ty = value_ty
     self.switch_to(pass_bb)
@@ -9245,7 +9245,7 @@ fn MirBuilder.lower_double_question(self: MirBuilder, expr: i32, default_expr: i
 
     var result_ty = self.expr_type(node)
     if result_ty == 0 or result_ty == self.sema.ty_void:
-        result_ty = self.sema.try_unwrapped_type(value_ty)
+        result_ty = self.sema.try_unwrapped_type_frozen(value_ty)
     if result_ty == 0 or result_ty == self.sema.ty_void:
         result_ty = value_ty
     let result_local = self.new_temp(result_ty)
@@ -10194,7 +10194,7 @@ fn MirBuilder.lower_unwrap_or_method(self: MirBuilder, self_expr: i32, arg_start
 
     var result_ty = self.expr_type(node)
     if result_ty == 0:
-        result_ty = self.sema.try_unwrapped_type(value_ty) as i32
+        result_ty = self.sema.try_unwrapped_type_frozen(value_ty) as i32
     if result_ty == 0:
         result_ty = self.sema.ty_void as i32
 
@@ -10240,7 +10240,7 @@ fn MirBuilder.lower_unwrap_or_else_method(self: MirBuilder, self_expr: i32, arg_
         value_ty = self.type_receiver_type(self_expr)
     var result_ty = self.expr_type(node)
     if result_ty == 0:
-        result_ty = self.sema.try_unwrapped_type(value_ty) as i32
+        result_ty = self.sema.try_unwrapped_type_frozen(value_ty) as i32
     if value_ty == 0 or result_ty == 0:
         self.mark_unsupported()
         return self.unit_operand()
