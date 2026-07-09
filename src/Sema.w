@@ -759,6 +759,7 @@ type Sema {
     is_copy_cache: HashMap[i32, i32],
     needs_drop_result_cache: HashMap[i32, i32],
     unwrapped_type_cache: HashMap[i32, i32],
+    for_element_type_cache: HashMap[i32, i32],
 
     // Associated type bindings from current impl (for Self.Name resolution)
     assoc_type_bindings: HashMap[i32, i32],
@@ -1186,6 +1187,7 @@ pub fn Sema.prepare_comptime_eval_copy(mut self: Sema) -> Sema:
     self.is_copy_cache = sema_new_map_i32_i32()
     self.needs_drop_result_cache = sema_new_map_i32_i32()
     self.unwrapped_type_cache = sema_new_map_i32_i32()
+    self.for_element_type_cache = sema_new_map_i32_i32()
     self.generic_subst_param_syms = sema_clone_i32_vec(&self.generic_subst_param_syms)
     self.generic_subst_type_ids = sema_clone_i32_vec(&self.generic_subst_type_ids)
     self.source_text_file_ids = sema_clone_i32_vec(&self.source_text_file_ids)
@@ -1475,6 +1477,7 @@ fn sema_empty_state(pool: InternPool, diags: DiagnosticList, ast: AstPool) -> Se
     let is_copy_cache = sema_new_map_i32_i32()
     let needs_drop_result_cache = sema_new_map_i32_i32()
     let unwrapped_type_cache = sema_new_map_i32_i32()
+    let for_element_type_cache = sema_new_map_i32_i32()
     var s = Sema {
         pool: pool,
         diags: diags,
@@ -1746,6 +1749,7 @@ fn sema_empty_state(pool: InternPool, diags: DiagnosticList, ast: AstPool) -> Se
         is_copy_cache,
         needs_drop_result_cache,
         unwrapped_type_cache,
+        for_element_type_cache,
         assoc_type_bindings: sema_new_map_i32_i32(),
         symbols_frozen: 0,
         types_frozen: 0,
@@ -3075,11 +3079,13 @@ fn Sema.preregister_mir_types(self: Sema):
                 let lt_cp = self.is_copy(lti as TypeId)
                 let lt_nd = self.type_needs_drop(lti)
                 let lt_uw = self.try_unwrapped_type(lti)
+                let lt_fe = self.infer_for_element_type(lti)
                 self.layout_size_cache.insert(lti, lt_sz)
                 self.layout_align_cache.insert(lti, lt_al)
                 self.is_copy_cache.insert(lti, lt_cp)
                 self.needs_drop_result_cache.insert(lti, lt_nd)
                 self.unwrapped_type_cache.insert(lti, lt_uw)
+                self.for_element_type_cache.insert(lti, lt_fe)
         if self.type_kinds.len() as i32 == lt_n:
             layout_pass_done = true
 

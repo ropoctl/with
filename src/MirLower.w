@@ -5550,7 +5550,7 @@ fn MirBuilder.lower_for(self: MirBuilder, for_node: i32) -> i32:
 
     let iter_op = self.lower_expr(iter_expr)
     let iter_place = self.materialize_operand(iter_op, iter_ty, self.ast.get_start(iter_expr))
-    let elem_ty = self.sema.infer_for_element_type(iter_ty)
+    let elem_ty = self.sema.infer_for_element_type_frozen(iter_ty)
 
     // Determine next()'s return type (Option[T]) from the method signature.
     let resolved_iter = self.sema.resolve_alias(iter_ty)
@@ -5806,7 +5806,7 @@ fn MirBuilder.lower_comprehension_range(self: MirBuilder, comp_node: i32, clause
     let start_node = self.ast.get_data0(range_node)
     let end_node = self.ast.get_data1(range_node)
     let inclusive = self.ast.get_data2(range_node)
-    let elem_ty = self.sema.infer_for_element_type(self.expr_type(range_node))
+    let elem_ty = self.sema.infer_for_element_type_frozen(self.expr_type(range_node))
 
     let start_op = if start_node != 0: self.lower_expr(start_node) else: self.int_const_operand(0, elem_ty)
     let end_op = self.lower_expr(end_node)
@@ -5860,7 +5860,7 @@ fn MirBuilder.lower_comprehension_range(self: MirBuilder, comp_node: i32, clause
 fn MirBuilder.lower_comprehension_slice(self: MirBuilder, comp_node: i32, clause_index: i32, out_place: i32, out_elem_ty: i32, pat_or_sym: i32, iter_expr: i32):
     let iter_op = self.lower_expr(iter_expr)
     let iter_ty = self.expr_type(iter_expr)
-    let elem_ty = self.sema.infer_for_element_type(iter_ty)
+    let elem_ty = self.sema.infer_for_element_type_frozen(iter_ty)
     let slice_place = self.materialize_operand(iter_op, iter_ty, self.ast.get_start(iter_expr))
 
     let len_local = self.new_temp(self.sema.ty_i64)
@@ -5917,7 +5917,7 @@ fn MirBuilder.lower_comprehension_slice(self: MirBuilder, comp_node: i32, clause
 fn MirBuilder.lower_comprehension_vec(self: MirBuilder, comp_node: i32, clause_index: i32, out_place: i32, out_elem_ty: i32, pat_or_sym: i32, iter_expr: i32):
     let iter_op = self.lower_expr(iter_expr)
     let iter_ty = self.expr_type(iter_expr)
-    let elem_ty = self.sema.infer_for_element_type(iter_ty)
+    let elem_ty = self.sema.infer_for_element_type_frozen(iter_ty)
     let vec_place = self.materialize_operand(iter_op, iter_ty, self.ast.get_start(iter_expr))
 
     let len_local = self.new_temp(self.sema.ty_i64)
@@ -5977,7 +5977,7 @@ fn MirBuilder.lower_comprehension_generic_iter(self: MirBuilder, comp_node: i32,
 
     let iter_op = self.lower_expr(iter_expr)
     let iter_place = self.materialize_operand(iter_op, iter_ty, self.ast.get_start(iter_expr))
-    let elem_ty = self.sema.infer_for_element_type(iter_ty)
+    let elem_ty = self.sema.infer_for_element_type_frozen(iter_ty)
 
     let resolved_iter = self.sema.resolve_alias(iter_ty)
     let owner_sym = self.sema.method_owner_symbol_for_type(resolved_iter as i32)
@@ -6192,7 +6192,7 @@ fn MirBuilder.lower_for_range(self: MirBuilder, for_node: i32, pat_or_sym: i32, 
     let start_node = self.ast.get_data0(range_node)
     let end_node = self.ast.get_data1(range_node)
     let inclusive = self.ast.get_data2(range_node)
-    let elem_ty = self.sema.infer_for_element_type(self.expr_type(range_node))
+    let elem_ty = self.sema.infer_for_element_type_frozen(self.expr_type(range_node))
 
     // Evaluate start and end
     let start_op = if start_node != 0: self.lower_expr(start_node) else: self.int_const_operand(0, elem_ty)
@@ -6265,7 +6265,7 @@ fn MirBuilder.lower_for_slice(self: MirBuilder, for_node: i32, pat_or_sym: i32, 
     // for x in slice → index from 0 to len
     let iter_op = self.lower_expr(iter_expr)
     let iter_ty = self.expr_type(iter_expr)
-    let elem_ty = self.sema.infer_for_element_type(iter_ty)
+    let elem_ty = self.sema.infer_for_element_type_frozen(iter_ty)
 
     // Materialize slice into a local
     let slice_place = self.materialize_operand(iter_op, iter_ty, self.ast.get_start(iter_expr))
@@ -6338,7 +6338,7 @@ fn MirBuilder.lower_for_vec(self: MirBuilder, for_node: i32, pat_or_sym: i32, it
     // for x in vec → counter loop using VEC_LEN / VEC_GET intrinsics
     let iter_op = self.lower_expr(iter_expr)
     let iter_ty = self.expr_type(iter_expr)
-    let elem_ty = self.sema.infer_for_element_type(iter_ty)
+    let elem_ty = self.sema.infer_for_element_type_frozen(iter_ty)
 
     // Materialize vec into a local
     let vec_place = self.materialize_operand(iter_op, iter_ty, self.ast.get_start(iter_expr))
@@ -6421,7 +6421,7 @@ fn MirBuilder.lower_for_hashmap(self: MirBuilder, for_node: i32, pat_or_sym: i32
     // for (k, v) in map → materialize map.items() then use the normal Vec loop.
     let map_op = self.lower_expr(iter_expr)
     let map_ty = self.expr_type(iter_expr)
-    let elem_ty = self.sema.infer_for_element_type(map_ty)
+    let elem_ty = self.sema.infer_for_element_type_frozen(map_ty)
     let items_vec_ty = self.sema.find_vec_type_for(elem_ty)
 
     let map_place = self.materialize_operand(map_op, map_ty, self.ast.get_start(iter_expr))
@@ -6506,7 +6506,7 @@ fn MirBuilder.lower_for_hashmap(self: MirBuilder, for_node: i32, pat_or_sym: i32
 fn MirBuilder.lower_for_iter_place(self: MirBuilder, for_node: i32, pat_or_sym: i32, vec_expr: i32, body_expr: i32) -> i32:
     let vec_op = self.lower_expr(vec_expr)
     let vec_ty = self.expr_type(vec_expr)
-    let slot_ty = self.sema.infer_for_element_type(self.expr_type(self.ast.get_data1(for_node)))
+    let slot_ty = self.sema.infer_for_element_type_frozen(self.expr_type(self.ast.get_data1(for_node)))
     let vec_place = self.materialize_operand(vec_op, vec_ty, self.ast.get_start(vec_expr))
     let len_local = self.new_temp(self.sema.ty_i64)
     let len_place = self.place_for_local(len_local)
