@@ -2390,6 +2390,13 @@ impl Codegen:
 
         if kind == NodeKind.NK_IDENT:
             let sym = self.pool.get_data0(type_node)
+            // A bound type parameter shadows any global type of the same name;
+            // the active frame carries the monomorphized instance substitution.
+            for tbi in 0..self.type_bindings_len:
+                if self.type_binding_syms.get(tbi as i64) == sym:
+                    let bound = self.type_binding_types.get(tbi as i64)
+                    if bound != 0:
+                        return bound
             let named = self.resolve_named_type(sym)
             if named != 0:
                 return named
@@ -2402,6 +2409,11 @@ impl Codegen:
 
         if kind == NodeKind.NK_TYPE_NAMED:
             let sym = self.pool.get_data0(type_node)
+            for tbi in 0..self.type_bindings_len:
+                if self.type_binding_syms.get(tbi as i64) == sym:
+                    let bound = self.type_binding_types.get(tbi as i64)
+                    if bound != 0:
+                        return bound
             let named = self.resolve_named_type(sym)
             if named != 0:
                 return named

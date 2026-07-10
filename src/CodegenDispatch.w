@@ -14572,6 +14572,10 @@ impl Codegen:
         self.current_function_name_sym = name_sym
         self.current_function_node = fn_node
         self.current_ret_type = wl_get_return_type(fn_type)
+        let saved_tb_syms = self.type_binding_syms
+        let saved_tb_tys = self.type_binding_types
+        let saved_tb_len = self.type_bindings_len
+        self.set_mono_type_bindings(name_sym)
         let fn_has_sret_opt = self.extern_fn_has_sret.get(name_sym)
         let fn_has_sret = if fn_has_sret_opt.is_some(): fn_has_sret_opt.unwrap() else: 0
         if fn_has_sret != 0:
@@ -14960,6 +14964,9 @@ impl Codegen:
         self.current_fn_saw_explicit_return = saved_saw_return
         self.tailrec_body_bb = saved_tailrec_bb
         self.tailrec_fn_sym = saved_tailrec_sym
+        self.type_binding_syms = saved_tb_syms
+        self.type_binding_types = saved_tb_tys
+        self.type_bindings_len = saved_tb_len
 
     // ── gen_function_mir_mono: MIR codegen for monomorphized generic fn ──
     // Like gen_function_mir but uses mono_sym for fn_values/fn_fn_types lookup
@@ -15018,6 +15025,10 @@ impl Codegen:
         self.current_function_name_sym = mono_sym
         self.current_function_node = fn_node
         self.current_ret_type = wl_get_return_type(fn_type)
+        let saved_tb_syms = self.type_binding_syms
+        let saved_tb_tys = self.type_binding_types
+        let saved_tb_len = self.type_bindings_len
+        self.set_mono_type_bindings(mono_sym)
         let fn_has_sret_opt = self.extern_fn_has_sret.get(mono_sym)
         let fn_has_sret = if fn_has_sret_opt.is_some(): fn_has_sret_opt.unwrap() else: 0
         if fn_has_sret != 0:
@@ -15385,6 +15396,9 @@ impl Codegen:
         self.tailrec_body_bb = saved_tail_bb
         self.tailrec_fn_sym = saved_tail_sym
         self.tailrec_param_allocas = saved_tail_allocas
+        self.type_binding_syms = saved_tb_syms
+        self.type_binding_types = saved_tb_tys
+        self.type_bindings_len = saved_tb_len
         self.restore_loop_state(saved_loops)
         self.mir_local_ptrs = saved_mir_locals
         self.mir_local_values = saved_mir_values
@@ -17020,21 +17034,57 @@ impl Codegen:
 
     // ── sizeof/alignof intrinsics ─────────────────────────────────────
 
+    // Bind the type parameters of a monomorphized instance so type-position
+    // identifiers in its body (sizeof[T], nameof[T], casts through T) resolve
+    // against the instance substitution. Without this frame a frozen resolve
+    // of a bare type-param ident misses and downstream consumers see 0.
+    mut fn set_mono_type_bindings(fn_sym: i32):
+        let fresh_syms: Vec[i32] = Vec.new()
+        let fresh_tys: Vec[i64] = Vec.new()
+        self.type_binding_syms = fresh_syms
+        self.type_binding_types = fresh_tys
+        self.type_bindings_len = 0
+        let dtm_debug = with_getenv_str("WITH_DEBUG_DTM").len() > 0
+        for si in 0..self.sema.concrete_specialization_syms.len() as i32:
+            if self.sema.concrete_specialization_syms.get(si as i64) != fn_sym:
+                continue
+            let start = self.sema.concrete_specialization_subst_starts.get(si as i64)
+            let count = self.sema.concrete_specialization_subst_counts.get(si as i64)
+            for ti in 0..count:
+                let p_sym = self.sema.concrete_specialization_subst_syms.get((start + ti) as i64)
+                let p_ty = self.sema.concrete_specialization_subst_types.get((start + ti) as i64)
+                let llvm_ty = if p_ty > 0: self.sema_type_to_llvm(p_ty) else: 0
+                if llvm_ty != 0:
+                    self.type_binding_syms.push(p_sym)
+                    self.type_binding_types.push(llvm_ty)
+                    self.type_bindings_len = self.type_bindings_len + 1
+            if dtm_debug:
+                with_eprint(f"[mono-bind] fn={self.intern.resolve(fn_sym)} sym={fn_sym} substs={count} bound={self.type_bindings_len}")
+            return
+        if dtm_debug:
+            with_eprint(f"[mono-bind] fn={self.intern.resolve(fn_sym)} sym={fn_sym} no-specialization")
+
     mut fn gen_sizeof_alignof(name_sym: i32, node: i32) -> i64:
         let callee_node = self.pool.get_data0(node)
         let callee_kind = self.pool.kind(callee_node)
         if callee_kind != NodeKind.NK_TYPE_GENERIC and callee_kind != NodeKind.NK_INDEX:
+            with_eprint(f"error: sizeof/alignof callee is not a type application (node={node})")
+            self.had_error = 1
             return wl_const_int(wl_i64_type(self.context), 0, 0)
         let tp_node = if callee_kind == NodeKind.NK_TYPE_GENERIC:
             let tp_start = self.pool.get_data1(callee_node)
             let tp_count = self.pool.get_data2(callee_node)
             if tp_count == 0:
+                with_eprint(f"error: sizeof/alignof requires a type argument (node={node})")
+                self.had_error = 1
                 return wl_const_int(wl_i64_type(self.context), 0, 0)
             self.pool.get_extra(tp_start)
         else:
             self.pool.get_data1(callee_node)
         let type_val = self.resolve_type(tp_node)
         if type_val == 0:
+            with_eprint(f"error: sizeof/alignof type argument did not resolve (node={tp_node}, fn={self.intern.resolve(self.current_function_name_sym)})")
+            self.had_error = 1
             return wl_const_int(wl_i64_type(self.context), 0, 0)
         let dl = wl_get_module_data_layout(self.llmod)
         if name_sym == self.sym_sizeof or name_sym == self.sym_size_of:
