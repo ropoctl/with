@@ -2554,8 +2554,13 @@ impl Codegen:
                     break
             return wl_i32_type(self.context)
 
-        // Fallback — always warn so silent miscompilation is visible
-        with_eprint(f"warning: [type-resolve] unhandled type node kind={kind} node={type_node} span={self.pool.get_start(type_node)}..{self.pool.get_end(type_node)}")
+        // Fallback — always warn so silent miscompilation is visible. Name the
+        // enclosing function and method owner: an out-of-context node id is
+        // undiagnosable (this fires for cross-pool id leaks, where the kind is
+        // whatever happens to live at that id in the backend pool).
+        let ctx_fn = if self.current_function_name_sym != 0: self.intern.resolve(self.current_function_name_sym) else: "<module>"
+        let ctx_owner = if self.current_method_owner_sym != 0: self.intern.resolve(self.current_method_owner_sym) else: ""
+        with_eprint(f"warning: [type-resolve] unhandled type node kind={kind} node={type_node} span={self.pool.get_start(type_node)}..{self.pool.get_end(type_node)} in={ctx_fn} owner={ctx_owner}")
         self.type_fallback()
 
     fn resolve_primitive_named_type(sym: i32) -> i64:

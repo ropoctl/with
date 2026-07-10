@@ -1093,12 +1093,12 @@ fn tool_tar_build_header(name: str, mode: i32, size: i64, kind: ArchiveEntryKind
     if name.len() == 0 or name.len() > 100 or mode < 0 or size < 0 or link_name.len() > 100:
         return Vec.new()
     var prefix: Vec[u8] = Vec.new()
-    prefix = tool_tar_append_str_padded(prefix, name, 100)
-    prefix = tool_tar_append_octal_nul(prefix, mode as i64, 8)
-    prefix = tool_tar_append_octal_nul(prefix, 0, 8)
-    prefix = tool_tar_append_octal_nul(prefix, 0, 8)
-    prefix = tool_tar_append_octal_nul(prefix, size, 12)
-    prefix = tool_tar_append_octal_nul(prefix, 0, 12)
+    prefix = tool_tar_append_str_padded(move prefix, name, 100)
+    prefix = tool_tar_append_octal_nul(move prefix, mode as i64, 8)
+    prefix = tool_tar_append_octal_nul(move prefix, 0, 8)
+    prefix = tool_tar_append_octal_nul(move prefix, 0, 8)
+    prefix = tool_tar_append_octal_nul(move prefix, size, 12)
+    prefix = tool_tar_append_octal_nul(move prefix, 0, 12)
     if prefix.len() == 0:
         return Vec.new()
     var suffix: Vec[u8] = Vec.new()
@@ -1108,17 +1108,17 @@ fn tool_tar_build_header(name: str, mode: i32, size: i64, kind: ArchiveEntryKind
         suffix.push(50 as u8)
     else:
         suffix.push(48 as u8)
-    suffix = tool_tar_append_str_padded(suffix, link_name, 100)
-    suffix = tool_tar_append_str_padded(suffix, "ustar", 6)
-    suffix = tool_tar_append_str_padded(suffix, "00", 2)
-    suffix = tool_tar_append_zeroes(suffix, 247)
+    suffix = tool_tar_append_str_padded(move suffix, link_name, 100)
+    suffix = tool_tar_append_str_padded(move suffix, "ustar", 6)
+    suffix = tool_tar_append_str_padded(move suffix, "00", 2)
+    suffix = tool_tar_append_zeroes(move suffix, 247)
     if suffix.len() == 0:
         return Vec.new()
     let checksum = tool_tar_sum(&prefix) + 256 + tool_tar_sum(&suffix)
     var header: Vec[u8] = Vec.new()
-    header = tool_tar_append_bytes(header, &prefix)
-    header = tool_tar_append_checksum(header, checksum)
-    header = tool_tar_append_bytes(header, &suffix)
+    header = tool_tar_append_bytes(move header, &prefix)
+    header = tool_tar_append_checksum(move header, checksum)
+    header = tool_tar_append_bytes(move header, &suffix)
     if header.len() != 512:
         return Vec.new()
     header
@@ -1132,14 +1132,14 @@ fn ToolFs.tar_bytes(self: &Self, entries: &Vec[ArchiveEntry]) -> Vec[u8]:
             let header = tool_tar_build_header(name, entry.mode, 0, ArchiveEntryKind.Directory, "")
             if header.len() == 0:
                 return Vec.new()
-            out = tool_tar_append_bytes(out, &header)
+            out = tool_tar_append_bytes(move out, &header)
         else if entry.kind == ArchiveEntryKind.Symlink:
             let name = tool_tar_entry_name(entry.archive_path, false)
             let link_name = tool_tar_link_name(entry.source_path)
             let header = tool_tar_build_header(name, entry.mode, 0, ArchiveEntryKind.Symlink, link_name)
             if header.len() == 0:
                 return Vec.new()
-            out = tool_tar_append_bytes(out, &header)
+            out = tool_tar_append_bytes(move out, &header)
         else:
             if entry.source_path.len() == 0:
                 return Vec.new()
@@ -1149,11 +1149,11 @@ fn ToolFs.tar_bytes(self: &Self, entries: &Vec[ArchiveEntry]) -> Vec[u8]:
             let header = tool_tar_build_header(name, entry.mode, contents.len(), ArchiveEntryKind.File, "")
             if header.len() == 0:
                 return Vec.new()
-            out = tool_tar_append_bytes(out, &header)
-            out = tool_tar_append_bytes(out, &contents)
+            out = tool_tar_append_bytes(move out, &header)
+            out = tool_tar_append_bytes(move out, &contents)
             let padding = (512 - (contents.len() % 512)) % 512
-            out = tool_tar_append_zeroes(out, padding)
-    out = tool_tar_append_zeroes(out, 1024)
+            out = tool_tar_append_zeroes(move out, padding)
+    out = tool_tar_append_zeroes(move out, 1024)
     out
 
 fn tool_gzip_append_u16_le(out: Vec[u8], value: i32) -> Vec[u8]:
@@ -1188,28 +1188,28 @@ fn tool_gzip_stored(bytes: &Vec[u8]) -> Vec[u8]:
     out.push(139 as u8)
     out.push(8 as u8)
     out.push(0 as u8)
-    out = tool_gzip_append_u32_le(out, 0 as u32)
+    out = tool_gzip_append_u32_le(move out, 0 as u32)
     out.push(0 as u8)
     out.push(255 as u8)
     var offset: i64 = 0
     if bytes.len() == 0:
         out.push(1 as u8)
-        out = tool_gzip_append_u16_le(out, 0)
-        out = tool_gzip_append_u16_le(out, 0xffff)
+        out = tool_gzip_append_u16_le(move out, 0)
+        out = tool_gzip_append_u16_le(move out, 0xffff)
     while offset < bytes.len():
         let remaining = bytes.len() - offset
         let chunk = if remaining > 65535: 65535 else: remaining
         let final_block = offset + chunk == bytes.len()
         out.push(if final_block: 1 as u8 else: 0 as u8)
-        out = tool_gzip_append_u16_le(out, chunk as i32)
-        out = tool_gzip_append_u16_le(out, 0xffff - chunk as i32)
+        out = tool_gzip_append_u16_le(move out, chunk as i32)
+        out = tool_gzip_append_u16_le(move out, 0xffff - chunk as i32)
         var i: i64 = 0
         while i < chunk:
             out.push(bytes.get(offset + i))
             i = i + 1
         offset = offset + chunk
-    out = tool_gzip_append_u32_le(out, tool_gzip_crc32(bytes))
-    out = tool_gzip_append_u32_le(out, bytes.len() as u32)
+    out = tool_gzip_append_u32_le(move out, tool_gzip_crc32(bytes))
+    out = tool_gzip_append_u32_le(move out, bytes.len() as u32)
     out
 
 pub fn ToolFs.write_tar(self: &Self, output_path: str, entries: &Vec[ArchiveEntry]) -> i32:
@@ -1813,9 +1813,10 @@ pub fn new_build(package: Package) -> Build:
         generated_sources: Vec.new(),
     }
 
-pub fn Build.default(mut self: Build, target_name: str) -> Build:
-    self.default_target = target_name
-    self
+pub fn Build.default(move self: Build, target_name: str) -> Build:
+    var out = self
+    out.default_target = target_name
+    out
 
 pub fn target_new(kind: BuildKind, name: str, entry: str) -> Target:
     Target {
@@ -1840,33 +1841,40 @@ pub fn target_new(kind: BuildKind, name: str, entry: str) -> Target:
         network: false,
     }
 
-pub fn Target.timeout(mut self: Target, ms: i32) -> Target:
-    self.timeout_ms = ms
-    self
+pub fn Target.timeout(move self: Target, ms: i32) -> Target:
+    var out = self
+    out.timeout_ms = ms
+    out
 
-pub fn Target.working_dir(mut self: Target, path: str) -> Target:
-    self.cwd = path
-    self
+pub fn Target.working_dir(move self: Target, path: str) -> Target:
+    var out = self
+    out.cwd = path
+    out
 
-pub fn Target.with_env(mut self: Target, key: str, value: str) -> Target:
-    self.env.push(key ++ "=" ++ value)
-    self
+pub fn Target.with_env(move self: Target, key: str, value: str) -> Target:
+    var out = self
+    out.env.push(key ++ "=" ++ value)
+    out
 
-pub fn Target.allow_network(mut self: Target) -> Target:
-    self.network = true
-    self
+pub fn Target.allow_network(move self: Target) -> Target:
+    var out = self
+    out.network = true
+    out
 
-pub fn Build.add_target(mut self: Build, target: Target) -> Build:
-    self.targets.push(target)
-    self
+pub fn Build.add_target(move self: Build, target: Target) -> Build:
+    var out = self
+    out.targets.push(target)
+    out
 
-pub fn Build.generated_source(mut self: Build, path: str, contents: str) -> Build:
-    self.generated_sources.push(GeneratedSource { path, contents })
-    self
+pub fn Build.generated_source(move self: Build, path: str, contents: str) -> Build:
+    var out = self
+    out.generated_sources.push(GeneratedSource { path, contents })
+    out
 
-pub fn Build.add_generated_source(mut self: Build, source: GeneratedSource) -> Build:
-    self.generated_sources.push(source)
-    self
+pub fn Build.add_generated_source(move self: Build, source: GeneratedSource) -> Build:
+    var out = self
+    out.generated_sources.push(source)
+    out
 
 pub fn Build.executable(self: &Self, name: str, entry: str) -> Build:
     let target = target_new(.Executable, name, entry)
@@ -2234,17 +2242,20 @@ pub fn Target.optimize(self: &Self, mode: OptimizeMode) -> Target:
         network: self.network,
     }
 
-pub fn Target.link_system_lib(mut self: Target, lib: str) -> Target:
-    self.system_libs.push(lib)
-    self
+pub fn Target.link_system_lib(move self: Target, lib: str) -> Target:
+    var out = self
+    out.system_libs.push(lib)
+    out
 
-pub fn Target.include_path(mut self: Target, path: str) -> Target:
-    self.include_paths.push(path)
-    self
+pub fn Target.include_path(move self: Target, path: str) -> Target:
+    var out = self
+    out.include_paths.push(path)
+    out
 
-pub fn Target.define(mut self: Target, define: str) -> Target:
-    self.defines.push(define)
-    self
+pub fn Target.define(move self: Target, define: str) -> Target:
+    var out = self
+    out.defines.push(define)
+    out
 
 pub fn Target.output(self: &Self, output: str) -> Target:
     Target {
@@ -2269,29 +2280,35 @@ pub fn Target.output(self: &Self, output: str) -> Target:
         network: self.network,
     }
 
-pub fn Target.input(mut self: Target, input: str) -> Target:
-    self.inputs.push(input)
-    self
+pub fn Target.input(move self: Target, input: str) -> Target:
+    var out = self
+    out.inputs.push(input)
+    out
 
-pub fn Target.extra_output(mut self: Target, path: str) -> Target:
-    self.extra_outputs.push(path)
-    self
+pub fn Target.extra_output(move self: Target, path: str) -> Target:
+    var out = self
+    out.extra_outputs.push(path)
+    out
 
-pub fn Target.write_scope(mut self: Target, path: str) -> Target:
-    self.write_scopes.push(path)
-    self
+pub fn Target.write_scope(move self: Target, path: str) -> Target:
+    var out = self
+    out.write_scopes.push(path)
+    out
 
-pub fn Target.dep(mut self: Target, dep: str) -> Target:
-    self.deps.push(dep)
-    self
+pub fn Target.dep(move self: Target, dep: str) -> Target:
+    var out = self
+    out.deps.push(dep)
+    out
 
-pub fn Target.arg(mut self: Target, arg: str) -> Target:
-    self.args.push(arg)
-    self
+pub fn Target.arg(move self: Target, arg: str) -> Target:
+    var out = self
+    out.args.push(arg)
+    out
 
-pub fn Target.compiler(mut self: Target, compiler: str) -> Target:
-    self.args.push("compiler=" ++ compiler)
-    self
+pub fn Target.compiler(move self: Target, compiler: str) -> Target:
+    var out = self
+    out.args.push("compiler=" ++ compiler)
+    out
 
 fn build_action_outputs(target: &Target) -> Vec[str]:
     let outputs: Vec[str] = Vec.new()

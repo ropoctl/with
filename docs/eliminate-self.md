@@ -207,7 +207,13 @@ its flags. Regex will not survive 3,900 self-host-critical sites.
   (`behav_mut_self_drop_generic` is the guard test).
 - **Trait / interface methods without a body** — the modifier must be parseable
   on a signature-only method declaration and flow into the trait's expected
-  receiver shape.
+  receiver shape. **Trait carve-out (ruled, see D7):** inside a `trait` body
+  only `mut fn` / `move fn` synthesise; plain `fn` keeps the explicit spelling
+  because a trait must hold both instance and associated contracts and location
+  cannot discriminate there — with a receiver param it is an instance contract,
+  without one it is associated (`Default.default`, `Try.from_break`). Trait
+  authoring is library-maintainer tier; app-facing `impl` blocks still get the
+  fully implicit form.
 - **`move fn drop()`** — the only Drop::drop receiver (§2.4); the #642 check
   ("Drop.drop must consume") moves to "Drop.drop must be `move fn`".
 - **Explicit `self` uses in the body** — `self`, `self.field`, and passing

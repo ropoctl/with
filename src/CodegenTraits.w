@@ -31,35 +31,23 @@ impl Codegen:
             self.trait_tp_flat_syms.push(self.pool.get_extra(tp_pos))
             let bc = self.pool.get_extra(tp_pos + 1)
             tp_pos = tp_pos + 2 + bc
-        let assoc_count = self.pool.get_extra(pos)
-        pos = pos + 1
-        for ai in 0..assoc_count:
-            let _assoc_name = self.pool.get_extra(pos)
-            pos = pos + 1
-            let bound_count = self.pool.get_extra(pos)
-            pos = pos + 1 + bound_count
-            pos = pos + 1 // default type
-
-        let method_count = self.pool.get_extra(pos)
-        pos = pos + 1
+        // Method records are TRAIT_METHOD_STRIDE wide; read them through the
+        // canonical AstPool accessors. A hand-rolled walk here silently drifted
+        // when the record gained parser-owned source spans (6 → 8 slots),
+        // corrupting every method after the first.
+        let method_count = self.pool.trait_method_count(trait_node)
 
         let method_start = self.trait_method_names.len() as i32
         let ptr_ty = wl_ptr_type(self.context)
         let vtable_fields: Vec[i64] = Vec.new()
 
         for mi in 0..method_count:
-            let method_sym = self.pool.get_extra(pos)
-            pos = pos + 1
-            let method_flags = self.pool.get_extra(pos)
-            pos = pos + 1
-            let method_param_start = self.pool.get_extra(pos)
-            pos = pos + 1
-            let method_param_count = self.pool.get_extra(pos)
-            pos = pos + 1
-            let method_ret_node = self.pool.get_extra(pos)
-            pos = pos + 1
-            let method_default_body = self.pool.get_extra(pos)
-            pos = pos + 1
+            let method_sym = self.pool.trait_method_field(trait_node, mi, TRAIT_METHOD_NAME)
+            let method_flags = self.pool.trait_method_field(trait_node, mi, TRAIT_METHOD_FLAGS)
+            let method_param_start = self.pool.trait_method_field(trait_node, mi, TRAIT_METHOD_PARAM_START)
+            let method_param_count = self.pool.trait_method_field(trait_node, mi, TRAIT_METHOD_PARAM_COUNT)
+            let method_ret_node = self.pool.trait_method_field(trait_node, mi, TRAIT_METHOD_RETURN_TYPE)
+            let method_default_body = self.pool.trait_method_field(trait_node, mi, TRAIT_METHOD_DEFAULT_BODY)
 
             self.trait_method_names.push(method_sym)
             self.trait_method_flags.push(method_flags)
@@ -425,6 +413,8 @@ impl Codegen:
         let param_start = self.trait_method_param_starts.get(method_idx as i64)
         let param_count = self.trait_method_param_counts.get(method_idx as i64)
         let ret_node = self.trait_method_ret_nodes.get(method_idx as i64)
+        if with_getenv_str("WITH_DEBUG_DTM").len() > 0:
+            with_eprint(f"[dtm] {mangled} method_idx={method_idx} param_start={param_start} param_count={param_count} ret_node={ret_node} body_node={body_node}")
         if param_start < 0:
             return
         if param_count < 0 or param_count > 64:

@@ -85,22 +85,31 @@ a section of proven batch-LLDB recipes for compiler binaries.
 From `select:kind=declaration` trait facts on the green run, 32 trait
 methods across 27 traits:
 
-- **24 explicit `self` read receivers still spelled** (the D7 remaining
-  surface): Add.add, Clone.clone, Contains.contains, Debug.debug_str,
-  Deref.deref, Display.to_str, Div.div, Eq.eq, Error.display, Error.source,
-  Hash.hash_value, IndexGet.get, IndexPlace.get, MatMul.matmul, Mul.mul,
-  MultiIndex.multi_index, Neg.neg, Ord.cmp, Scoped.with_enter,
-  Scoped.with_exit, ScopedMut.with_enter_mut, Sub.sub, ToString.to_string —
-  plus **Drop.drop whose receiver mode reads `missing`** and needs its own
-  ruling (Vale-style consuming destructor argues `move`).
-- **6 already keyword-migrated**: IndexPlace.set (mut), IntoIter.iter (mut),
+- **24 explicit `self` read receivers**: Add.add, Clone.clone,
+  Contains.contains, Debug.debug_str, Deref.deref, Display.to_str, Div.div,
+  Eq.eq, Error.display, Error.source, Hash.hash_value, IndexGet.get,
+  IndexPlace.get, MatMul.matmul, Mul.mul, MultiIndex.multi_index, Neg.neg,
+  Ord.cmp, Scoped.with_enter, Scoped.with_exit, ScopedMut.with_enter_mut,
+  Sub.sub, ToString.to_string.
+- **6 keyword-migrated**: IndexPlace.set (mut), IntoIter.iter (mut),
   Iter.next (mut), MultiIndexMut.multi_index_set (mut),
   ScopedMut.with_exit_mut (mut), Try.branch (move).
-- **2 true associated functions**: Default.default, Try.from_break.
+- **2 associated functions**: Default.default, Try.from_break.
+- **Drop.drop**: was the bare-self spelling (`fn drop(self)`); migrated to
+  `move fn drop() -> Unit` per §2.4 ("the only destructor receiver mode").
+  All 179 `impl Drop for` sites already spelled `move fn drop()`.
 
-The open ruling: how plain `fn` inside `trait` blocks distinguishes read
-instance contracts from associated functions once explicit `self` is
-removed. Raw TSV: session scratchpad `trait-receivers.tsv`.
+**RESOLVED — this was already ruled, not an open question.** The D7 session's
+ruling (recorded 2026-07-07/08, now written into `docs/decisions.md` D7 and
+`docs/eliminate-self.md` §5): **in a `trait` body only `mut fn`/`move fn`
+synthesise; plain `fn` keeps the explicit spelling** — with a receiver param
+it is an instance contract, without one it is associated. Traits are
+library-maintainer tier, so the residual ceremony lands on the right
+audience. The 24 explicit read receivers and 2 plain associated contracts
+above are therefore the **ruling-compliant end state**, not unfinished
+migration. The ruling previously lived only in session memory
+(`project_eliminate_self.md`) and was nearly re-litigated twice — hence the
+doc backfill. Raw TSV: session scratchpad `trait-receivers.tsv`.
 
 ## Compiler Bugs Filed (pre-existing at HEAD, repro'd on v0.15.1)
 
@@ -111,19 +120,107 @@ removed. Raw TSV: session scratchpad `trait-receivers.tsv`.
   (`SemaCheck.w` `check_if_expr` discards the cond type). This is what lets
   #653 survive to codegen.
 
-## Verification State
+## Verification State (end of day)
 
-- Bridge check of the full dirty tree (all fixes included): `ok`.
-- `audit:all` on `src/main.w`: **violations=0** (transcript above).
+- Bridge check of the full dirty tree: `ok`. `audit:all`: **violations=0**
+  (2,077,372 facts, migrated stdlib embedded).
+- **First gate run:** build PASSED, **`:fixpoint` PASSED** (stage2 == stage3
+  byte-identical on the migrated tree), `:test` failed only the two
+  `std.build`-compiling capability tests → root-caused to the un-swept
+  `lib/std/build.w` + driver files (sections above), all repaired.
+- After repairs: `with build --dry-run` under full enforcement: clean; both
+  capability tests: `ok` (they are cwd-sensitive — run from repo root);
+  nested package builds green under the new compiler.
+- **Second full gate chain (build → :fixpoint → :test) launched** with all
+  repairs — the campaign completion gate. If green: the one-chain bootstrap
+  (`:test-green → :last-green → :update-seed → :install-user`) is next,
+  minding the reseed-convergence rule (bake the seed from the CONVERGED
+  new-compiler build).
 - Reduced repros: `cxstr-own.w --validate-all` ok; #653 repro flagged by
-  `audit:returns` with exactly one violation.
-- NOT yet run: full build, `:fixpoint`, `:test` — the expensive gates are
-  the next milestone once the remaining D7 items land.
+  `audit:returns` with exactly one violation (detector self-test).
+
+### Trait-method record stride drift (root-caused + fixed, evening 2026-07-10)
+
+With the regenerated (migrated) prelude embedded, **every user program failed
+codegen** (`[type-resolve] unhandled type node …` twice, then "code
+generation failed") while compiler self-compilation stayed green. Root cause:
+the campaign widened the trait-method extra record from 6 to 8 slots
+(parser-owned SOURCE_START/SOURCE_END spans; `TRAIT_METHOD_STRIDE = 8` in
+`src/Ast.w`) and updated Parser/Sema/ComptimeTransform — but
+`CodegenTraits.collect_trait_info` still hand-walked 6 slots per method, so
+every method after the first read misaligned garbage (its "ret_node" was a
+neighbouring method's field; the bogus node ids decoded as arbitrary
+expression nodes — `explain:node:` on the live pool was the identifying
+tool). The old embedding masked it: pre-migration prelude shapes never
+steered the default-trait-method generator through the corrupted rows.
+Fixed by reading the records through the canonical
+`AstPool.trait_method_field` accessors (single source of truth; no other
+hand-walk exists — swept). Note for the toolset: codegen's trait tables
+(`trait_method_*`, vtables, `find_trait_method_offset`) had **no audit
+coverage** — that is why five green `audit:all` runs missed it; an
+`audit:trait-tables` comparing codegen's collected rows against the AST
+accessors is the systematic detector to add.
+
+### std/build.w enforcement debt (root-caused + fixed, late 2026-07-10)
+
+First full gate run: build PASSED, **`:fixpoint` PASSED (stage2 == stage3 on
+the migrated tree)**, `:test` failed on exactly two tests —
+`behav_action_capability_filesystem/process` — the only tests that compile
+`std.build` (they drive nested `with build` package runs). The nested child
+failed with receiver/ownership enforcement errors inside
+`<embedded-std>/std/build.w`. Root cause: **`lib/std/build.w` is compiled by
+no gate except those two tests** (the compiler's own `build.w` is evaluated
+by the DRIVER, whose old embedded std predates enforcement), so the receiver
+flag-day never swept it: 17 builder methods were `mut self: Target/Build`
+transition forms whose bodies consume (must be `move`), plus 26 call sites
+missing `move` on consumed args (tar/gzip append helpers). Fixed by a
+count-verified one-shot With repair
+(`scratchpad/fix_buildstd.w`, 43 edits, probe re-check = 0 errors).
+
+Follow-on findings while fixing: (a) the compiler's own driver files
+(`build.w` root + `build/emit_c.w`, `build/sdk.w`, `build/selfhost.w`)
+carried 30 more §3.8 sites — fixed by `scratchpad/fix_buildsys.w`
+(count-verified). (b) The 17 flipped builder methods mutated fields through
+`move self` (owned but immutable) — rewritten to the file's `var out = self`
+rebind idiom (`scratchpad/fix_builders.w`). (c) **Open inconsistency:** the
+plain module probe (`check` of a probe importing the module) accepted the
+assign-through-owned-`self` bodies; the driver's build-wrapper compilation
+rejected them ("cannot assign to field of immutable value", printed with no
+span — diagnostic also needs a location). Two Sema configurations disagree
+on place-mutability legality; needs a ruling on which is right and a fix for
+the span-less rendering.
+
+**Blind-spot lesson (twofold):** (1) analyzer facts and `migrate-receivers`
+are computed from the `src/main.w` entrypoint — modules only reachable from
+user programs (`std.build`) are invisible to audits and migrators; audit
+entrypoints must also cover a probe that imports the full std surface.
+(2) The gate chain's driver evaluates root `build.w` against the DRIVER's
+embedded std — a reseeded compiler would have failed to run `with build` at
+all. After any std/build change, verify with the NEW binary:
+`<new> build --dry-run` in the repo root.
+
+### Embedded-stdlib staleness (discovered evening 2026-07-10)
+
+`out/gen/compiler/EmbeddedStdlibData.w` had been generated by the OLD
+standalone tool from **pre-migration** stdlib sources (`extend Arena`,
+top-level `fn Box.as_ref(self: &Self)`, bare-self `Drop.drop`) — a
+1,967-line diff against regeneration from the migrated tree. Targeted
+`bridge build -o` runs do NOT regenerate it (only the full `with build`
+graph's `compat-runtime-source` action does), so every binary built today
+embedded the old stdlib, and the green `audit:all` validated the compiler
+against the OLD prelude sources. Regenerated via
+`/tmp/with-impl-kind-bridge build :compat-runtime-source --no-deps`; the
+next rebuild embeds the migrated stdlib and its `audit:all` run is the
+first validation of the full migrated universe (compiler + stdlib). This
+staleness is also a plausible cause of finding B's method-registry delta.
+Lesson: after editing `lib/std/*` in a targeted-build workflow, regenerate
+`:compat-runtime-source` before rebuilding.
 
 ## Remaining Work (in order)
 
-1. **Trait instance/associated syntax ruling** (maintainer) using the list
-   above; then migrate the 24 read receivers + Drop.drop mode.
+1. ~~Trait instance/associated syntax ruling~~ — **resolved by the existing
+   D7 trait carve-out** (see above); Drop.drop migrated to `move fn`;
+   Phase 4's "reject explicit self" must exempt trait plain-`fn`.
 2. **Finding B (reduced priority now the trap is fixed):** under
    `analyze_file` at least one trait default method lacks the MIR body /
    fn_values entry the build pipeline has, so the dtm fallback generates it.

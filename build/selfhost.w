@@ -2848,7 +2848,7 @@ fn bs_compile_emit_c_output(ctx: &ActionCtx, root: str, case_dir: str, c_path: s
     if platform_obj.len() == 0:
         return bs_fail(ctx, "unsupported host runtime object for emit-c C compile: " ++ os() ++ "/" ++ arch())
     var cc_args: Vec[str] = Vec.new()
-    cc_args = bs_push_c_compiler(cc_args)
+    cc_args = bs_push_c_compiler(move cc_args)
     cc_args |> push("-O2")
     if os() == "Linux":
         cc_args |> push("-no-pie")
@@ -3060,7 +3060,7 @@ fn bs_check_darwin_arm64_c_abi_direct_aggregates(ctx: &ActionCtx, compiler_path:
     let cc_stdout = bs_capture_path(root, case_dir, "darwin-arm64-c-abi-direct-cc", "stdout")
     let cc_stderr = bs_capture_path(root, case_dir, "darwin-arm64-c-abi-direct-cc", "stderr")
     var cc_args: Vec[str] = Vec.new()
-    cc_args = bs_push_c_compiler(cc_args)
+    cc_args = bs_push_c_compiler(move cc_args)
     cc_args |> push("-c")
     cc_args |> push(bs_abs(root, helper_c))
     cc_args |> push("-o")
@@ -3075,7 +3075,7 @@ fn bs_check_darwin_arm64_c_abi_direct_aggregates(ctx: &ActionCtx, compiler_path:
     let link_stdout = bs_capture_path(root, case_dir, "darwin-arm64-c-abi-direct-link", "stdout")
     let link_stderr = bs_capture_path(root, case_dir, "darwin-arm64-c-abi-direct-link", "stderr")
     var link_args: Vec[str] = Vec.new()
-    link_args = bs_push_c_compiler(link_args)
+    link_args = bs_push_c_compiler(move link_args)
     link_args |> push("-o")
     link_args |> push(bs_abs(root, bin))
     link_args |> push(bs_abs(root, with_obj))
@@ -3138,7 +3138,7 @@ pub fn run_emit_c_smoke_action(ctx: ActionCtx) -> i32:
     if platform_obj.len() == 0:
         return bs_fail(ctx, "unsupported host runtime object for emit-c smoke C compile: " ++ os() ++ "/" ++ arch())
     var cc_args: Vec[str] = Vec.new()
-    cc_args = bs_push_c_compiler(cc_args)
+    cc_args = bs_push_c_compiler(move cc_args)
     cc_args |> push("-O2")
     if os() == "Linux":
         cc_args |> push("-no-pie")

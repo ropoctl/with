@@ -33,6 +33,20 @@ binding in instance-method bodies; the receiver's type is always the enclosing
 type. Implemented as a **parser desugar** to the existing (verified-working)
 receiver-param shapes, so sema/MIR/codegen are unchanged.
 
+**Trait declarations are the carve-out (part of the same ruling):** a trait
+body must express both instance contracts and associated contracts
+(`Default.default`, `Try.from_break`), and location cannot discriminate inside
+the block. So in a `trait` body only the unambiguous keyword forms synthesise
+(`mut fn` / `move fn`); a plain `fn` keeps today's explicit spelling — with a
+receiver parameter it is an instance contract, without one it is associated.
+Trait authoring is library-maintainer tier, so the residual ceremony lands on
+the right audience. The end state for `lib/std/traits.w` is therefore: keyword
+forms for mut/move/destructor contracts (`move fn drop()` is the only Drop
+receiver, §2.4), explicit `self: &Self` on read instance contracts, plain
+no-receiver `fn` for associated contracts. Do not re-open this by flipping
+trait plain-`fn` to implicit-instance; that makes associated contracts
+unspellable.
+
 ### Context / why
 
 The mission's first law — *"every unnecessary character is a compiler failure;

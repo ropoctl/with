@@ -89,8 +89,9 @@ pub trait Clone:    fn clone(self:
     &Self) -> Self
 
 /// Destructor. Called automatically when a value goes out of scope.
+/// The receiver is consuming — `move fn` is the only destructor mode (§2.4).
 pub trait Drop:
-    fn drop(self) -> Unit
+    move fn drop() -> Unit
 
 /// Iterator protocol. Call `.next()` to advance the iterator and return
 /// `Option[T]` — `Some(val)` or `None`. The receiver is `mut self: Self`

@@ -655,7 +655,7 @@ pub fn run_sdk_ninja_action(ctx: ActionCtx) -> i32:
     build.push(sdk_abs(root, build_dir))
     build.push("--target")
     build.push("install")
-    build = sdk_append_jobs(build, jobs)
+    build = sdk_append_jobs(move build, jobs)
     rc = sdk_run_capture(ctx, "ninja-build", build, 900000)
     if rc != 0: return rc
     let installed = sdk_tool(output_prefix, "ninja")
@@ -718,7 +718,7 @@ pub fn run_sdk_cmake_action(ctx: ActionCtx) -> i32:
         build.push("Release")
     build.push("--target")
     build.push("install")
-    build = sdk_append_jobs(build, jobs)
+    build = sdk_append_jobs(move build, jobs)
     rc = sdk_run_capture(ctx, "cmake-build", build, 3600000)
     if rc != 0: return rc
     if not fs.exists(sdk_tool(output_prefix, "cmake")):
@@ -820,7 +820,7 @@ pub fn run_sdk_llvm_action(ctx: ActionCtx) -> i32:
         build.push("Release")
     build.push("--target")
     build.push("install")
-    build = sdk_append_jobs(build, jobs)
+    build = sdk_append_jobs(move build, jobs)
     rc = sdk_run_capture(ctx, "llvm-build", build, 21600000)
     if rc != 0: return rc
     let libclang = if os() == "Windows": sdk_join(output_prefix, "lib/libclang.lib") else: sdk_join(output_prefix, "lib/libclang.a")
