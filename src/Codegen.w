@@ -17,6 +17,7 @@ use Source
 use Resolve
 use compiler.LlvmBridge.*
 use Overflow
+use AnalysisTypes
 
 extern fn exit(code: i32) -> Unit
 extern fn with_fs_read_file(path: str) -> str
@@ -90,6 +91,10 @@ type Codegen {
     sema: Sema,
     sema_symbol_texts: Vec[str],
     overflow_mode: i32,
+    analysis_enabled: i32,
+    analysis_query: str,
+    analysis_report: AnalysisReport,
+    analysis_last_marshal_strategy: AnalysisMarshalStrategy,
 
     // Current function state
     current_ret_type: i64,
@@ -533,6 +538,217 @@ fn Codegen.init_with_opt_and_intern(module_name: str, opt_level: i32, intern: In
     cg.sym_new = cg.intern.intern("new")
     cg
 
+impl Codegen:
+    mut fn enable_analysis(query: str):
+        self.analysis_enabled = 1
+        self.analysis_query = query
+
+    fn analysis_add(fact: AnalysisFact):
+        if self.analysis_enabled != 0:
+            self.analysis_report.add(fact)
+
+    fn analysis_fail(message: str):
+        if self.analysis_enabled != 0:
+            self.analysis_report.fail(message)
+
+    fn analysis_fact_selected(fact: &AnalysisFact) -> bool:
+        if self.analysis_query == "audit":
+            return true
+        let query = if self.analysis_query.starts_with("matrix:"): self.analysis_query.slice(7, self.analysis_query.len()) else: self.analysis_query
+        analysis_fact_matches(fact, query)
+
+    fn analysis_text() -> str:
+        if self.analysis_enabled == 0:
+            return ""
+        if self.analysis_query == "audit":
+            return self.analysis_report.render_verdict("codegen-contract-audit")
+        if self.analysis_query.starts_with("matrix:"):
+            let query = self.analysis_query.slice(7, self.analysis_query.len())
+            return self.analysis_report.render_matrix(query) ++ self.analysis_report.render_verdict("codegen-contract-audit")
+        self.analysis_report.render_facts(self.analysis_query) ++ self.analysis_report.render_verdict("codegen-contract-audit")
+
+    fn analysis_status() -> i32:
+        if self.analysis_report.ok(): 0 else: 1
+
+    fn analysis_has_call_argument(body_sym: i32, args_id: i32, param_index: i32) -> bool:
+        for i in 0..self.analysis_report.facts.len() as i32:
+            let fact = self.analysis_report.facts.get(i as i64)
+            if fact.stage == AnalysisStage.Codegen and fact.kind == AnalysisFactKind.CodegenArgument and
+               fact.body_sym == body_sym and fact.parent == args_id and fact.index == param_index:
+                return true
+        false
+
+    // Whole-module proof that the final Sema share-place contract survived LLVM
+    // declaration. Generic templates without an emitted LLVM function are facts,
+    // not failures; every emitted function must have both the ref-table bit and a
+    // pointer-shaped incoming parameter.
+    fn audit_declared_share_place_contracts():
+        if self.analysis_enabled == 0:
+            return
+        for si in 0..self.sema.sig_names.len() as i32:
+            let sema_sym = self.sema.sig_names.get(si as i64)
+            // Extern "C" callees have no With prologue: the C ABI decides their
+            // parameter shape, so the share-place ref-table contract does not
+            // apply. value_ref_abi still records caller-retains ownership.
+            if self.sema.extern_fn_names.contains(sema_sym):
+                continue
+            let cg_sym = self.codegen_sym_for_sema_sym(sema_sym)
+            let fn_raw = self.fn_values.get(sema_sym)
+            let fn_cg = self.fn_values.get(cg_sym)
+            let function = if fn_raw.is_some(): fn_raw.unwrap() as i64 else if fn_cg.is_some(): fn_cg.unwrap() as i64 else: 0
+            for pi in 0..self.sema.sig_get_param_count(si):
+                if self.sema.sig_param_uses_value_ref_abi(si, pi) == 0:
+                    continue
+                let ref_table = self.is_ref_param(sema_sym, pi) or self.is_ref_param(cg_sym, pi)
+                var llvm_pointer = false
+                if function != 0:
+                    let sret_raw = self.extern_fn_has_sret.get(sema_sym)
+                    let sret_cg = self.extern_fn_has_sret.get(cg_sym)
+                    let sret = if sret_raw.is_some(): sret_raw.unwrap() else if sret_cg.is_some(): sret_cg.unwrap() else: 0
+                    let incoming = wl_get_param(function, pi + (if sret != 0: 1 else: 0))
+                    llvm_pointer = incoming != 0 and wl_get_type_kind(wl_type_of(incoming)) == wl_pointer_type_kind()
+                var fact = AnalysisFact.new(AnalysisStage.Codegen, AnalysisFactKind.Invariant)
+                fact.id = si
+                fact.parent = si
+                fact.symbol = sema_sym
+                fact.index = pi
+                fact.type_id = self.sema.sig_param_type(si, pi)
+                fact.effects = self.sema.sig_param_effect(si, pi)
+                fact.flags = 1 | (if ref_table: 2 else: 0) | (if llvm_pointer: 4 else: 0) | (if function != 0: 8 else: 0)
+                fact.name = self.sema.pool_resolve(sema_sym)
+                fact.detail = f"share-place declaration emitted={function != 0} ref-table={ref_table} llvm-pointer={llvm_pointer}"
+                let selected = self.analysis_fact_selected(&fact)
+                self.analysis_add(fact)
+                if selected and function != 0 and (not ref_table or not llvm_pointer):
+                    self.analysis_fail(f"declaration {self.sema.pool_resolve(sema_sym)} sig={si} param={pi}: share-place contract ref-table={ref_table} llvm-pointer={llvm_pointer}")
+
+    // Whole-module proof that every emitted function's LLVM return shape agrees
+    // with its finalized Sema signature. A value-returning Sema signature
+    // emitted as LLVM void without sret means callers read a value the callee
+    // never produces (#653 declaration shape). Extern, async (Task-wrapped),
+    // generator, and sret signatures lower their returns deliberately.
+    fn audit_return_shape_contracts():
+        if self.analysis_enabled == 0:
+            return
+        for si in 0..self.sema.sig_names.len() as i32:
+            let sema_sym = self.sema.sig_names.get(si as i64)
+            if self.sema.extern_fn_names.contains(sema_sym):
+                continue
+            if self.sema.task_fns.contains(sema_sym) or self.sema.generator_fn_state_syms.contains(sema_sym):
+                continue
+            let cg_sym = self.codegen_sym_for_sema_sym(sema_sym)
+            let fn_ty_raw = self.fn_fn_types.get(sema_sym)
+            let fn_ty_cg = self.fn_fn_types.get(cg_sym)
+            let fn_ty = if fn_ty_raw.is_some(): fn_ty_raw.unwrap() else if fn_ty_cg.is_some(): fn_ty_cg.unwrap() else: 0
+            if fn_ty == 0:
+                continue
+            let sret_raw = self.extern_fn_has_sret.get(sema_sym)
+            let sret_cg = self.extern_fn_has_sret.get(cg_sym)
+            let has_sret = (if sret_raw.is_some(): sret_raw.unwrap() else if sret_cg.is_some(): sret_cg.unwrap() else: 0) != 0
+            let sema_ret = self.sema.sig_return_type(si)
+            if sema_ret <= 0:
+                continue
+            let ret_kind = self.sema.get_type_kind(self.sema.resolve_alias(sema_ret as TypeId))
+            let sema_returns_value = ret_kind != TypeKind.TY_VOID and ret_kind != TypeKind.TY_NEVER
+            let llvm_is_void = wl_get_type_kind(wl_get_return_type(fn_ty)) == wl_void_type_kind()
+            var fact = AnalysisFact.new(AnalysisStage.Codegen, AnalysisFactKind.Invariant)
+            fact.id = si
+            fact.symbol = sema_sym
+            fact.type_id = sema_ret
+            fact.flags = 16 | (if sema_returns_value: 32 else: 0) | (if llvm_is_void: 64 else: 0) | (if has_sret: 128 else: 0)
+            fact.name = self.sema.pool_resolve(sema_sym)
+            fact.detail = f"return-shape sema-ret={sema_ret} llvm-void={llvm_is_void} sret={has_sret}"
+            let selected = self.analysis_fact_selected(&fact)
+            self.analysis_add(fact)
+            if selected and sema_returns_value and llvm_is_void and not has_sret:
+                self.analysis_fail(f"declaration {self.sema.pool_resolve(sema_sym)} sig={si}: Sema return type {sema_ret} emitted as LLVM void without sret")
+
+    // Coverage proof for the instrumentation itself. Every reachable ordinary MIR
+    // call argument must pass through one recorded marshalling branch; otherwise an
+    // uninstrumented Codegen path could hide a contract divergence.
+    mut fn audit_codegen_call_coverage():
+        if self.analysis_enabled == 0 or self.analysis_query != "audit":
+            return
+        for bi in 0..self.mir_input.bodies.len() as i32:
+            let body = self.mir_input.bodies.get(bi as i64)
+            if body.lowering_failed != 0:
+                continue
+            let reachable = self.mir_reachable_blocks(&body)
+            for bb in 0..body.block_count():
+                if reachable.get(bb as i64) == 0 or body.term_kind(bb) != TermKind.TK_CALL:
+                    continue
+                let args_id = body.term_data1(bb)
+                if args_id < 0 or args_id >= body.call_arg_counts.len() as i32:
+                    self.analysis_fail(f"body {body.fn_sym} bb={bb}: call argument id {args_id} is out of range")
+                    continue
+                if body.call_intrinsic(args_id) != MirIntrinsic.NONE:
+                    continue
+                let count = body.call_arg_counts.get(args_id as i64)
+                for ai in 0..count:
+                    if not self.analysis_has_call_argument(body.fn_sym, args_id, ai):
+                        let name = if body.call_mono_sym(args_id) != 0: self.sema.pool_resolve(body.call_mono_sym(args_id)) else: "<unresolved>"
+                        self.analysis_fail(f"call {name} body={body.fn_sym} bb={bb} args={args_id} param={ai}: no Codegen marshalling fact")
+
+    mut fn record_codegen_call_argument(body: &MirBody, args_id: i32, operand: i32, param_index: i32, strategy: AnalysisMarshalStrategy, raw: i64, marshaled: i64):
+        if self.analysis_enabled == 0:
+            return
+        let sig = body.call_sig_index(args_id)
+        let mono = body.call_mono_sym(args_id)
+        let name = if mono != 0: self.sema.pool_resolve(mono) else if sig >= 0 and sig < self.sema.sig_names.len() as i32: self.sema.pool_resolve(self.sema.sig_names.get(sig as i64)) else: "<unresolved>"
+        let op_kind = if operand >= 0 and operand < body.operand_kinds.len() as i32: body.operand_kinds.get(operand as i64) else: -1
+        let share = sig >= 0 and param_index >= 0 and param_index < self.sema.sig_get_param_count(sig) and self.sema.sig_param_uses_value_ref_abi(sig, param_index) != 0
+        // Extern "C" callees marshal per the C ABI, not the With ref-table
+        // contract; keep the fact but exempt them from the failure verdicts.
+        let sig_sym = if sig >= 0 and sig < self.sema.sig_names.len() as i32: self.sema.sig_names.get(sig as i64) else: 0
+        let callee_is_extern = sig_sym != 0 and self.sema.extern_fn_names.contains(sig_sym)
+        let ref_table = mono != 0 and self.is_ref_param(mono, param_index)
+        var fact = AnalysisFact.new(AnalysisStage.Codegen, AnalysisFactKind.CodegenArgument)
+        fact.id = operand
+        fact.parent = args_id
+        fact.node = body.call_ast_node(args_id)
+        fact.body_sym = body.fn_sym
+        fact.symbol = mono
+        fact.index = param_index
+        fact.type_id = self.mir_operand_sema_type(body, operand)
+        fact.effects = if sig >= 0 and param_index >= 0 and param_index < self.sema.sig_get_param_count(sig): self.sema.sig_param_effect(sig, param_index) else: 0
+        fact.flags = (strategy as i32) | ((op_kind & 255) << 8) | (if share: 65536 else: 0) | (if ref_table: 131072 else: 0)
+        fact.name = name
+        fact.detail = analysis_marshal_strategy_name(strategy) ++ f" raw={raw} marshaled={marshaled} sig={sig} sema-share={share} ref-table={ref_table}"
+        let selected = self.analysis_fact_selected(&fact)
+        self.analysis_add(fact)
+        if selected and share and not callee_is_extern and not ref_table:
+            self.analysis_fail(f"call {name} body={body.fn_sym} args={args_id} param={param_index}: Sema share-place contract is absent from Codegen ref table")
+        if selected and share and not callee_is_extern and (strategy == AnalysisMarshalStrategy.DirectValue or strategy == AnalysisMarshalStrategy.MissingSignature):
+            self.analysis_fail(f"call {name} body={body.fn_sym} args={args_id} param={param_index}: share-place parameter was not marshaled as an address")
+        if selected and share and not callee_is_extern and strategy == AnalysisMarshalStrategy.TemporaryAddress and (op_kind == OperandKind.OK_COPY or op_kind == OperandKind.OK_MOVE):
+            self.analysis_fail(f"call {name} body={body.fn_sym} args={args_id} param={param_index}: addressable share-place operand was copied into a temporary")
+
+    fn record_codegen_param_binding(body: &MirBody, fn_sym: i32, param_index: i32, strategy: AnalysisMarshalStrategy, incoming: i64, storage: i64):
+        if self.analysis_enabled == 0:
+            return
+        let sig = self.sema.get_sig(fn_sym)
+        let share = sig >= 0 and param_index < self.sema.sig_get_param_count(sig) and self.sema.sig_param_uses_value_ref_abi(sig, param_index) != 0
+        let ref_table = self.is_ref_param(fn_sym, param_index)
+        let incoming_ptr = incoming != 0 and wl_get_type_kind(wl_type_of(incoming)) == wl_pointer_type_kind()
+        let name = self.sema.pool_resolve(fn_sym)
+        var fact = AnalysisFact.new(AnalysisStage.Codegen, AnalysisFactKind.Parameter)
+        fact.id = param_index
+        fact.parent = sig
+        fact.body_sym = body.fn_sym
+        fact.symbol = fn_sym
+        fact.index = param_index
+        fact.type_id = if param_index + 1 < body.local_type_ids.len() as i32: body.local_type_ids.get((param_index + 1) as i64) else: 0
+        fact.effects = if sig >= 0 and param_index < self.sema.sig_get_param_count(sig): self.sema.sig_param_effect(sig, param_index) else: 0
+        fact.flags = (strategy as i32) | (if share: 65536 else: 0) | (if ref_table: 131072 else: 0) | (if incoming_ptr: 262144 else: 0)
+        fact.name = name
+        fact.detail = analysis_marshal_strategy_name(strategy) ++ f" incoming={incoming} storage={storage} sig={sig} sema-share={share} ref-table={ref_table} llvm-pointer={incoming_ptr}"
+        let selected = self.analysis_fact_selected(&fact)
+        self.analysis_add(fact)
+        if selected and share and not ref_table:
+            self.analysis_fail(f"callee {name} sig={sig} param={param_index}: Sema share-place contract is absent from Codegen ref table")
+        if selected and share and strategy != AnalysisMarshalStrategy.CalleePlaceAlias:
+            self.analysis_fail(f"callee {name} sig={sig} param={param_index}: share-place parameter does not alias the incoming caller place")
+
 fn Codegen.init_with_opt(module_name: str, opt_level: i32) -> Codegen:
     wl_init_native_target()
     wl_init_native_asm_printer()
@@ -551,6 +767,10 @@ fn Codegen.init_with_opt(module_name: str, opt_level: i32) -> Codegen:
         sema: Sema.init(InternPool.init(), DiagnosticList.init(), AstPool.new()),
         sema_symbol_texts: Vec.new(),
         overflow_mode: overflow_mode_default(),
+        analysis_enabled: 0,
+        analysis_query: "",
+        analysis_report: AnalysisReport.init(),
+        analysis_last_marshal_strategy: AnalysisMarshalStrategy.DirectValue,
         current_ret_type: 0,
         mir_emit_mutual_tail_call: 0,
         async_trampolines: HashMap.new(),
@@ -760,1369 +980,1371 @@ fn Codegen.init_with_opt(module_name: str, opt_level: i32) -> Codegen:
         di_current_scope: 0,
     }
 
-fn Codegen.deinit(self: Codegen):
-    wl_builder_dispose(self.builder)
-    wl_module_dispose(self.llmod)
-    wl_context_dispose(self.context)
-    wl_dispose_target_machine(self.target_machine)
+impl Codegen:
+    fn deinit():
+        wl_builder_dispose(self.builder)
+        wl_module_dispose(self.llmod)
+        wl_context_dispose(self.context)
+        wl_dispose_target_machine(self.target_machine)
 
-// ── Public API (called by Driver) ─────────────────────────────────
+    // ── Public API (called by Driver) ─────────────────────────────────
 
-fn Codegen.optimize(self: Codegen, level: i32):
-    let dump_pre = with_getenv_str("WITH_DUMP_LLIR_PRE")
-    if dump_pre.len() > 0:
-        with_eprint("===== PRE-OPTIMIZE LLVM IR =====\n")
+    fn optimize(level: i32):
+        let dump_pre = with_getenv_str("WITH_DUMP_LLIR_PRE")
+        if dump_pre.len() > 0:
+            with_eprint("===== PRE-OPTIMIZE LLVM IR =====\n")
+            wl_print_ir(self.llmod)
+            with_eprint("===== END PRE-OPTIMIZE LLVM IR =====\n")
+        wl_optimize(self.llmod, self.target_machine, level)
+        let dump_post = with_getenv_str("WITH_DUMP_LLIR_POST")
+        if dump_post.len() > 0:
+            with_eprint("===== POST-OPTIMIZE LLVM IR =====\n")
+            wl_print_ir(self.llmod)
+            with_eprint("===== END POST-OPTIMIZE LLVM IR =====\n")
+
+    fn emit_object_file(path: str) -> i32:
+        wl_emit_object(self.target_machine, self.llmod, path)
+
+    fn print_ir():
         wl_print_ir(self.llmod)
-        with_eprint("===== END PRE-OPTIMIZE LLVM IR =====\n")
-    wl_optimize(self.llmod, self.target_machine, level)
-    let dump_post = with_getenv_str("WITH_DUMP_LLIR_POST")
-    if dump_post.len() > 0:
-        with_eprint("===== POST-OPTIMIZE LLVM IR =====\n")
-        wl_print_ir(self.llmod)
-        with_eprint("===== END POST-OPTIMIZE LLVM IR =====\n")
 
-fn Codegen.emit_object_file(self: Codegen, path: str) -> i32:
-    wl_emit_object(self.target_machine, self.llmod, path)
+    fn verify() -> i32:
+        wl_verify_module(self.llmod)
 
-fn Codegen.print_ir(self: Codegen):
-    wl_print_ir(self.llmod)
+    // ── Type fallback helper ─────────────────────────────────────────
 
-fn Codegen.verify(self: Codegen) -> i32:
-    wl_verify_module(self.llmod)
+    // Returns i32 type as a fallback when type resolution fails.
+    // Sets had_error so the compilation is marked as failed.
+    mut fn type_fallback() -> i64:
+        self.had_error = 1
+        wl_i32_type(self.context)
 
-// ── Type fallback helper ─────────────────────────────────────────
+    // ── Debug info helpers ────────────────────────────────────────────
 
-// Returns i32 type as a fallback when type resolution fails.
-// Sets had_error so the compilation is marked as failed.
-fn Codegen.type_fallback(self: Codegen) -> i64:
-    self.had_error = 1
-    wl_i32_type(self.context)
-
-// ── Debug info helpers ────────────────────────────────────────────
-
-fn Codegen.debug_init_module(self: Codegen):
-    if self.debug_info == 0:
-        return
-    self.di_source = Source.from_string(self.source_file, self.source_text, 0)
-    self.di_builder = wl_di_create_builder(self.llmod)
-
-    // Split source path into directory and filename
-    var last_slash = -1
-    for i in 0..self.source_file.len() as i32:
-        if self.source_file.byte_at(i as i64) == 47:
-            last_slash = i
-
-    var dir = "."
-    var file = self.source_file
-    if last_slash >= 0:
-        dir = self.source_file.slice(0, last_slash as i64)
-        file = self.source_file.slice((last_slash + 1) as i64, self.source_file.len())
-
-    self.di_file = wl_di_create_file(self.di_builder, file, dir)
-
-    wl_add_module_flag_int(self.llmod, "Debug Info Version", wl_debug_metadata_version())
-    wl_add_module_flag_int(self.llmod, "Dwarf Version", 5)
-
-    let is_opt = 0
-    self.di_compile_unit = wl_di_create_compile_unit(
-        self.di_builder, self.di_file, "with", is_opt, 5, wl_dwarf_lang_with())
-
-fn Codegen.debug_finalize_module(self: Codegen):
-    if self.di_builder != 0:
-        wl_di_finalize(self.di_builder)
-
-fn Codegen.debug_enter_function(self: Codegen, fn_node: i32, fn_sym: i32, function: i64):
-    if self.di_builder == 0:
-        return
-    let fn_name = self.intern.resolve(fn_sym)
-    if fn_name.len() == 0:
-        return
-
-    var fn_line = 1
-    let span = self.pool.get_start(fn_node)
-    if span > 0:
-        let loc = self.di_source.offset_to_location(span)
-        fn_line = loc.line + 1
-
-    let sub_type = wl_di_create_subroutine_type(self.di_builder, self.di_file, 0, 0)
-    let subprogram = wl_di_create_function(
-        self.di_builder, self.di_file, fn_name, fn_name,
-        self.di_file, fn_line, sub_type, 1, fn_line, 0)
-    wl_di_set_subprogram(function, subprogram)
-    self.di_fn_subprograms.insert(fn_sym, subprogram)
-    self.di_current_scope = subprogram
-
-fn Codegen.debug_set_location(self: Codegen, byte_offset: i32):
-    if self.di_builder == 0:
-        return
-    if byte_offset <= 0:
-        wl_di_clear_current_location(self.builder)
-        return
-    let loc = self.di_source.offset_to_location(byte_offset)
-    let line = loc.line + 1
-    let col = loc.col + 1
-    var scope = self.di_current_scope
-    if scope == 0:
-        let sp = self.di_fn_subprograms.get(self.current_function_name_sym)
-        if not sp.is_some():
+    mut fn debug_init_module():
+        if self.debug_info == 0:
             return
-        scope = sp.unwrap() as i64
-    let di_loc = wl_di_create_debug_location(self.context, line, col, scope)
-    wl_di_set_current_location(self.builder, di_loc)
+        self.di_source = Source.from_string(self.source_file, self.source_text, 0)
+        self.di_builder = wl_di_create_builder(self.llmod)
 
-fn Codegen.debug_clear_location(self: Codegen):
-    if self.di_builder == 0:
-        return
-    wl_di_clear_current_location(self.builder)
+        // Split source path into directory and filename
+        var last_slash = -1
+        for i in 0..self.source_file.len() as i32:
+            if self.source_file.byte_at(i as i64) == 47:
+                last_slash = i
 
-fn Codegen.debug_push_lexical_block(self: Codegen, byte_offset: i32):
-    if self.di_builder == 0:
-        return
-    if self.di_current_scope == 0:
-        return
-    var line = 1
-    var col = 0
-    if byte_offset > 0:
+        var dir = "."
+        var file = self.source_file
+        if last_slash >= 0:
+            dir = self.source_file.slice(0, last_slash as i64)
+            file = self.source_file.slice((last_slash + 1) as i64, self.source_file.len())
+
+        self.di_file = wl_di_create_file(self.di_builder, file, dir)
+
+        wl_add_module_flag_int(self.llmod, "Debug Info Version", wl_debug_metadata_version())
+        wl_add_module_flag_int(self.llmod, "Dwarf Version", 5)
+
+        let is_opt = 0
+        self.di_compile_unit = wl_di_create_compile_unit(
+            self.di_builder, self.di_file, "with", is_opt, 5, wl_dwarf_lang_with())
+
+    fn debug_finalize_module():
+        if self.di_builder != 0:
+            wl_di_finalize(self.di_builder)
+
+    mut fn debug_enter_function(fn_node: i32, fn_sym: i32, function: i64):
+        if self.di_builder == 0:
+            return
+        let fn_name = self.intern.resolve(fn_sym)
+        if fn_name.len() == 0:
+            return
+
+        var fn_line = 1
+        let span = self.pool.get_start(fn_node)
+        if span > 0:
+            let loc = self.di_source.offset_to_location(span)
+            fn_line = loc.line + 1
+
+        let sub_type = wl_di_create_subroutine_type(self.di_builder, self.di_file, 0, 0)
+        let subprogram = wl_di_create_function(
+            self.di_builder, self.di_file, fn_name, fn_name,
+            self.di_file, fn_line, sub_type, 1, fn_line, 0)
+        wl_di_set_subprogram(function, subprogram)
+        self.di_fn_subprograms.insert(fn_sym, subprogram)
+        self.di_current_scope = subprogram
+
+    fn debug_set_location(byte_offset: i32):
+        if self.di_builder == 0:
+            return
+        if byte_offset <= 0:
+            wl_di_clear_current_location(self.builder)
+            return
         let loc = self.di_source.offset_to_location(byte_offset)
-        line = loc.line + 1
-        col = loc.col + 1
-    let block = wl_di_create_lexical_block(self.di_builder, self.di_current_scope, self.di_file, line, col)
-    self.di_current_scope = block
+        let line = loc.line + 1
+        let col = loc.col + 1
+        var scope = self.di_current_scope
+        if scope == 0:
+            let sp = self.di_fn_subprograms.get(self.current_function_name_sym)
+            if not sp.is_some():
+                return
+            scope = sp.unwrap() as i64
+        let di_loc = wl_di_create_debug_location(self.context, line, col, scope)
+        wl_di_set_current_location(self.builder, di_loc)
 
-fn Codegen.debug_get_di_type(self: Codegen, sema_tid: i32) -> i64:
-    let cached = self.di_type_cache.get(sema_tid)
-    if cached.is_some():
-        return cached.unwrap() as i64
-    let di_ty = self.debug_create_di_type(sema_tid)
-    self.di_type_cache.insert(sema_tid, di_ty)
-    di_ty
+    fn debug_clear_location():
+        if self.di_builder == 0:
+            return
+        wl_di_clear_current_location(self.builder)
 
-fn Codegen.debug_create_di_type(self: Codegen, sema_tid: i32) -> i64:
-    let kind = self.sema.get_type_kind(sema_tid)
-    if kind == 3:
-        // TypeKind.TY_BOOL
-        return wl_di_create_basic_type(self.di_builder, "bool", 8, wl_dwarf_ate_boolean())
-    if kind == 1:
-        // TypeKind.TY_INT: d0 = width, d1 = signed, d2 = ptr_width flag
-        let width = self.sema.get_type_d0(sema_tid)
-        let is_signed = self.sema.get_type_d1(sema_tid)
-        let is_ptr_width = self.sema.get_type_d2(sema_tid)
-        if is_ptr_width != 0:
-            let name = if is_signed == 1: "isize" else: "usize"
-            let encoding = if is_signed == 1: wl_dwarf_ate_signed() else: wl_dwarf_ate_unsigned()
-            return wl_di_create_basic_type(self.di_builder, name, width as i64, encoding)
-        if is_signed == 1:
-            return wl_di_create_basic_type(self.di_builder, f"i{width}", width as i64, wl_dwarf_ate_signed())
-        else:
-            return wl_di_create_basic_type(self.di_builder, f"u{width}", width as i64, wl_dwarf_ate_unsigned())
-    if kind == 2:
-        // TypeKind.TY_FLOAT: d0 = width
-        let width = self.sema.get_type_d0(sema_tid)
-        return wl_di_create_basic_type(self.di_builder, f"f{width}", width as i64, wl_dwarf_ate_float())
-    if kind == 5:
-        // TypeKind.TY_STR
-        return wl_di_create_unspecified_type(self.di_builder, "str")
-    if kind == 4:
-        // TypeKind.TY_VOID
-        return wl_di_create_unspecified_type(self.di_builder, "void")
-    if kind == 13 or kind == 14:
-        // TypeKind.TY_PTR / TypeKind.TY_REF: d0 = pointee tid
-        let pointee_tid = self.sema.get_type_d0(sema_tid)
-        let pointee_di = self.debug_get_di_type(pointee_tid)
-        return wl_di_create_pointer_type(self.di_builder, pointee_di, 64)
-    if kind == 6 or kind == 7:
-        // TypeKind.TY_STRUCT / TypeKind.TY_ENUM: d0 = name sym
-        let name_sym = self.sema.get_type_d0(sema_tid)
-        let name = self.intern.resolve(name_sym)
-        return wl_di_create_unspecified_type(self.di_builder, name)
-    wl_di_create_unspecified_type(self.di_builder, "unknown")
+    mut fn debug_push_lexical_block(byte_offset: i32):
+        if self.di_builder == 0:
+            return
+        if self.di_current_scope == 0:
+            return
+        var line = 1
+        var col = 0
+        if byte_offset > 0:
+            let loc = self.di_source.offset_to_location(byte_offset)
+            line = loc.line + 1
+            col = loc.col + 1
+        let block = wl_di_create_lexical_block(self.di_builder, self.di_current_scope, self.di_file, line, col)
+        self.di_current_scope = block
 
-fn Codegen.abi_size_of(self: Codegen, ty: i64) -> i64:
-    if ty == 0:
-        self.had_error = 1
-        return 0
-    if wl_get_type_kind(ty) == wl_void_type_kind():
-        return 0
-    let dl = wl_get_module_data_layout(self.llmod)
-    if dl == 0:
-        self.had_error = 1
-        return 0
-    wl_abi_size_of(dl, ty)
+    fn debug_get_di_type(sema_tid: i32) -> i64:
+        let cached = self.di_type_cache.get(sema_tid)
+        if cached.is_some():
+            return cached.unwrap() as i64
+        let di_ty = self.debug_create_di_type(sema_tid)
+        self.di_type_cache.insert(sema_tid, di_ty)
+        di_ty
 
-fn Codegen.gen_module_from_mir(self: Codegen, mir_mod: MirModule, pool: AstPool) -> i32:
-    let mir_err = validate_mir_module(mir_mod)
-    if mir_err.len() > 0:
-        with_eprint("error: invalid MIR input for LLVM backend: " ++ mir_err)
-        self.had_error = 1
-        return 1
-    self.mir_input = mir_mod
-    self.gen_module(pool)
+    fn debug_create_di_type(sema_tid: i32) -> i64:
+        let kind = self.sema.get_type_kind(sema_tid)
+        if kind == 3:
+            // TypeKind.TY_BOOL
+            return wl_di_create_basic_type(self.di_builder, "bool", 8, wl_dwarf_ate_boolean())
+        if kind == 1:
+            // TypeKind.TY_INT: d0 = width, d1 = signed, d2 = ptr_width flag
+            let width = self.sema.get_type_d0(sema_tid)
+            let is_signed = self.sema.get_type_d1(sema_tid)
+            let is_ptr_width = self.sema.get_type_d2(sema_tid)
+            if is_ptr_width != 0:
+                let name = if is_signed == 1: "isize" else: "usize"
+                let encoding = if is_signed == 1: wl_dwarf_ate_signed() else: wl_dwarf_ate_unsigned()
+                return wl_di_create_basic_type(self.di_builder, name, width as i64, encoding)
+            if is_signed == 1:
+                return wl_di_create_basic_type(self.di_builder, f"i{width}", width as i64, wl_dwarf_ate_signed())
+            else:
+                return wl_di_create_basic_type(self.di_builder, f"u{width}", width as i64, wl_dwarf_ate_unsigned())
+        if kind == 2:
+            // TypeKind.TY_FLOAT: d0 = width
+            let width = self.sema.get_type_d0(sema_tid)
+            return wl_di_create_basic_type(self.di_builder, f"f{width}", width as i64, wl_dwarf_ate_float())
+        if kind == 5:
+            // TypeKind.TY_STR
+            return wl_di_create_unspecified_type(self.di_builder, "str")
+        if kind == 4:
+            // TypeKind.TY_VOID
+            return wl_di_create_unspecified_type(self.di_builder, "void")
+        if kind == 13 or kind == 14:
+            // TypeKind.TY_PTR / TypeKind.TY_REF: d0 = pointee tid
+            let pointee_tid = self.sema.get_type_d0(sema_tid)
+            let pointee_di = self.debug_get_di_type(pointee_tid)
+            return wl_di_create_pointer_type(self.di_builder, pointee_di, 64)
+        if kind == 6 or kind == 7:
+            // TypeKind.TY_STRUCT / TypeKind.TY_ENUM: d0 = name sym
+            let name_sym = self.sema.get_type_d0(sema_tid)
+            let name = self.intern.resolve(name_sym)
+            return wl_di_create_unspecified_type(self.di_builder, name)
+        wl_di_create_unspecified_type(self.di_builder, "unknown")
 
-// ── Helper: is method symbol ──────────────────────────────────────
+    mut fn abi_size_of(ty: i64) -> i64:
+        if ty == 0:
+            self.had_error = 1
+            return 0
+        if wl_get_type_kind(ty) == wl_void_type_kind():
+            return 0
+        let dl = wl_get_module_data_layout(self.llmod)
+        if dl == 0:
+            self.had_error = 1
+            return 0
+        wl_abi_size_of(dl, ty)
 
-fn Codegen.is_method_symbol(self: Codegen, sym: i32) -> bool:
-    let name = self.intern.resolve(sym)
-    for i in 0..name.len() as i32:
-        if name.byte_at(i as i64) == 46:  // '.'
-            return true
-    false
+    mut fn gen_module_from_mir(mir_mod: MirModule, pool: AstPool) -> i32:
+        let mir_err = validate_mir_module(mir_mod)
+        if mir_err.len() > 0:
+            with_eprint("error: invalid MIR input for LLVM backend: " ++ mir_err)
+            self.had_error = 1
+            return 1
+        self.mir_input = mir_mod
+        self.gen_module(pool)
 
-fn Codegen.dyn_trait_from_type_node(self: Codegen, type_node: i32) -> i32:
-    if type_node == 0:
-        return 0
-    let tk = self.pool.kind(type_node)
-    if tk == NodeKind.NK_TYPE_TRAIT_OBJ:
-        return self.pool.get_data0(type_node)
-    if tk == NodeKind.NK_TYPE_REF or tk == NodeKind.NK_TYPE_PTR:
-        return self.dyn_trait_from_type_node(self.pool.get_data0(type_node))
-    if tk == NodeKind.NK_TYPE_GENERIC:
-        let name_sym = self.pool.get_data0(type_node)
-        let g_extra = self.pool.get_data1(type_node)
-        let g_count = self.pool.get_data2(type_node)
-        if self.sema.type_symbol_is_std_box(name_sym) != 0 and g_count == 1:
-            return self.dyn_trait_from_type_node(self.pool.get_extra(g_extra))
-    0
+    // ── Helper: is method symbol ──────────────────────────────────────
+
+    fn is_method_symbol(sym: i32) -> bool:
+        let name = self.intern.resolve(sym)
+        for i in 0..name.len() as i32:
+            if name.byte_at(i as i64) == 46:  // '.'
+                return true
+        false
+
+    fn dyn_trait_from_type_node(type_node: i32) -> i32:
+        if type_node == 0:
+            return 0
+        let tk = self.pool.kind(type_node)
+        if tk == NodeKind.NK_TYPE_TRAIT_OBJ:
+            return self.pool.get_data0(type_node)
+        if tk == NodeKind.NK_TYPE_REF or tk == NodeKind.NK_TYPE_PTR:
+            return self.dyn_trait_from_type_node(self.pool.get_data0(type_node))
+        if tk == NodeKind.NK_TYPE_GENERIC:
+            let name_sym = self.pool.get_data0(type_node)
+            let g_extra = self.pool.get_data1(type_node)
+            let g_count = self.pool.get_data2(type_node)
+            if self.sema.type_symbol_is_std_box(name_sym) != 0 and g_count == 1:
+                return self.dyn_trait_from_type_node(self.pool.get_extra(g_extra))
+        0
 
 fn codegen_hash_type_trait_key(type_sym: i32, trait_sym: i32) -> i32:
     type_sym * 10007 + trait_sym
 
-fn Codegen.get_dyn_fat_ptr_type(self: Codegen) -> i64:
-    if self.dyn_fat_ptr_type != 0:
-        return self.dyn_fat_ptr_type
-    let ptr_ty = wl_ptr_type(self.context)
-    let fat_types: Vec[i64] = Vec.new()
-    fat_types.push(ptr_ty)
-    fat_types.push(ptr_ty)
-    self.dyn_fat_ptr_type = wl_struct_type(self.context, vec_data_i64(&fat_types), 2, 0)
-    self.dyn_fat_ptr_type
+impl Codegen:
+    mut fn get_dyn_fat_ptr_type() -> i64:
+        if self.dyn_fat_ptr_type != 0:
+            return self.dyn_fat_ptr_type
+        let ptr_ty = wl_ptr_type(self.context)
+        let fat_types: Vec[i64] = Vec.new()
+        fat_types.push(ptr_ty)
+        fat_types.push(ptr_ty)
+        self.dyn_fat_ptr_type = wl_struct_type(self.context, vec_data_i64(&fat_types), 2, 0)
+        self.dyn_fat_ptr_type
 
-fn Codegen.llvm_type_is_dyn_fat_ptr(self: Codegen, ty: i64) -> i32:
-    if ty == 0 or wl_get_type_kind(ty) != wl_struct_type_kind():
-        return 0
-    if wl_count_struct_elem_types(ty) != 2:
-        return 0
-    let ptr_ty = wl_ptr_type(self.context)
-    if wl_struct_get_type_at(ty, 0) != ptr_ty:
-        return 0
-    if wl_struct_get_type_at(ty, 1) != ptr_ty:
-        return 0
-    1
+    fn llvm_type_is_dyn_fat_ptr(ty: i64) -> i32:
+        if ty == 0 or wl_get_type_kind(ty) != wl_struct_type_kind():
+            return 0
+        if wl_count_struct_elem_types(ty) != 2:
+            return 0
+        let ptr_ty = wl_ptr_type(self.context)
+        if wl_struct_get_type_at(ty, 0) != ptr_ty:
+            return 0
+        if wl_struct_get_type_at(ty, 1) != ptr_ty:
+            return 0
+        1
 
-fn Codegen.get_fn_dyn_param_trait(self: Codegen, fn_sym: i32, param_idx: i32) -> i32:
-    let base_opt = self.fn_dyn_param_starts.get(fn_sym)
-    if param_idx < 0:
-        return 0
-    if base_opt.is_some():
-        let base = base_opt.unwrap()
-        let slot = base + param_idx
-        if slot >= 0 and slot < self.fn_dyn_param_data.len() as i32:
-            let recorded_trait = self.fn_dyn_param_data.get(slot as i64)
-            if recorded_trait != 0:
-                if self.trait_map.get(recorded_trait).is_some():
+    fn get_fn_dyn_param_trait(fn_sym: i32, param_idx: i32) -> i32:
+        let base_opt = self.fn_dyn_param_starts.get(fn_sym)
+        if param_idx < 0:
+            return 0
+        if base_opt.is_some():
+            let base = base_opt.unwrap()
+            let slot = base + param_idx
+            if slot >= 0 and slot < self.fn_dyn_param_data.len() as i32:
+                let recorded_trait = self.fn_dyn_param_data.get(slot as i64)
+                if recorded_trait != 0:
+                    if self.trait_map.get(recorded_trait).is_some():
+                        return recorded_trait
+                    let cg_trait = self.sema_sym_to_codegen_sym(recorded_trait)
+                    if cg_trait != 0:
+                        return cg_trait
                     return recorded_trait
-                let cg_trait = self.sema_sym_to_codegen_sym(recorded_trait)
-                if cg_trait != 0:
-                    return cg_trait
-                return recorded_trait
 
-    let fn_name = self.intern.resolve(fn_sym)
-    let sema_fn_sym = if fn_name.len() > 0: self.sema.pool_lookup_symbol(fn_name) else: 0
-    if sema_fn_sym == 0:
-        return 0
-    if not self.sema.fn_decl_nodes.contains(sema_fn_sym):
-        return 0
-    let fn_node = self.sema.fn_decl_nodes.get(sema_fn_sym).unwrap()
-    let meta = self.sema.ast.find_fn_meta(fn_node)
-    if meta < 0:
-        return 0
-    let param_count = self.sema.ast.fn_meta_param_count(meta)
-    if param_idx < 0 or param_idx >= param_count:
-        return 0
-    let param_start = self.sema.ast.fn_meta_param_start(meta)
-    let p_type_node = self.sema.ast.fn_param_type(param_start, param_idx)
-    let sema_trait = self.sema.trait_object_from_type_node(p_type_node)
-    if sema_trait == 0:
-        return 0
-    let cg_trait2 = self.sema_sym_to_codegen_sym(sema_trait)
-    if cg_trait2 != 0:
-        return cg_trait2
-    sema_trait
+        let fn_name = self.intern.resolve(fn_sym)
+        let sema_fn_sym = if fn_name.len() > 0: self.sema.pool_lookup_symbol(fn_name) else: 0
+        if sema_fn_sym == 0:
+            return 0
+        if not self.sema.fn_decl_nodes.contains(sema_fn_sym):
+            return 0
+        let fn_node = self.sema.fn_decl_nodes.get(sema_fn_sym).unwrap()
+        let meta = self.sema.ast.find_fn_meta(fn_node)
+        if meta < 0:
+            return 0
+        let param_count = self.sema.ast.fn_meta_param_count(meta)
+        if param_idx < 0 or param_idx >= param_count:
+            return 0
+        let param_start = self.sema.ast.fn_meta_param_start(meta)
+        let p_type_node = self.sema.ast.fn_param_type(param_start, param_idx)
+        let sema_trait = self.sema.trait_object_from_type_node(p_type_node)
+        if sema_trait == 0:
+            return 0
+        let cg_trait2 = self.sema_sym_to_codegen_sym(sema_trait)
+        if cg_trait2 != 0:
+            return cg_trait2
+        sema_trait
 
-fn Codegen.get_raw_fn_dyn_param_trait(self: Codegen, raw_fn_sym: i32, param_idx: i32) -> i32:
-    if raw_fn_sym == 0 or param_idx < 0:
-        return 0
-    var sema_fn_sym = raw_fn_sym
-    if not self.sema.fn_decl_nodes.contains(sema_fn_sym):
-        let fn_text = self.sema_symbol_text(raw_fn_sym)
-        if fn_text.len() > 0:
-            sema_fn_sym = self.sema.pool_lookup_symbol(fn_text)
-    if sema_fn_sym == 0 or not self.sema.fn_decl_nodes.contains(sema_fn_sym):
-        return 0
-    let fn_node = self.sema.fn_decl_nodes.get(sema_fn_sym).unwrap()
-    let meta = self.sema.ast.find_fn_meta(fn_node)
-    if meta < 0:
-        return 0
-    let param_count = self.sema.ast.fn_meta_param_count(meta)
-    if param_idx >= param_count:
-        return 0
-    let param_start = self.sema.ast.fn_meta_param_start(meta)
-    let p_type_node = self.sema.ast.fn_param_type(param_start, param_idx)
-    let sema_trait = self.sema.trait_object_from_type_node(p_type_node)
-    if sema_trait == 0:
-        return 0
-    let cg_trait = self.sema_sym_to_codegen_sym(sema_trait)
-    if cg_trait != 0:
-        return cg_trait
-    sema_trait
+    fn get_raw_fn_dyn_param_trait(raw_fn_sym: i32, param_idx: i32) -> i32:
+        if raw_fn_sym == 0 or param_idx < 0:
+            return 0
+        var sema_fn_sym = raw_fn_sym
+        if not self.sema.fn_decl_nodes.contains(sema_fn_sym):
+            let fn_text = self.sema_symbol_text(raw_fn_sym)
+            if fn_text.len() > 0:
+                sema_fn_sym = self.sema.pool_lookup_symbol(fn_text)
+        if sema_fn_sym == 0 or not self.sema.fn_decl_nodes.contains(sema_fn_sym):
+            return 0
+        let fn_node = self.sema.fn_decl_nodes.get(sema_fn_sym).unwrap()
+        let meta = self.sema.ast.find_fn_meta(fn_node)
+        if meta < 0:
+            return 0
+        let param_count = self.sema.ast.fn_meta_param_count(meta)
+        if param_idx >= param_count:
+            return 0
+        let param_start = self.sema.ast.fn_meta_param_start(meta)
+        let p_type_node = self.sema.ast.fn_param_type(param_start, param_idx)
+        let sema_trait = self.sema.trait_object_from_type_node(p_type_node)
+        if sema_trait == 0:
+            return 0
+        let cg_trait = self.sema_sym_to_codegen_sym(sema_trait)
+        if cg_trait != 0:
+            return cg_trait
+        sema_trait
 
-fn Codegen.is_const_int_value(self: Codegen, val: i64) -> bool:
-    // LLVMIsConstant is broader than integer constants; only this kind is safe
-    // to pass to LLVMConstIntGetSExtValue.
-    val != 0 and wl_get_value_kind(val) == 18
+    fn is_const_int_value(val: i64) -> bool:
+        // LLVMIsConstant is broader than integer constants; only this kind is safe
+        // to pass to LLVMConstIntGetSExtValue.
+        val != 0 and wl_get_value_kind(val) == 18
 
-fn Codegen.coerce_value_to_type(self: Codegen, val: i64, target_ty: i64) -> i64:
-    if val == 0 or target_ty == 0:
-        return val
-    let val_ty = wl_type_of(val)
-    if val_ty == target_ty:
-        return val
+    mut fn coerce_value_to_type(val: i64, target_ty: i64) -> i64:
+        if val == 0 or target_ty == 0:
+            return val
+        let val_ty = wl_type_of(val)
+        if val_ty == target_ty:
+            return val
 
-    let vk = wl_get_type_kind(val_ty)
-    let tk = wl_get_type_kind(target_ty)
+        let vk = wl_get_type_kind(val_ty)
+        let tk = wl_get_type_kind(target_ty)
 
-    if vk == wl_integer_type_kind() and tk == wl_pointer_type_kind():
-        if self.is_const_int_value(val) and wl_const_int_sext_val(val) == 0:
-            return wl_const_null(target_ty)
-    if tk == wl_pointer_type_kind() and vk == wl_pointer_type_kind():
-        return wl_build_bitcast(self.builder, val, target_ty)
-    if vk == wl_struct_type_kind() and tk == wl_struct_type_kind():
-        let coerced_agg = self.coerce_struct_value(val, target_ty)
-        if wl_type_of(coerced_agg) == target_ty:
-            return coerced_agg
+        if vk == wl_integer_type_kind() and tk == wl_pointer_type_kind():
+            if self.is_const_int_value(val) and wl_const_int_sext_val(val) == 0:
+                return wl_const_null(target_ty)
+        if tk == wl_pointer_type_kind() and vk == wl_pointer_type_kind():
+            return wl_build_bitcast(self.builder, val, target_ty)
+        if vk == wl_struct_type_kind() and tk == wl_struct_type_kind():
+            let coerced_agg = self.coerce_struct_value(val, target_ty)
+            if wl_type_of(coerced_agg) == target_ty:
+                return coerced_agg
 
-    if vk == wl_integer_type_kind() and tk == wl_integer_type_kind():
-        return self.coerce_int(val, target_ty)
+        if vk == wl_integer_type_kind() and tk == wl_integer_type_kind():
+            return self.coerce_int(val, target_ty)
 
-    if (vk == wl_float_type_kind() or vk == wl_double_type_kind()) and (tk == wl_float_type_kind() or tk == wl_double_type_kind()):
-        return wl_build_fp_cast(self.builder, val, target_ty)
+        if (vk == wl_float_type_kind() or vk == wl_double_type_kind()) and (tk == wl_float_type_kind() or tk == wl_double_type_kind()):
+            return wl_build_fp_cast(self.builder, val, target_ty)
 
-    // Function pointer → fat pointer coercion: create thunk wrapper
-    // Regular fn(params...) → closure fn(ctx, params...) with ctx ignored
-    if vk == wl_pointer_type_kind() and tk == wl_struct_type_kind():
-        let target_fields = wl_count_struct_elem_types(target_ty)
-        if target_fields == 2:
-            let f0 = wl_struct_get_type_at(target_ty, 0)
-            let f1 = wl_struct_get_type_at(target_ty, 1)
-            if f0 != 0 and f1 != 0:
-                if wl_get_type_kind(f0) == wl_pointer_type_kind() and wl_get_type_kind(f1) == wl_pointer_type_kind():
-                    return self.gen_fn_to_fat_ptr_thunk(val, target_ty)
+        // Function pointer → fat pointer coercion: create thunk wrapper
+        // Regular fn(params...) → closure fn(ctx, params...) with ctx ignored
+        if vk == wl_pointer_type_kind() and tk == wl_struct_type_kind():
+            let target_fields = wl_count_struct_elem_types(target_ty)
+            if target_fields == 2:
+                let f0 = wl_struct_get_type_at(target_ty, 0)
+                let f1 = wl_struct_get_type_at(target_ty, 1)
+                if f0 != 0 and f1 != 0:
+                    if wl_get_type_kind(f0) == wl_pointer_type_kind() and wl_get_type_kind(f1) == wl_pointer_type_kind():
+                        return self.gen_fn_to_fat_ptr_thunk(val, target_ty)
 
-    val
+        val
 
-fn Codegen.gen_fn_to_fat_ptr_thunk(self: Codegen, fn_val: i64, fat_ty: i64) -> i64:
-    // Create a thunk: fn __fn_thunk_N(ctx: ptr, params...) -> ret that calls fn_val(params...)
-    let ptr_ty = wl_ptr_type(self.context)
-    // Get the original function's type to determine params and return type
-    let orig_fn_ty = wl_global_get_value_type(fn_val)
-    if orig_fn_ty == 0:
-        // Can't determine function type — fall back to direct wrap (may mismatch)
+    mut fn gen_fn_to_fat_ptr_thunk(fn_val: i64, fat_ty: i64) -> i64:
+        // Create a thunk: fn __fn_thunk_N(ctx: ptr, params...) -> ret that calls fn_val(params...)
+        let ptr_ty = wl_ptr_type(self.context)
+        // Get the original function's type to determine params and return type
+        let orig_fn_ty = wl_global_get_value_type(fn_val)
+        if orig_fn_ty == 0:
+            // Can't determine function type — fall back to direct wrap (may mismatch)
+            var fat = wl_get_undef(fat_ty)
+            fat = wl_build_insert_value(self.builder, fat, fn_val, 0)
+            fat = wl_build_insert_value(self.builder, fat, wl_const_null(ptr_ty), 1)
+            return fat
+        let orig_param_count = wl_count_param_types(orig_fn_ty)
+        let orig_ret_ty = wl_get_return_type(orig_fn_ty)
+        // Build thunk function type: fn(ptr, original_params...) -> original_ret
+        let thunk_params: Vec[i64] = Vec.new()
+        thunk_params.push(ptr_ty)
+        for pi in 0..orig_param_count:
+            thunk_params.push(wl_get_fn_param_type(orig_fn_ty, pi))
+        let thunk_fn_ty = wl_function_type(orig_ret_ty, vec_data_i64(&thunk_params), orig_param_count + 1, 0)
+        let thunk_id = self.closure_counter
+        self.closure_counter = thunk_id + 1
+        let thunk_name = f"__fn_thunk_{thunk_id}"
+        let thunk_fn = wl_add_function(self.llmod, thunk_name, thunk_fn_ty)
+        // Generate thunk body
+        let saved_bb = wl_get_insert_block(self.builder)
+        let entry = wl_append_bb(self.context, thunk_fn, "entry")
+        wl_position_at_end(self.builder, entry)
+        // Call original function with params (skip ctx at index 0)
+        let call_args: Vec[i64] = Vec.new()
+        for pi in 0..orig_param_count:
+            call_args.push(wl_get_param(thunk_fn, pi + 1))
+        let result = wl_build_call(self.builder, orig_fn_ty, fn_val, vec_data_i64(&call_args), orig_param_count)
+        if wl_get_type_kind(orig_ret_ty) == wl_void_type_kind():
+            wl_build_ret_void(self.builder)
+        else:
+            wl_build_ret(self.builder, result)
+        // Restore insertion point
+        wl_position_at_end(self.builder, saved_bb)
+        // Build fat pointer { thunk_fn, null_ctx }
         var fat = wl_get_undef(fat_ty)
-        fat = wl_build_insert_value(self.builder, fat, fn_val, 0)
+        fat = wl_build_insert_value(self.builder, fat, thunk_fn, 0)
         fat = wl_build_insert_value(self.builder, fat, wl_const_null(ptr_ty), 1)
-        return fat
-    let orig_param_count = wl_count_param_types(orig_fn_ty)
-    let orig_ret_ty = wl_get_return_type(orig_fn_ty)
-    // Build thunk function type: fn(ptr, original_params...) -> original_ret
-    let thunk_params: Vec[i64] = Vec.new()
-    thunk_params.push(ptr_ty)
-    for pi in 0..orig_param_count:
-        thunk_params.push(wl_get_fn_param_type(orig_fn_ty, pi))
-    let thunk_fn_ty = wl_function_type(orig_ret_ty, vec_data_i64(&thunk_params), orig_param_count + 1, 0)
-    let thunk_id = self.closure_counter
-    self.closure_counter = thunk_id + 1
-    let thunk_name = f"__fn_thunk_{thunk_id}"
-    let thunk_fn = wl_add_function(self.llmod, thunk_name, thunk_fn_ty)
-    // Generate thunk body
-    let saved_bb = wl_get_insert_block(self.builder)
-    let entry = wl_append_bb(self.context, thunk_fn, "entry")
-    wl_position_at_end(self.builder, entry)
-    // Call original function with params (skip ctx at index 0)
-    let call_args: Vec[i64] = Vec.new()
-    for pi in 0..orig_param_count:
-        call_args.push(wl_get_param(thunk_fn, pi + 1))
-    let result = wl_build_call(self.builder, orig_fn_ty, fn_val, vec_data_i64(&call_args), orig_param_count)
-    if wl_get_type_kind(orig_ret_ty) == wl_void_type_kind():
-        wl_build_ret_void(self.builder)
-    else:
-        wl_build_ret(self.builder, result)
-    // Restore insertion point
-    wl_position_at_end(self.builder, saved_bb)
-    // Build fat pointer { thunk_fn, null_ctx }
-    var fat = wl_get_undef(fat_ty)
-    fat = wl_build_insert_value(self.builder, fat, thunk_fn, 0)
-    fat = wl_build_insert_value(self.builder, fat, wl_const_null(ptr_ty), 1)
-    fat
+        fat
 
-fn Codegen.coerce_struct_value(self: Codegen, val: i64, target_ty: i64) -> i64:
-    if val == 0 or target_ty == 0:
-        return val
-    let val_ty = wl_type_of(val)
-    if val_ty == target_ty:
-        return val
-    if wl_get_type_kind(val_ty) != wl_struct_type_kind() or wl_get_type_kind(target_ty) != wl_struct_type_kind():
-        return val
-    let val_fields = wl_count_struct_elem_types(val_ty)
-    let target_fields = wl_count_struct_elem_types(target_ty)
-    if val_fields <= 0 or target_fields <= 0 or val_fields != target_fields:
-        return val
-    // If both are named struct types with the same name, or all fields have
-    // identical LLVM types, reinterpret through memory (different type identity, same layout).
-    let val_name = wl_get_struct_name(val_ty)
-    let target_name = wl_get_struct_name(target_ty)
-    var same_layout = val_name.len() > 0 and val_name == target_name
-    if not same_layout:
-        same_layout = true
-        for fi in 0..val_fields:
-            if wl_struct_get_type_at(val_ty, fi) != wl_struct_get_type_at(target_ty, fi):
-                same_layout = false
-                break
-    if same_layout:
-        let alloca = self.create_entry_alloca(val_ty)
-        wl_build_store(self.builder, val, alloca)
-        return wl_build_load(self.builder, target_ty, alloca)
-    // Both are named structs with different names — these are different types.
-    // Don't coerce; return unchanged. The caller should fix the type mismatch.
-    val
+    fn coerce_struct_value(val: i64, target_ty: i64) -> i64:
+        if val == 0 or target_ty == 0:
+            return val
+        let val_ty = wl_type_of(val)
+        if val_ty == target_ty:
+            return val
+        if wl_get_type_kind(val_ty) != wl_struct_type_kind() or wl_get_type_kind(target_ty) != wl_struct_type_kind():
+            return val
+        let val_fields = wl_count_struct_elem_types(val_ty)
+        let target_fields = wl_count_struct_elem_types(target_ty)
+        if val_fields <= 0 or target_fields <= 0 or val_fields != target_fields:
+            return val
+        // If both are named struct types with the same name, or all fields have
+        // identical LLVM types, reinterpret through memory (different type identity, same layout).
+        let val_name = wl_get_struct_name(val_ty)
+        let target_name = wl_get_struct_name(target_ty)
+        var same_layout = val_name.len() > 0 and val_name == target_name
+        if not same_layout:
+            same_layout = true
+            for fi in 0..val_fields:
+                if wl_struct_get_type_at(val_ty, fi) != wl_struct_get_type_at(target_ty, fi):
+                    same_layout = false
+                    break
+        if same_layout:
+            let alloca = self.create_entry_alloca(val_ty)
+            wl_build_store(self.builder, val, alloca)
+            return wl_build_load(self.builder, target_ty, alloca)
+        // Both are named structs with different names — these are different types.
+        // Don't coerce; return unchanged. The caller should fix the type mismatch.
+        val
 
-fn Codegen.debug_call_coerce_enabled(self: Codegen) -> bool:
-    let raw = with_getenv_str("WITH_DEBUG_CALL_COERCE")
-    raw.len() > 0 and raw != "0"
+    fn debug_call_coerce_enabled() -> bool:
+        let raw = with_getenv_str("WITH_DEBUG_CALL_COERCE")
+        raw.len() > 0 and raw != "0"
 
-fn Codegen.debug_mir_codegen_enabled(self: Codegen) -> bool:
-    let raw = with_getenv_str("WITH_DEBUG_MIR_CODEGEN")
-    raw.len() > 0 and raw != "0"
+    fn debug_mir_codegen_enabled() -> bool:
+        let raw = with_getenv_str("WITH_DEBUG_MIR_CODEGEN")
+        raw.len() > 0 and raw != "0"
 
-fn Codegen.debug_local_flow_enabled(self: Codegen) -> bool:
-    let raw = with_getenv_str("WITH_DEBUG_LOCAL_FLOW")
-    raw.len() > 0 and raw != "0"
+    fn debug_local_flow_enabled() -> bool:
+        let raw = with_getenv_str("WITH_DEBUG_LOCAL_FLOW")
+        raw.len() > 0 and raw != "0"
 
-fn Codegen.debug_method_dispatch_enabled(self: Codegen) -> bool:
-    let raw = with_getenv_str("WITH_DEBUG_METHOD_DISPATCH")
-    raw.len() > 0 and raw != "0"
+    fn debug_method_dispatch_enabled() -> bool:
+        let raw = with_getenv_str("WITH_DEBUG_METHOD_DISPATCH")
+        raw.len() > 0 and raw != "0"
 
-fn Codegen.debug_pool_flow_enabled(self: Codegen) -> bool:
-    let _ = self
-    let raw = with_getenv_str("WITH_DEBUG_POOL_FLOW")
-    raw.len() > 0 and raw != "0"
+    fn debug_pool_flow_enabled() -> bool:
+        let _ = self
+        let raw = with_getenv_str("WITH_DEBUG_POOL_FLOW")
+        raw.len() > 0 and raw != "0"
 
-fn Codegen.debug_type_layout_enabled(self: Codegen) -> bool:
-    let _ = self
-    let raw = with_getenv_str("WITH_DEBUG_TYPE_LAYOUT")
-    raw.len() > 0 and raw != "0"
+    fn debug_type_layout_enabled() -> bool:
+        let _ = self
+        let raw = with_getenv_str("WITH_DEBUG_TYPE_LAYOUT")
+        raw.len() > 0 and raw != "0"
 
-fn Codegen.debug_fallback_enabled(self: Codegen) -> bool:
-    let _ = self
-    let raw = with_getenv_str("WITH_DEBUG_FALLBACK")
-    raw.len() > 0 and raw != "0"
+    fn debug_fallback_enabled() -> bool:
+        let _ = self
+        let raw = with_getenv_str("WITH_DEBUG_FALLBACK")
+        raw.len() > 0 and raw != "0"
 
-fn Codegen.debug_type_layout_field(self: Codegen, owner_name: str, field_index: i32, field_name: i32, type_node: i32, resolved_ty: i64):
-    if not self.debug_type_layout_enabled():
-        return
-    let node_kind = if type_node != 0: self.pool.kind(type_node) else: -1
-    var msg = f"[type-layout] owner={owner_name} field={field_index} name={self.intern.resolve(field_name)} type_node={type_node} node_kind={node_kind}"
-    if type_node != 0:
-        let start = self.pool.get_start(type_node)
-        let end = self.pool.get_end(type_node)
-        msg = msg ++ f" span={start}..{end}"
-        if node_kind == NodeKind.NK_TYPE_NAMED or node_kind == NodeKind.NK_TYPE_GENERIC:
-            let type_name_sym = self.pool.get_data0(type_node)
-            msg = msg ++ f" type_name={self.intern.resolve(type_name_sym)}"
-        if node_kind == NodeKind.NK_TYPE_GENERIC:
-            msg = msg ++ f" arg_count={self.pool.get_data2(type_node)}"
-    msg = msg ++ f" resolved={self.llvm_type_mangle(resolved_ty)}"
-    if resolved_ty != 0:
-        msg = msg ++ f" llvm_kind={wl_get_type_kind(resolved_ty)} size={wl_size_of(resolved_ty)}"
-        let struct_name = wl_get_struct_name(resolved_ty)
-        if struct_name.len() > 0:
-            msg = msg ++ f" llvm_name={struct_name}"
-    with_eprint(msg)
-
-fn Codegen.capture_loop_state(self: Codegen) -> LoopState:
-    LoopState {
-        break_bbs: self.loop_break_bbs,
-        continue_bbs: self.loop_continue_bbs,
-        result_allocas: self.loop_result_allocas,
-        labels: self.loop_labels,
-        depth: self.loop_depth,
-    }
-
-fn Codegen.reset_loop_state(self: Codegen):
-    self.loop_break_bbs = Vec.new()
-    self.loop_continue_bbs = Vec.new()
-    self.loop_result_allocas = Vec.new()
-    self.loop_labels = Vec.new()
-    self.loop_depth = 0
-
-fn Codegen.restore_loop_state(self: Codegen, state: LoopState):
-    self.loop_break_bbs = state.break_bbs
-    self.loop_continue_bbs = state.continue_bbs
-    self.loop_result_allocas = state.result_allocas
-    self.loop_labels = state.labels
-    self.loop_depth = state.depth
-
-fn Codegen.push_loop_context(self: Codegen, break_bb: i64, continue_bb: i64, result_alloca: i64, label_sym: i32):
-    let idx = self.loop_depth
-    var labels: Vec[i32] = self.loop_labels
-    with_codegen_loop_set_break(idx, break_bb)
-    with_codegen_loop_set_continue(idx, continue_bb)
-    with_codegen_loop_set_result(idx, result_alloca)
-    labels.push(label_sym)
-    self.loop_labels = labels
-    self.loop_depth = idx + 1
-
-fn Codegen.pop_loop_context(self: Codegen):
-    var labels: Vec[i32] = self.loop_labels
-    let _ = labels.pop()
-    self.loop_labels = labels
-    self.loop_depth = self.loop_depth - 1
-
-fn Codegen.loop_break_target(self: Codegen, idx: i32) -> i64:
-    with_codegen_loop_get_break(idx)
-
-fn Codegen.loop_continue_target(self: Codegen, idx: i32) -> i64:
-    with_codegen_loop_get_continue(idx)
-
-fn Codegen.loop_result_alloca_at(self: Codegen, idx: i32) -> i64:
-    with_codegen_loop_get_result(idx)
-
-fn Codegen.debug_call_coerce_failure(self: Codegen, context: str, call_node: i32, arg_index: i32, arg_node: i32, actual_val: i64, expected_ty: i64) -> Unit:
-    if not self.debug_call_coerce_enabled():
-        return
-    var msg = "[call-coerce] " ++ context
-    if self.current_function_name_sym != 0:
-        msg = msg ++ " fn=" ++ self.function_symbol_name(self.current_function_name_sym)
-    msg = msg ++ f" arg={arg_index}"
-    var line = -1
-    if arg_node != 0:
-        line = self.span_to_line(arg_node)
-    else if call_node != 0:
-        line = self.span_to_line(call_node)
-    if line >= 0:
-        msg = msg ++ f" line={line}"
-    var actual_ty: i64 = 0
-    if actual_val != 0:
-        actual_ty = wl_type_of(actual_val)
-    msg = msg ++ f" actual={self.llvm_type_mangle(actual_ty)}"
-    msg = msg ++ f" expected={self.llvm_type_mangle(expected_ty)}"
-    if arg_node != 0:
-        msg = msg ++ f" node_kind={self.pool.kind(arg_node)}"
-        let arg_text = self.ident_text_from_node(arg_node)
-        if arg_text.len() > 0:
-            msg = msg ++ f" arg_text={arg_text}"
-    with_eprint(msg)
-
-fn Codegen.enforce_coerced_type(self: Codegen, value: i64, expected_ty: i64, context: str) -> i64:
-    if value == 0 or expected_ty == 0:
-        return value
-
-    var out = if wl_type_of(value) != expected_ty: self.coerce_value_to_type(value, expected_ty) else: value
-    if out != 0 and wl_type_of(out) == expected_ty:
-        return out
-
-    if out != 0 and wl_get_type_kind(expected_ty) == wl_pointer_type_kind() and wl_get_type_kind(wl_type_of(out)) == wl_pointer_type_kind():
-        out = wl_build_bitcast(self.builder, out, expected_ty)
-        if wl_type_of(out) == expected_ty:
-            return out
-
-    // Auto-coerce numeric to str (for f-string interpolation)
-    let str_ty = self.resolve_named_type(self.intern.intern("str"))
-    if expected_ty == str_ty and out != 0:
-        let coerced_str = self.coerce_val_to_str(out, str_ty)
-        if wl_type_of(coerced_str) == str_ty:
-            return coerced_str
-
-    self.had_error = 1
-    var msg = "error: " ++ context
-    msg = msg ++ f" actual={self.llvm_type_mangle(wl_type_of(value))}"
-    msg = msg ++ f" expected={self.llvm_type_mangle(expected_ty)}"
-    if self.current_function_name_sym != 0:
-        msg = msg ++ f" fn={self.intern.resolve(self.current_function_name_sym)}"
-    with_eprint(msg)
-    self.build_default_value(expected_ty)
-
-fn Codegen.canonical_local_sym(self: Codegen, sym: i32) -> i32:
-    if sym <= 0:
-        return sym
-    let text = self.intern.resolve(sym)
-    if text.len() == 0:
-        return sym
-    self.intern.intern(text)
-
-fn Codegen.record_local(self: Codegen, sym: i32, local_ptr: i64, ty: i64, is_mut: i32):
-    self.local_allocas.insert(sym, local_ptr)
-    self.local_types.insert(sym, ty)
-    self.local_muts.insert(sym, is_mut)
-    let canon = self.canonical_local_sym(sym)
-    if canon != 0 and canon != sym:
-        self.local_allocas.insert(canon, local_ptr)
-        self.local_types.insert(canon, ty)
-        self.local_muts.insert(canon, is_mut)
-    if self.debug_local_flow_enabled():
-        let sym_text = self.intern.resolve(sym)
-        var msg = "[local-bind]"
-        if self.current_function_name_sym != 0:
-            msg = msg ++ " fn=" ++ self.function_symbol_name(self.current_function_name_sym)
-        msg = msg ++ f" sym={sym}"
-        if sym_text.len() > 0:
-            msg = msg ++ f" name={sym_text}"
-        msg = msg ++ f" ty={self.llvm_type_mangle(ty)}"
+    fn debug_type_layout_field(owner_name: str, field_index: i32, field_name: i32, type_node: i32, resolved_ty: i64):
+        if not self.debug_type_layout_enabled():
+            return
+        let node_kind = if type_node != 0: self.pool.kind(type_node) else: -1
+        var msg = f"[type-layout] owner={owner_name} field={field_index} name={self.intern.resolve(field_name)} type_node={type_node} node_kind={node_kind}"
+        if type_node != 0:
+            let start = self.pool.get_start(type_node)
+            let end = self.pool.get_end(type_node)
+            msg = msg ++ f" span={start}..{end}"
+            if node_kind == NodeKind.NK_TYPE_NAMED or node_kind == NodeKind.NK_TYPE_GENERIC:
+                let type_name_sym = self.pool.get_data0(type_node)
+                msg = msg ++ f" type_name={self.intern.resolve(type_name_sym)}"
+            if node_kind == NodeKind.NK_TYPE_GENERIC:
+                msg = msg ++ f" arg_count={self.pool.get_data2(type_node)}"
+        msg = msg ++ f" resolved={self.llvm_type_mangle(resolved_ty)}"
+        if resolved_ty != 0:
+            msg = msg ++ f" llvm_kind={wl_get_type_kind(resolved_ty)} size={wl_size_of(resolved_ty)}"
+            let struct_name = wl_get_struct_name(resolved_ty)
+            if struct_name.len() > 0:
+                msg = msg ++ f" llvm_name={struct_name}"
         with_eprint(msg)
 
-fn Codegen.record_local_sema_type(self: Codegen, sym: i32, sema_ty: i32):
-    if sym == 0 or sema_ty == 0:
-        return
-    self.local_sema_types.insert(sym, sema_ty)
-    let canon = self.canonical_local_sym(sym)
-    if canon != 0 and canon != sym:
-        self.local_sema_types.insert(canon, sema_ty)
+    fn capture_loop_state() -> LoopState:
+        LoopState {
+            break_bbs: self.loop_break_bbs,
+            continue_bbs: self.loop_continue_bbs,
+            result_allocas: self.loop_result_allocas,
+            labels: self.loop_labels,
+            depth: self.loop_depth,
+        }
 
-fn Codegen.record_local_fn_sig(self: Codegen, sym: i32, fn_sig: i64):
-    self.local_fn_sigs.insert(sym, fn_sig)
-    let canon = self.canonical_local_sym(sym)
-    if canon != 0 and canon != sym:
-        self.local_fn_sigs.insert(canon, fn_sig)
+    mut fn reset_loop_state():
+        self.loop_break_bbs = Vec.new()
+        self.loop_continue_bbs = Vec.new()
+        self.loop_result_allocas = Vec.new()
+        self.loop_labels = Vec.new()
+        self.loop_depth = 0
 
-fn Codegen.record_local_pointee_struct(self: Codegen, sym: i32, pointee_sym: i32):
-    self.local_pointee_structs.insert(sym, pointee_sym)
-    let canon = self.canonical_local_sym(sym)
-    if canon != 0 and canon != sym:
-        self.local_pointee_structs.insert(canon, pointee_sym)
+    mut fn restore_loop_state(state: LoopState):
+        self.loop_break_bbs = state.break_bbs
+        self.loop_continue_bbs = state.continue_bbs
+        self.loop_result_allocas = state.result_allocas
+        self.loop_labels = state.labels
+        self.loop_depth = state.depth
 
-fn Codegen.record_trait_local(self: Codegen, sym: i32, trait_sym: i32):
-    self.trait_locals.insert(sym, trait_sym)
-    let canon = self.canonical_local_sym(sym)
-    if canon != 0 and canon != sym:
-        self.trait_locals.insert(canon, trait_sym)
+    mut fn push_loop_context(break_bb: i64, continue_bb: i64, result_alloca: i64, label_sym: i32):
+        let idx = self.loop_depth
+        var labels: Vec[i32] = self.loop_labels
+        with_codegen_loop_set_break(idx, break_bb)
+        with_codegen_loop_set_continue(idx, continue_bb)
+        with_codegen_loop_set_result(idx, result_alloca)
+        labels.push(label_sym)
+        self.loop_labels = labels
+        self.loop_depth = idx + 1
 
-fn Codegen.record_trait_local_concrete(self: Codegen, sym: i32, type_sym: i32):
-    self.trait_local_concrete_types.insert(sym, type_sym)
-    let canon = self.canonical_local_sym(sym)
-    if canon != 0 and canon != sym:
-        self.trait_local_concrete_types.insert(canon, type_sym)
+    mut fn pop_loop_context():
+        var labels: Vec[i32] = self.loop_labels
+        let _ = labels.pop()
+        self.loop_labels = labels
+        self.loop_depth = self.loop_depth - 1
 
-fn Codegen.lookup_local_alloca(self: Codegen, sym: i32) -> i64:
-    let direct = self.local_allocas.get(sym)
-    if direct.is_some():
-        return direct.unwrap() as i64
-    let canon = self.canonical_local_sym(sym)
-    if canon != 0 and canon != sym:
-        let alias = self.local_allocas.get(canon)
-        if alias.is_some():
-            return alias.unwrap() as i64
-    0
+    fn loop_break_target(idx: i32) -> i64:
+        with_codegen_loop_get_break(idx)
 
-fn Codegen.lookup_local_type(self: Codegen, sym: i32) -> i64:
-    let direct = self.local_types.get(sym)
-    if direct.is_some():
-        return direct.unwrap() as i64
-    let canon = self.canonical_local_sym(sym)
-    if canon != 0 and canon != sym:
-        let alias = self.local_types.get(canon)
-        if alias.is_some():
-            return alias.unwrap() as i64
-    0
+    fn loop_continue_target(idx: i32) -> i64:
+        with_codegen_loop_get_continue(idx)
 
-fn Codegen.lookup_capture_alloca(self: Codegen, sym: i32) -> i64:
-    let direct = self.lookup_local_alloca(sym)
-    if direct != 0:
-        return direct
-    let cg_sym = self.sema_sym_to_codegen_sym(sym)
-    if cg_sym != 0 and cg_sym != sym:
-        return self.lookup_local_alloca(cg_sym)
-    0
+    fn loop_result_alloca_at(idx: i32) -> i64:
+        with_codegen_loop_get_result(idx)
 
-fn Codegen.lookup_capture_type(self: Codegen, sym: i32) -> i64:
-    let direct = self.lookup_local_type(sym)
-    if direct != 0:
-        return direct
-    let cg_sym = self.sema_sym_to_codegen_sym(sym)
-    if cg_sym != 0 and cg_sym != sym:
-        return self.lookup_local_type(cg_sym)
-    0
+    fn debug_call_coerce_failure(context: str, call_node: i32, arg_index: i32, arg_node: i32, actual_val: i64, expected_ty: i64) -> Unit:
+        if not self.debug_call_coerce_enabled():
+            return
+        var msg = "[call-coerce] " ++ context
+        if self.current_function_name_sym != 0:
+            msg = msg ++ " fn=" ++ self.function_symbol_name(self.current_function_name_sym)
+        msg = msg ++ f" arg={arg_index}"
+        var line = -1
+        if arg_node != 0:
+            line = self.span_to_line(arg_node)
+        else if call_node != 0:
+            line = self.span_to_line(call_node)
+        if line >= 0:
+            msg = msg ++ f" line={line}"
+        var actual_ty: i64 = 0
+        if actual_val != 0:
+            actual_ty = wl_type_of(actual_val)
+        msg = msg ++ f" actual={self.llvm_type_mangle(actual_ty)}"
+        msg = msg ++ f" expected={self.llvm_type_mangle(expected_ty)}"
+        if arg_node != 0:
+            msg = msg ++ f" node_kind={self.pool.kind(arg_node)}"
+            let arg_text = self.ident_text_from_node(arg_node)
+            if arg_text.len() > 0:
+                msg = msg ++ f" arg_text={arg_text}"
+        with_eprint(msg)
 
-fn Codegen.lookup_capture_mut(self: Codegen, sym: i32) -> i32:
-    let direct = self.local_muts.get(sym)
-    if direct.is_some():
-        return direct.unwrap()
-    let cg_sym = self.sema_sym_to_codegen_sym(sym)
-    if cg_sym != 0 and cg_sym != sym:
-        let cg = self.local_muts.get(cg_sym)
-        if cg.is_some():
-            return cg.unwrap()
-    0
+    mut fn enforce_coerced_type(value: i64, expected_ty: i64, context: str) -> i64:
+        if value == 0 or expected_ty == 0:
+            return value
 
-fn Codegen.lookup_capture_sema_type(self: Codegen, sym: i32) -> i32:
-    let direct = self.local_sema_types.get(sym)
-    if direct.is_some():
-        return direct.unwrap()
-    let cg_sym = self.sema_sym_to_codegen_sym(sym)
-    if cg_sym != 0 and cg_sym != sym:
-        let cg = self.local_sema_types.get(cg_sym)
-        if cg.is_some():
-            return cg.unwrap()
-    0
+        var out = if wl_type_of(value) != expected_ty: self.coerce_value_to_type(value, expected_ty) else: value
+        if out != 0 and wl_type_of(out) == expected_ty:
+            return out
 
-fn Codegen.lookup_local_pointee_struct(self: Codegen, sym: i32) -> i32:
-    let direct = self.local_pointee_structs.get(sym)
-    if direct.is_some():
-        return direct.unwrap()
-    let canon = self.canonical_local_sym(sym)
-    if canon != 0 and canon != sym:
-        let alias = self.local_pointee_structs.get(canon)
-        if alias.is_some():
-            return alias.unwrap()
-    0
+        if out != 0 and wl_get_type_kind(expected_ty) == wl_pointer_type_kind() and wl_get_type_kind(wl_type_of(out)) == wl_pointer_type_kind():
+            out = wl_build_bitcast(self.builder, out, expected_ty)
+            if wl_type_of(out) == expected_ty:
+                return out
 
-fn Codegen.lookup_trait_local_concrete(self: Codegen, sym: i32) -> i32:
-    let direct = self.trait_local_concrete_types.get(sym)
-    if direct.is_some():
-        return direct.unwrap()
-    let canon = self.canonical_local_sym(sym)
-    if canon != 0 and canon != sym:
-        let alias = self.trait_local_concrete_types.get(canon)
-        if alias.is_some():
-            return alias.unwrap()
-    0
+        // Auto-coerce numeric to str (for f-string interpolation)
+        let str_ty = self.resolve_named_type(self.intern.intern("str"))
+        if expected_ty == str_ty and out != 0:
+            let coerced_str = self.coerce_val_to_str(out, str_ty)
+            if wl_type_of(coerced_str) == str_ty:
+                return coerced_str
 
-fn Codegen.arg_lvalue_ptr_for_autoref(self: Codegen, arg_node: i32, arg_ty: i64, arg_val: i64) -> i64:
-    if arg_node != 0 and self.pool.kind(arg_node) == NodeKind.NK_IDENT:
-        let sym = self.pool.get_data0(arg_node)
-        let alloca = self.lookup_local_alloca(sym)
-        if alloca != 0:
-            let local_ty = self.lookup_local_type(sym)
-            if local_ty != 0 and wl_get_type_kind(local_ty) == wl_pointer_type_kind():
-                return wl_build_load(self.builder, local_ty, alloca)
-            return alloca
+        self.had_error = 1
+        var msg = "error: " ++ context
+        msg = msg ++ f" actual={self.llvm_type_mangle(wl_type_of(value))}"
+        msg = msg ++ f" expected={self.llvm_type_mangle(expected_ty)}"
+        if self.current_function_name_sym != 0:
+            msg = msg ++ f" fn={self.intern.resolve(self.current_function_name_sym)}"
+        with_eprint(msg)
+        self.build_default_value(expected_ty)
 
-    let tmp = self.create_entry_alloca(arg_ty)
-    wl_build_store(self.builder, arg_val, tmp)
-    tmp
+    fn canonical_local_sym(sym: i32) -> i32:
+        if sym <= 0:
+            return sym
+        let text = self.intern.resolve(sym)
+        if text.len() == 0:
+            return sym
+        self.intern.intern(text)
 
-fn Codegen.coerce_call_arg_to_param(self: Codegen, arg_node: i32, arg_val: i64, param_ty: i64, call_context: str, call_node: i32, arg_index: i32) -> i64:
-    if arg_val == 0 or param_ty == 0:
-        return arg_val
+    fn record_local(sym: i32, local_ptr: i64, ty: i64, is_mut: i32):
+        self.local_allocas.insert(sym, local_ptr)
+        self.local_types.insert(sym, ty)
+        self.local_muts.insert(sym, is_mut)
+        let canon = self.canonical_local_sym(sym)
+        if canon != 0 and canon != sym:
+            self.local_allocas.insert(canon, local_ptr)
+            self.local_types.insert(canon, ty)
+            self.local_muts.insert(canon, is_mut)
+        if self.debug_local_flow_enabled():
+            let sym_text = self.intern.resolve(sym)
+            var msg = "[local-bind]"
+            if self.current_function_name_sym != 0:
+                msg = msg ++ " fn=" ++ self.function_symbol_name(self.current_function_name_sym)
+            msg = msg ++ f" sym={sym}"
+            if sym_text.len() > 0:
+                msg = msg ++ f" name={sym_text}"
+            msg = msg ++ f" ty={self.llvm_type_mangle(ty)}"
+            with_eprint(msg)
 
-    var out = arg_val
-    let arg_ty = wl_type_of(out)
-    let param_kind = wl_get_type_kind(param_ty)
-    if param_kind == wl_pointer_type_kind() and wl_get_type_kind(arg_ty) == wl_struct_type_kind() and not self.is_str_type(arg_ty):
-        let ptr = self.arg_lvalue_ptr_for_autoref(arg_node, arg_ty, out)
-        if ptr != 0:
-            out = ptr
+    fn record_local_sema_type(sym: i32, sema_ty: i32):
+        if sym == 0 or sema_ty == 0:
+            return
+        self.local_sema_types.insert(sym, sema_ty)
+        let canon = self.canonical_local_sym(sym)
+        if canon != 0 and canon != sym:
+            self.local_sema_types.insert(canon, sema_ty)
 
-    let had_error_before = self.had_error
-    let coerced = self.enforce_coerced_type(out, param_ty, "wrong argument type")
-    if self.had_error != had_error_before:
-        self.debug_call_coerce_failure(call_context, call_node, arg_index, arg_node, out, param_ty)
-    coerced
+    fn record_local_fn_sig(sym: i32, fn_sig: i64):
+        self.local_fn_sigs.insert(sym, fn_sig)
+        let canon = self.canonical_local_sym(sym)
+        if canon != 0 and canon != sym:
+            self.local_fn_sigs.insert(canon, fn_sig)
 
-fn Codegen.find_dyn_concrete_arg(self: Codegen, arg_node: i32, arg_ty: i64) -> DynArgInfo:
-    if wl_get_type_kind(arg_ty) == wl_struct_type_kind():
-        let nominal_sym = self.find_nominal_type_by_llvm(arg_ty)
-        if nominal_sym != 0:
-            return DynArgInfo { type_sym: nominal_sym, use_ptr: 0 }
+    fn record_local_pointee_struct(sym: i32, pointee_sym: i32):
+        self.local_pointee_structs.insert(sym, pointee_sym)
+        let canon = self.canonical_local_sym(sym)
+        if canon != 0 and canon != sym:
+            self.local_pointee_structs.insert(canon, pointee_sym)
 
-    if wl_get_type_kind(arg_ty) != wl_pointer_type_kind():
-        return DynArgInfo { type_sym: 0, use_ptr: 0 }
+    fn record_trait_local(sym: i32, trait_sym: i32):
+        self.trait_locals.insert(sym, trait_sym)
+        let canon = self.canonical_local_sym(sym)
+        if canon != 0 and canon != sym:
+            self.trait_locals.insert(canon, trait_sym)
 
-    if arg_node != 0 and self.pool.kind(arg_node) == NodeKind.NK_UNARY:
-        let uop = self.pool.get_data0(arg_node)
-        if uop == UnaryOp.UOP_REF or uop == UnaryOp.UOP_RAW_REF_CONST or uop == UnaryOp.UOP_RAW_REF_MUT:
-            let inner = self.pool.get_data1(arg_node)
-            if self.pool.kind(inner) == NodeKind.NK_IDENT:
-                let base_sym = self.pool.get_data0(inner)
-                let known = self.lookup_trait_local_concrete(base_sym)
-                if known != 0:
-                    return DynArgInfo { type_sym: known, use_ptr: 1 }
-                let base_ty = self.lookup_local_type(base_sym)
-                if base_ty != 0:
-                    let nominal_sym = self.find_nominal_type_by_llvm(base_ty)
-                    if nominal_sym != 0:
-                        return DynArgInfo { type_sym: nominal_sym, use_ptr: 1 }
-                let base_name = self.ident_text_from_node(inner)
-                if base_name.len() > 0:
-                    let alias_sym = self.intern.intern(base_name)
-                    let alias_known = self.trait_local_concrete_types.get(alias_sym)
-                    if alias_known.is_some():
-                        return DynArgInfo { type_sym: alias_known.unwrap(), use_ptr: 1 }
-                    let aps = self.local_pointee_structs.get(alias_sym)
-                    if aps.is_some():
-                        return DynArgInfo { type_sym: aps.unwrap(), use_ptr: 1 }
-                    let alt = self.local_types.get(alias_sym)
-                    if alt.is_some():
-                        let nominal_sym = self.find_nominal_type_by_llvm(alt.unwrap() as i64)
+    fn record_trait_local_concrete(sym: i32, type_sym: i32):
+        self.trait_local_concrete_types.insert(sym, type_sym)
+        let canon = self.canonical_local_sym(sym)
+        if canon != 0 and canon != sym:
+            self.trait_local_concrete_types.insert(canon, type_sym)
+
+    fn lookup_local_alloca(sym: i32) -> i64:
+        let direct = self.local_allocas.get(sym)
+        if direct.is_some():
+            return direct.unwrap() as i64
+        let canon = self.canonical_local_sym(sym)
+        if canon != 0 and canon != sym:
+            let alias = self.local_allocas.get(canon)
+            if alias.is_some():
+                return alias.unwrap() as i64
+        0
+
+    fn lookup_local_type(sym: i32) -> i64:
+        let direct = self.local_types.get(sym)
+        if direct.is_some():
+            return direct.unwrap() as i64
+        let canon = self.canonical_local_sym(sym)
+        if canon != 0 and canon != sym:
+            let alias = self.local_types.get(canon)
+            if alias.is_some():
+                return alias.unwrap() as i64
+        0
+
+    fn lookup_capture_alloca(sym: i32) -> i64:
+        let direct = self.lookup_local_alloca(sym)
+        if direct != 0:
+            return direct
+        let cg_sym = self.sema_sym_to_codegen_sym(sym)
+        if cg_sym != 0 and cg_sym != sym:
+            return self.lookup_local_alloca(cg_sym)
+        0
+
+    fn lookup_capture_type(sym: i32) -> i64:
+        let direct = self.lookup_local_type(sym)
+        if direct != 0:
+            return direct
+        let cg_sym = self.sema_sym_to_codegen_sym(sym)
+        if cg_sym != 0 and cg_sym != sym:
+            return self.lookup_local_type(cg_sym)
+        0
+
+    fn lookup_capture_mut(sym: i32) -> i32:
+        let direct = self.local_muts.get(sym)
+        if direct.is_some():
+            return direct.unwrap()
+        let cg_sym = self.sema_sym_to_codegen_sym(sym)
+        if cg_sym != 0 and cg_sym != sym:
+            let cg = self.local_muts.get(cg_sym)
+            if cg.is_some():
+                return cg.unwrap()
+        0
+
+    fn lookup_capture_sema_type(sym: i32) -> i32:
+        let direct = self.local_sema_types.get(sym)
+        if direct.is_some():
+            return direct.unwrap()
+        let cg_sym = self.sema_sym_to_codegen_sym(sym)
+        if cg_sym != 0 and cg_sym != sym:
+            let cg = self.local_sema_types.get(cg_sym)
+            if cg.is_some():
+                return cg.unwrap()
+        0
+
+    fn lookup_local_pointee_struct(sym: i32) -> i32:
+        let direct = self.local_pointee_structs.get(sym)
+        if direct.is_some():
+            return direct.unwrap()
+        let canon = self.canonical_local_sym(sym)
+        if canon != 0 and canon != sym:
+            let alias = self.local_pointee_structs.get(canon)
+            if alias.is_some():
+                return alias.unwrap()
+        0
+
+    fn lookup_trait_local_concrete(sym: i32) -> i32:
+        let direct = self.trait_local_concrete_types.get(sym)
+        if direct.is_some():
+            return direct.unwrap()
+        let canon = self.canonical_local_sym(sym)
+        if canon != 0 and canon != sym:
+            let alias = self.trait_local_concrete_types.get(canon)
+            if alias.is_some():
+                return alias.unwrap()
+        0
+
+    fn arg_lvalue_ptr_for_autoref(arg_node: i32, arg_ty: i64, arg_val: i64) -> i64:
+        if arg_node != 0 and self.pool.kind(arg_node) == NodeKind.NK_IDENT:
+            let sym = self.pool.get_data0(arg_node)
+            let alloca = self.lookup_local_alloca(sym)
+            if alloca != 0:
+                let local_ty = self.lookup_local_type(sym)
+                if local_ty != 0 and wl_get_type_kind(local_ty) == wl_pointer_type_kind():
+                    return wl_build_load(self.builder, local_ty, alloca)
+                return alloca
+
+        let tmp = self.create_entry_alloca(arg_ty)
+        wl_build_store(self.builder, arg_val, tmp)
+        tmp
+
+    mut fn coerce_call_arg_to_param(arg_node: i32, arg_val: i64, param_ty: i64, call_context: str, call_node: i32, arg_index: i32) -> i64:
+        if arg_val == 0 or param_ty == 0:
+            return arg_val
+
+        var out = arg_val
+        let arg_ty = wl_type_of(out)
+        let param_kind = wl_get_type_kind(param_ty)
+        if param_kind == wl_pointer_type_kind() and wl_get_type_kind(arg_ty) == wl_struct_type_kind() and not self.is_str_type(arg_ty):
+            let ptr = self.arg_lvalue_ptr_for_autoref(arg_node, arg_ty, out)
+            if ptr != 0:
+                out = ptr
+
+        let had_error_before = self.had_error
+        let coerced = self.enforce_coerced_type(out, param_ty, "wrong argument type")
+        if self.had_error != had_error_before:
+            self.debug_call_coerce_failure(call_context, call_node, arg_index, arg_node, out, param_ty)
+        coerced
+
+    fn find_dyn_concrete_arg(arg_node: i32, arg_ty: i64) -> DynArgInfo:
+        if wl_get_type_kind(arg_ty) == wl_struct_type_kind():
+            let nominal_sym = self.find_nominal_type_by_llvm(arg_ty)
+            if nominal_sym != 0:
+                return DynArgInfo { type_sym: nominal_sym, use_ptr: 0 }
+
+        if wl_get_type_kind(arg_ty) != wl_pointer_type_kind():
+            return DynArgInfo { type_sym: 0, use_ptr: 0 }
+
+        if arg_node != 0 and self.pool.kind(arg_node) == NodeKind.NK_UNARY:
+            let uop = self.pool.get_data0(arg_node)
+            if uop == UnaryOp.UOP_REF or uop == UnaryOp.UOP_RAW_REF_CONST or uop == UnaryOp.UOP_RAW_REF_MUT:
+                let inner = self.pool.get_data1(arg_node)
+                if self.pool.kind(inner) == NodeKind.NK_IDENT:
+                    let base_sym = self.pool.get_data0(inner)
+                    let known = self.lookup_trait_local_concrete(base_sym)
+                    if known != 0:
+                        return DynArgInfo { type_sym: known, use_ptr: 1 }
+                    let base_ty = self.lookup_local_type(base_sym)
+                    if base_ty != 0:
+                        let nominal_sym = self.find_nominal_type_by_llvm(base_ty)
                         if nominal_sym != 0:
                             return DynArgInfo { type_sym: nominal_sym, use_ptr: 1 }
+                    let base_name = self.ident_text_from_node(inner)
+                    if base_name.len() > 0:
+                        let alias_sym = self.intern.intern(base_name)
+                        let alias_known = self.trait_local_concrete_types.get(alias_sym)
+                        if alias_known.is_some():
+                            return DynArgInfo { type_sym: alias_known.unwrap(), use_ptr: 1 }
+                        let aps = self.local_pointee_structs.get(alias_sym)
+                        if aps.is_some():
+                            return DynArgInfo { type_sym: aps.unwrap(), use_ptr: 1 }
+                        let alt = self.local_types.get(alias_sym)
+                        if alt.is_some():
+                            let nominal_sym = self.find_nominal_type_by_llvm(alt.unwrap() as i64)
+                            if nominal_sym != 0:
+                                return DynArgInfo { type_sym: nominal_sym, use_ptr: 1 }
 
-    if arg_node != 0 and self.pool.kind(arg_node) == NodeKind.NK_IDENT:
-        let sym = self.pool.get_data0(arg_node)
-        let known = self.lookup_trait_local_concrete(sym)
-        if known != 0:
-            return DynArgInfo { type_sym: known, use_ptr: 1 }
-        let ps = self.lookup_local_pointee_struct(sym)
-        if ps != 0:
-            return DynArgInfo { type_sym: ps, use_ptr: 1 }
-        let sym_ty = self.lookup_local_type(sym)
-        if sym_ty != 0:
-            let nominal_sym = self.find_nominal_type_by_llvm(sym_ty)
-            if nominal_sym != 0:
-                return DynArgInfo { type_sym: nominal_sym, use_ptr: 1 }
-        let name = self.ident_text_from_node(arg_node)
-        if name.len() > 0:
-            let alias_sym = self.intern.intern(name)
-            let alias_known = self.trait_local_concrete_types.get(alias_sym)
-            if alias_known.is_some():
-                return DynArgInfo { type_sym: alias_known.unwrap(), use_ptr: 1 }
-            let aps = self.local_pointee_structs.get(alias_sym)
-            if aps.is_some():
-                return DynArgInfo { type_sym: aps.unwrap(), use_ptr: 1 }
-            let alt = self.local_types.get(alias_sym)
-            if alt.is_some():
-                let nominal_sym = self.find_nominal_type_by_llvm(alt.unwrap() as i64)
+        if arg_node != 0 and self.pool.kind(arg_node) == NodeKind.NK_IDENT:
+            let sym = self.pool.get_data0(arg_node)
+            let known = self.lookup_trait_local_concrete(sym)
+            if known != 0:
+                return DynArgInfo { type_sym: known, use_ptr: 1 }
+            let ps = self.lookup_local_pointee_struct(sym)
+            if ps != 0:
+                return DynArgInfo { type_sym: ps, use_ptr: 1 }
+            let sym_ty = self.lookup_local_type(sym)
+            if sym_ty != 0:
+                let nominal_sym = self.find_nominal_type_by_llvm(sym_ty)
                 if nominal_sym != 0:
                     return DynArgInfo { type_sym: nominal_sym, use_ptr: 1 }
+            let name = self.ident_text_from_node(arg_node)
+            if name.len() > 0:
+                let alias_sym = self.intern.intern(name)
+                let alias_known = self.trait_local_concrete_types.get(alias_sym)
+                if alias_known.is_some():
+                    return DynArgInfo { type_sym: alias_known.unwrap(), use_ptr: 1 }
+                let aps = self.local_pointee_structs.get(alias_sym)
+                if aps.is_some():
+                    return DynArgInfo { type_sym: aps.unwrap(), use_ptr: 1 }
+                let alt = self.local_types.get(alias_sym)
+                if alt.is_some():
+                    let nominal_sym = self.find_nominal_type_by_llvm(alt.unwrap() as i64)
+                    if nominal_sym != 0:
+                        return DynArgInfo { type_sym: nominal_sym, use_ptr: 1 }
 
-    // Symbol lookup can miss when parser/resolver symbol IDs diverge; fall
-    // back to pointee LLVM type to recover concrete dyn coercions.
-    let pointee_ty = wl_get_element_type(arg_ty)
-    if pointee_ty != 0:
-        let nominal_sym = self.find_nominal_type_by_llvm(pointee_ty)
-        if nominal_sym != 0:
-            return DynArgInfo { type_sym: nominal_sym, use_ptr: 1 }
+        // Symbol lookup can miss when parser/resolver symbol IDs diverge; fall
+        // back to pointee LLVM type to recover concrete dyn coercions.
+        let pointee_ty = wl_get_element_type(arg_ty)
+        if pointee_ty != 0:
+            let nominal_sym = self.find_nominal_type_by_llvm(pointee_ty)
+            if nominal_sym != 0:
+                return DynArgInfo { type_sym: nominal_sym, use_ptr: 1 }
 
-    DynArgInfo { type_sym: 0, use_ptr: 0 }
+        DynArgInfo { type_sym: 0, use_ptr: 0 }
 
-fn Codegen.build_dyn_trait_value(self: Codegen, concrete_val: i64, type_sym: i32, trait_sym: i32) -> i64:
-    self.ensure_monomorphized_trait_vtable(type_sym, trait_sym)
-    let vg = self.lookup_trait_vtable_global(type_sym, trait_sym)
-    if vg == 0:
-        with_eprint("error: missing vtable for type '" ++ self.intern.resolve(type_sym) ++ "' implementing trait '" ++ self.intern.resolve(trait_sym) ++ "'")
-        self.had_error = 1
-        return wl_get_undef(self.get_dyn_fat_ptr_type())
+    mut fn build_dyn_trait_value(concrete_val: i64, type_sym: i32, trait_sym: i32) -> i64:
+        self.ensure_monomorphized_trait_vtable(type_sym, trait_sym)
+        let vg = self.lookup_trait_vtable_global(type_sym, trait_sym)
+        if vg == 0:
+            with_eprint("error: missing vtable for type '" ++ self.intern.resolve(type_sym) ++ "' implementing trait '" ++ self.intern.resolve(trait_sym) ++ "'")
+            self.had_error = 1
+            return wl_get_undef(self.get_dyn_fat_ptr_type())
 
-    let alloca = self.create_entry_alloca(wl_type_of(concrete_val))
-    wl_build_store(self.builder, concrete_val, alloca)
+        let alloca = self.create_entry_alloca(wl_type_of(concrete_val))
+        wl_build_store(self.builder, concrete_val, alloca)
 
-    let fat_ty = self.get_dyn_fat_ptr_type()
-    var fat = wl_get_undef(fat_ty)
-    fat = wl_build_insert_value(self.builder, fat, alloca, 0)
-    fat = wl_build_insert_value(self.builder, fat, vg, 1)
-    fat
+        let fat_ty = self.get_dyn_fat_ptr_type()
+        var fat = wl_get_undef(fat_ty)
+        fat = wl_build_insert_value(self.builder, fat, alloca, 0)
+        fat = wl_build_insert_value(self.builder, fat, vg, 1)
+        fat
 
-fn Codegen.build_dyn_trait_value_from_ptr(self: Codegen, data_ptr: i64, type_sym: i32, trait_sym: i32) -> i64:
-    self.ensure_monomorphized_trait_vtable(type_sym, trait_sym)
-    let vg = self.lookup_trait_vtable_global(type_sym, trait_sym)
-    if vg == 0:
-        with_eprint("error: missing vtable for type '" ++ self.intern.resolve(type_sym) ++ "' implementing trait '" ++ self.intern.resolve(trait_sym) ++ "'")
-        self.had_error = 1
-        return wl_get_undef(self.get_dyn_fat_ptr_type())
+    mut fn build_dyn_trait_value_from_ptr(data_ptr: i64, type_sym: i32, trait_sym: i32) -> i64:
+        self.ensure_monomorphized_trait_vtable(type_sym, trait_sym)
+        let vg = self.lookup_trait_vtable_global(type_sym, trait_sym)
+        if vg == 0:
+            with_eprint("error: missing vtable for type '" ++ self.intern.resolve(type_sym) ++ "' implementing trait '" ++ self.intern.resolve(trait_sym) ++ "'")
+            self.had_error = 1
+            return wl_get_undef(self.get_dyn_fat_ptr_type())
 
-    let ptr_ty = wl_ptr_type(self.context)
-    let fat_ty = self.get_dyn_fat_ptr_type()
-    let erased = wl_build_bitcast(self.builder, data_ptr, ptr_ty)
-    var fat = wl_get_undef(fat_ty)
-    fat = wl_build_insert_value(self.builder, fat, erased, 0)
-    fat = wl_build_insert_value(self.builder, fat, vg, 1)
-    fat
+        let ptr_ty = wl_ptr_type(self.context)
+        let fat_ty = self.get_dyn_fat_ptr_type()
+        let erased = wl_build_bitcast(self.builder, data_ptr, ptr_ty)
+        var fat = wl_get_undef(fat_ty)
+        fat = wl_build_insert_value(self.builder, fat, erased, 0)
+        fat = wl_build_insert_value(self.builder, fat, vg, 1)
+        fat
 
-fn Codegen.infer_local_pointee_struct(self: Codegen, value_node: i32, declared_type_node: i32, storage_ty: i64) -> i32:
-    if wl_get_type_kind(storage_ty) != wl_pointer_type_kind():
-        return 0
-
-    if declared_type_node != 0:
-        let dk = self.pool.kind(declared_type_node)
-        if dk == NodeKind.NK_TYPE_REF or dk == NodeKind.NK_TYPE_PTR:
-            let pointee = self.pool.get_data0(declared_type_node)
-            if self.pool.kind(pointee) == NodeKind.NK_TYPE_NAMED:
-                let sym = self.pool.get_data0(pointee)
-                if sym == self.sym_Self and self.current_method_owner_sym != 0:
-                    return self.current_method_owner_sym
-                if self.struct_type_map.get(sym).is_some():
-                    return sym
-
-    if value_node != 0 and self.pool.kind(value_node) == NodeKind.NK_UNARY:
-        let uop = self.pool.get_data0(value_node)
-        if uop == UnaryOp.UOP_REF or uop == UnaryOp.UOP_RAW_REF_CONST or uop == UnaryOp.UOP_RAW_REF_MUT:
-            let inner = self.pool.get_data1(value_node)
-            if self.pool.kind(inner) == NodeKind.NK_IDENT:
-                let base_sym = self.pool.get_data0(inner)
-                let ps = self.lookup_local_pointee_struct(base_sym)
-                if ps != 0:
-                    return ps
-                let base_ty = self.lookup_local_type(base_sym)
-                if base_ty != 0:
-                    let st_sym = self.find_struct_type_by_llvm(base_ty)
-                    if st_sym != 0:
-                        return st_sym
-
-    if value_node != 0 and self.pool.kind(value_node) == NodeKind.NK_IDENT:
-        let src_sym = self.pool.get_data0(value_node)
-        let ps = self.lookup_local_pointee_struct(src_sym)
-        if ps != 0:
-            return ps
-
-    0
-
-fn Codegen.infer_local_concrete_struct(self: Codegen, value_node: i32, storage_ty: i64) -> i32:
-    let by_ty = self.find_struct_type_by_llvm(storage_ty)
-    if by_ty != 0:
-        return by_ty
-    if value_node == 0:
-        return 0
-    let vk = self.pool.kind(value_node)
-    if vk == NodeKind.NK_STRUCT_LIT:
-        let lit_sym = self.pool.get_data0(value_node)
-        if lit_sym != 0:
-            return lit_sym
-    if vk == NodeKind.NK_IDENT:
-        let sym = self.pool.get_data0(value_node)
-        let known = self.lookup_trait_local_concrete(sym)
-        if known != 0:
-            return known
-        let name = self.ident_text_from_node(value_node)
-        if name.len() > 0:
-            let alias_sym = self.intern.intern(name)
-            let alias_known = self.lookup_trait_local_concrete(alias_sym)
-            if alias_known != 0:
-                return alias_known
-    if vk == NodeKind.NK_UNARY:
-        let uop = self.pool.get_data0(value_node)
-        if uop == UnaryOp.UOP_REF or uop == UnaryOp.UOP_RAW_REF_CONST or uop == UnaryOp.UOP_RAW_REF_MUT:
-            let inner = self.pool.get_data1(value_node)
-            if self.pool.kind(inner) == NodeKind.NK_IDENT:
-                let sym = self.pool.get_data0(inner)
-                let known = self.lookup_trait_local_concrete(sym)
-                if known != 0:
-                    return known
-                let name = self.ident_text_from_node(inner)
-                if name.len() > 0:
-                    let alias_sym = self.intern.intern(name)
-                    let alias_known = self.trait_local_concrete_types.get(alias_sym)
-                    if alias_known.is_some():
-                        return alias_known.unwrap()
-    0
-
-fn Codegen.coerce_call_args_for_fn_value(self: Codegen, fn_sym: i32, fn_val: i64, args_start: i32, arg_node_base_index: i32, args: Vec[i64], arg_count: i32, call_context: str, call_node: i32) -> Vec[i64]:
-    let out: Vec[i64] = Vec.new()
-    let param_count = wl_count_params(fn_val)
-    let sret_opt = self.extern_fn_has_sret.get(fn_sym)
-    let has_sret = if sret_opt.is_some(): sret_opt.unwrap() else: 0
-    let byval_opt = self.extern_fn_byval_params.get(fn_sym)
-    let byval_mask = if byval_opt.is_some(): byval_opt.unwrap() as i64 else: 0
-    var byval_types: Vec[i64] = Vec.new()
-    let byval_types_opt = self.extern_fn_byval_types.get(fn_sym)
-    if byval_types_opt.is_some():
-        byval_types = byval_types_opt.unwrap()
-    let param_offset = if has_sret != 0: 1 else: 0
-    for ai in 0..arg_count:
-        var arg_val = args.get(ai as i64)
-        let actual_ai = ai + param_offset
-        if actual_ai < param_count:
-            var param_ty = wl_type_of(wl_get_param(fn_val, actual_ai))
-            if (byval_mask & ((1 as i64) << (ai as u32))) != 0 and ai < byval_types.len() as i32 and byval_types.get(ai as i64) != 0:
-                param_ty = byval_types.get(ai as i64)
-            let arg_node = if args_start >= 0 and ai >= arg_node_base_index:
-                self.pool.get_extra(args_start + ai - arg_node_base_index)
-            else:
-                0
-            let trait_sym = self.get_fn_dyn_param_trait(fn_sym, ai)
-            if trait_sym != 0:
-                let info = self.find_dyn_concrete_arg(arg_node, wl_type_of(arg_val))
-                if info.type_sym != 0:
-                    if info.use_ptr != 0:
-                        arg_val = self.build_dyn_trait_value_from_ptr(arg_val, info.type_sym, trait_sym)
-                    else:
-                        arg_val = self.build_dyn_trait_value(arg_val, info.type_sym, trait_sym)
-            arg_val = self.coerce_call_arg_to_param(arg_node, arg_val, param_ty, call_context, call_node, ai)
-            if (byval_mask & ((1 as i64) << (ai as u32))) != 0:
-                var indirect_ty = param_ty
-                if ai < byval_types.len() as i32 and byval_types.get(ai as i64) != 0:
-                    indirect_ty = byval_types.get(ai as i64)
-                let tmp = self.create_entry_alloca(indirect_ty)
-                let stored = self.enforce_coerced_type(arg_val, indirect_ty, "indirect aggregate argument")
-                wl_build_store(self.builder, stored, tmp)
-                out.push(tmp)
-                continue
-        out.push(arg_val)
-    out
-
-fn Codegen.build_call_fn_value(self: Codegen, fn_sym: i32, fn_val: i64, fn_ty: i64, args_start: i32, arg_node_base_index: i32, args: Vec[i64], arg_count: i32, call_context: str, call_node: i32) -> i64:
-    let sret_opt = self.extern_fn_has_sret.get(fn_sym)
-    let has_sret = if sret_opt.is_some(): sret_opt.unwrap() else: 0
-    var sret_ty: i64 = 0
-    if has_sret != 0:
-        let sret_ty_opt = self.extern_fn_sret_type.get(fn_sym)
-        if sret_ty_opt.is_some():
-            sret_ty = sret_ty_opt.unwrap() as i64
-    let coerced = self.coerce_call_args_for_fn_value(fn_sym, fn_val, args_start, arg_node_base_index, args, arg_count, call_context, call_node)
-    let final_args: Vec[i64] = Vec.new()
-    var sret_buf: i64 = 0
-    if has_sret != 0 and sret_ty != 0:
-        sret_buf = self.create_entry_alloca(sret_ty)
-        final_args.push(sret_buf)
-    for i in 0..coerced.len() as i32:
-        final_args.push(coerced.get(i as i64))
-    let call_val = wl_build_call(self.builder, fn_ty, fn_val, vec_data_i64(&final_args), final_args.len() as i32)
-    var byval_mask: i64 = 0
-    var byval_types: Vec[i64] = Vec.new()
-    let byval_opt = self.extern_fn_byval_params.get(fn_sym)
-    if byval_opt.is_some():
-        byval_mask = byval_opt.unwrap() as i64
-    let byval_types_opt = self.extern_fn_byval_types.get(fn_sym)
-    if byval_types_opt.is_some():
-        byval_types = byval_types_opt.unwrap()
-    self.apply_c_abi_call_attrs(call_val, has_sret, sret_ty, byval_mask, byval_types, arg_count, 0)
-    if has_sret != 0 and sret_buf != 0 and sret_ty != 0:
-        return wl_build_load(self.builder, sret_ty, sret_buf)
-    call_val
-
-fn Codegen.mir_call_context(self: Codegen, body: &MirBody, callee_operand: i32) -> str:
-    var out = "mir " ++ self.function_symbol_name(body.fn_sym) ++ " -> "
-    if callee_operand < 0 or callee_operand >= body.operand_kinds.len() as i32:
-        return out ++ "<callee?>"
-    let ok = body.operand_kinds.get(callee_operand as i64)
-    let od = body.operand_d0.get(callee_operand as i64)
-    if ok == OperandKind.OK_CONSTANT and od >= 0 and od < body.const_kinds.len() as i32:
-        if body.const_kinds.get(od as i64) == ConstKind.CK_FN:
-            return out ++ self.function_symbol_name(body.const_d0.get(od as i64))
-    if (ok == OperandKind.OK_COPY or ok == OperandKind.OK_MOVE) and od >= 0 and od < body.place_locals.len() as i32:
-        return out ++ f"place_{body.place_locals.get(od as i64)}"
-    out ++ "indirect"
-
-// ── Helper: find struct/enum type symbol from LLVM type ───────────
-
-fn Codegen.find_type_symbol(self: Codegen, llvm_ty: i64) -> i32:
-    // Search struct types
-    for i in 0..self.struct_llvm_types.len() as i32:
-        if self.struct_llvm_types.get(i as i64) == llvm_ty:
-            // Find the symbol that maps to this index
-            // We need to iterate the hashmap — just check all entries
-            for j in 0..self.struct_field_counts.len() as i32:
-                // struct_type_map maps sym → index, we want reverse
-                0
-            // Fallback: return 0
+    fn infer_local_pointee_struct(value_node: i32, declared_type_node: i32, storage_ty: i64) -> i32:
+        if wl_get_type_kind(storage_ty) != wl_pointer_type_kind():
             return 0
-    0
 
-fn Codegen.find_struct_index_by_type(self: Codegen, llvm_ty: i64) -> i32:
-    for i in 0..self.struct_llvm_types.len() as i32:
-        if self.struct_llvm_types.get(i as i64) == llvm_ty:
-            return i
-    -1
+        if declared_type_node != 0:
+            let dk = self.pool.kind(declared_type_node)
+            if dk == NodeKind.NK_TYPE_REF or dk == NodeKind.NK_TYPE_PTR:
+                let pointee = self.pool.get_data0(declared_type_node)
+                if self.pool.kind(pointee) == NodeKind.NK_TYPE_NAMED:
+                    let sym = self.pool.get_data0(pointee)
+                    if sym == self.sym_Self and self.current_method_owner_sym != 0:
+                        return self.current_method_owner_sym
+                    if self.struct_type_map.get(sym).is_some():
+                        return sym
 
-fn Codegen.is_union_struct_index(self: Codegen, struct_idx: i32) -> bool:
-    if struct_idx < 0 or struct_idx >= self.struct_index_syms.len() as i32:
-        return false
-    let name_sym = self.struct_index_syms.get(struct_idx as i64)
-    if name_sym == 0:
-        return false
-    self.sema.type_layout_struct_sub_kind(name_sym) == TypeDeclKind.Union
+        if value_node != 0 and self.pool.kind(value_node) == NodeKind.NK_UNARY:
+            let uop = self.pool.get_data0(value_node)
+            if uop == UnaryOp.UOP_REF or uop == UnaryOp.UOP_RAW_REF_CONST or uop == UnaryOp.UOP_RAW_REF_MUT:
+                let inner = self.pool.get_data1(value_node)
+                if self.pool.kind(inner) == NodeKind.NK_IDENT:
+                    let base_sym = self.pool.get_data0(inner)
+                    let ps = self.lookup_local_pointee_struct(base_sym)
+                    if ps != 0:
+                        return ps
+                    let base_ty = self.lookup_local_type(base_sym)
+                    if base_ty != 0:
+                        let st_sym = self.find_struct_type_by_llvm(base_ty)
+                        if st_sym != 0:
+                            return st_sym
 
-fn Codegen.is_union_struct_type(self: Codegen, llvm_ty: i64) -> bool:
-    self.is_union_struct_index(self.find_struct_index_by_type(llvm_ty))
+        if value_node != 0 and self.pool.kind(value_node) == NodeKind.NK_IDENT:
+            let src_sym = self.pool.get_data0(value_node)
+            let ps = self.lookup_local_pointee_struct(src_sym)
+            if ps != 0:
+                return ps
 
-fn Codegen.struct_source_field_type(self: Codegen, struct_idx: i32, source_fi: i32) -> i64:
-    if struct_idx < 0 or struct_idx >= self.struct_field_counts.len() as i32:
-        return 0
-    let f_count = self.struct_field_counts.get(struct_idx as i64)
-    if source_fi < 0 or source_fi >= f_count:
-        return 0
-    let f_start = self.struct_field_starts.get(struct_idx as i64)
-    self.struct_field_types.get((f_start + source_fi) as i64)
+        0
 
-fn Codegen.is_bitpacked_struct(self: Codegen, llvm_ty: i64) -> bool:
-    self.bitpacked_by_llvm_type.contains(llvm_ty)
+    fn infer_local_concrete_struct(value_node: i32, storage_ty: i64) -> i32:
+        let by_ty = self.find_struct_type_by_llvm(storage_ty)
+        if by_ty != 0:
+            return by_ty
+        if value_node == 0:
+            return 0
+        let vk = self.pool.kind(value_node)
+        if vk == NodeKind.NK_STRUCT_LIT:
+            let lit_sym = self.pool.get_data0(value_node)
+            if lit_sym != 0:
+                return lit_sym
+        if vk == NodeKind.NK_IDENT:
+            let sym = self.pool.get_data0(value_node)
+            let known = self.lookup_trait_local_concrete(sym)
+            if known != 0:
+                return known
+            let name = self.ident_text_from_node(value_node)
+            if name.len() > 0:
+                let alias_sym = self.intern.intern(name)
+                let alias_known = self.lookup_trait_local_concrete(alias_sym)
+                if alias_known != 0:
+                    return alias_known
+        if vk == NodeKind.NK_UNARY:
+            let uop = self.pool.get_data0(value_node)
+            if uop == UnaryOp.UOP_REF or uop == UnaryOp.UOP_RAW_REF_CONST or uop == UnaryOp.UOP_RAW_REF_MUT:
+                let inner = self.pool.get_data1(value_node)
+                if self.pool.kind(inner) == NodeKind.NK_IDENT:
+                    let sym = self.pool.get_data0(inner)
+                    let known = self.lookup_trait_local_concrete(sym)
+                    if known != 0:
+                        return known
+                    let name = self.ident_text_from_node(inner)
+                    if name.len() > 0:
+                        let alias_sym = self.intern.intern(name)
+                        let alias_known = self.trait_local_concrete_types.get(alias_sym)
+                        if alias_known.is_some():
+                            return alias_known.unwrap()
+        0
 
-fn Codegen.find_bitpacked_index_by_type(self: Codegen, llvm_ty: i64) -> i32:
-    let opt = self.bitpacked_by_llvm_type.get(llvm_ty)
-    if opt.is_some(): return opt.unwrap() as i32
-    -1
+    mut fn coerce_call_args_for_fn_value(fn_sym: i32, fn_val: i64, args_start: i32, arg_node_base_index: i32, args: Vec[i64], arg_count: i32, call_context: str, call_node: i32) -> Vec[i64]:
+        let out: Vec[i64] = Vec.new()
+        let param_count = wl_count_params(fn_val)
+        let sret_opt = self.extern_fn_has_sret.get(fn_sym)
+        let has_sret = if sret_opt.is_some(): sret_opt.unwrap() else: 0
+        let byval_opt = self.extern_fn_byval_params.get(fn_sym)
+        let byval_mask = if byval_opt.is_some(): byval_opt.unwrap() as i64 else: 0
+        var byval_types: Vec[i64] = Vec.new()
+        let byval_types_opt = self.extern_fn_byval_types.get(fn_sym)
+        if byval_types_opt.is_some():
+            byval_types = byval_types_opt.unwrap()
+        let param_offset = if has_sret != 0: 1 else: 0
+        for ai in 0..arg_count:
+            var arg_val = args.get(ai as i64)
+            let actual_ai = ai + param_offset
+            if actual_ai < param_count:
+                var param_ty = wl_type_of(wl_get_param(fn_val, actual_ai))
+                if (byval_mask & ((1 as i64) << (ai as u32))) != 0 and ai < byval_types.len() as i32 and byval_types.get(ai as i64) != 0:
+                    param_ty = byval_types.get(ai as i64)
+                let arg_node = if args_start >= 0 and ai >= arg_node_base_index:
+                    self.pool.get_extra(args_start + ai - arg_node_base_index)
+                else:
+                    0
+                let trait_sym = self.get_fn_dyn_param_trait(fn_sym, ai)
+                if trait_sym != 0:
+                    let info = self.find_dyn_concrete_arg(arg_node, wl_type_of(arg_val))
+                    if info.type_sym != 0:
+                        if info.use_ptr != 0:
+                            arg_val = self.build_dyn_trait_value_from_ptr(arg_val, info.type_sym, trait_sym)
+                        else:
+                            arg_val = self.build_dyn_trait_value(arg_val, info.type_sym, trait_sym)
+                arg_val = self.coerce_call_arg_to_param(arg_node, arg_val, param_ty, call_context, call_node, ai)
+                if (byval_mask & ((1 as i64) << (ai as u32))) != 0:
+                    var indirect_ty = param_ty
+                    if ai < byval_types.len() as i32 and byval_types.get(ai as i64) != 0:
+                        indirect_ty = byval_types.get(ai as i64)
+                    let tmp = self.create_entry_alloca(indirect_ty)
+                    let stored = self.enforce_coerced_type(arg_val, indirect_ty, "indirect aggregate argument")
+                    wl_build_store(self.builder, stored, tmp)
+                    out.push(tmp)
+                    continue
+            out.push(arg_val)
+        out
 
-fn Codegen.get_bitpacked_field_info(self: Codegen, llvm_ty: i64, field_idx: i32) -> i32:
-    // Returns bit_offset * 65536 + bit_width, or -1 if not bitpacked
-    let struct_idx = self.find_bitpacked_index_by_type(llvm_ty)
-    if struct_idx < 0: return -1
-    let bp_start_opt = self.bitpacked_structs.get(struct_idx)
-    if not bp_start_opt.is_some(): return -1
-    let bp_base = bp_start_opt.unwrap() as i32
-    let f_count = self.struct_field_counts.get(struct_idx as i64)
-    if field_idx < 0 or field_idx >= f_count: return -1
-    let bit_offset = self.bitpacked_field_bit_offsets.get((bp_base + field_idx) as i64)
-    let bit_width = self.bitpacked_field_bit_widths.get((bp_base + field_idx) as i64)
-    bit_offset * 65536 + bit_width
+    mut fn build_call_fn_value(fn_sym: i32, fn_val: i64, fn_ty: i64, args_start: i32, arg_node_base_index: i32, args: Vec[i64], arg_count: i32, call_context: str, call_node: i32) -> i64:
+        let sret_opt = self.extern_fn_has_sret.get(fn_sym)
+        let has_sret = if sret_opt.is_some(): sret_opt.unwrap() else: 0
+        var sret_ty: i64 = 0
+        if has_sret != 0:
+            let sret_ty_opt = self.extern_fn_sret_type.get(fn_sym)
+            if sret_ty_opt.is_some():
+                sret_ty = sret_ty_opt.unwrap() as i64
+        let coerced = self.coerce_call_args_for_fn_value(fn_sym, fn_val, args_start, arg_node_base_index, args, arg_count, call_context, call_node)
+        let final_args: Vec[i64] = Vec.new()
+        var sret_buf: i64 = 0
+        if has_sret != 0 and sret_ty != 0:
+            sret_buf = self.create_entry_alloca(sret_ty)
+            final_args.push(sret_buf)
+        for i in 0..coerced.len() as i32:
+            final_args.push(coerced.get(i as i64))
+        let call_val = wl_build_call(self.builder, fn_ty, fn_val, vec_data_i64(&final_args), final_args.len() as i32)
+        var byval_mask: i64 = 0
+        var byval_types: Vec[i64] = Vec.new()
+        let byval_opt = self.extern_fn_byval_params.get(fn_sym)
+        if byval_opt.is_some():
+            byval_mask = byval_opt.unwrap() as i64
+        let byval_types_opt = self.extern_fn_byval_types.get(fn_sym)
+        if byval_types_opt.is_some():
+            byval_types = byval_types_opt.unwrap()
+        self.apply_c_abi_call_attrs(call_val, has_sret, sret_ty, byval_mask, byval_types, arg_count, 0)
+        if has_sret != 0 and sret_buf != 0 and sret_ty != 0:
+            return wl_build_load(self.builder, sret_ty, sret_buf)
+        call_val
 
-// Map source field index to LLVM struct field index (accounting for padding).
-// Returns source_fi unchanged if no alignment padding exists for this struct.
-fn Codegen.get_llvm_field_index(self: Codegen, llvm_ty: i64, source_fi: i32) -> i32:
-    let struct_idx = self.find_struct_index_by_type(llvm_ty)
-    if struct_idx < 0:
-        return source_fi
-    let f_start = self.struct_field_starts.get(struct_idx as i64)
-    let f_count = self.struct_field_counts.get(struct_idx as i64)
-    if source_fi < 0 or source_fi >= f_count:
-        return source_fi
-    if self.is_union_struct_index(struct_idx):
-        return 0
-    let map_idx = (f_start + source_fi) as i64
-    if map_idx >= self.struct_llvm_field_indices.len() as i64:
-        return source_fi
-    self.struct_llvm_field_indices.get(map_idx)
+    fn mir_call_context(body: &MirBody, callee_operand: i32) -> str:
+        var out = "mir " ++ self.function_symbol_name(body.fn_sym) ++ " -> "
+        if callee_operand < 0 or callee_operand >= body.operand_kinds.len() as i32:
+            return out ++ "<callee?>"
+        let ok = body.operand_kinds.get(callee_operand as i64)
+        let od = body.operand_d0.get(callee_operand as i64)
+        if ok == OperandKind.OK_CONSTANT and od >= 0 and od < body.const_kinds.len() as i32:
+            if body.const_kinds.get(od as i64) == ConstKind.CK_FN:
+                return out ++ self.function_symbol_name(body.const_d0.get(od as i64))
+        if (ok == OperandKind.OK_COPY or ok == OperandKind.OK_MOVE) and od >= 0 and od < body.place_locals.len() as i32:
+            return out ++ f"place_{body.place_locals.get(od as i64)}"
+        out ++ "indirect"
 
-fn Codegen.vec_contains_i32(self: Codegen, values: &Vec[i32], needle: i32) -> bool:
-    for i in 0..values.len() as i32:
-        if values.get(i as i64) == needle:
-            return true
-    false
+    // ── Helper: find struct/enum type symbol from LLVM type ───────────
 
-fn Codegen.struct_reaches_type(self: Codegen, start_idx: i32, target_ty: i64) -> bool:
-    var queue: Vec[i32] = Vec.new()
-    var visited: Vec[i32] = Vec.new()
-    queue.push(start_idx)
-    visited.push(start_idx)
+    fn find_type_symbol(llvm_ty: i64) -> i32:
+        // Search struct types
+        for i in 0..self.struct_llvm_types.len() as i32:
+            if self.struct_llvm_types.get(i as i64) == llvm_ty:
+                // Find the symbol that maps to this index
+                // We need to iterate the hashmap — just check all entries
+                for j in 0..self.struct_field_counts.len() as i32:
+                    // struct_type_map maps sym → index, we want reverse
+                    0
+                // Fallback: return 0
+                return 0
+        0
 
-    var qi = 0
-    while qi < queue.len() as i32:
-        let cur = queue.get(qi as i64)
-        qi = qi + 1
+    fn find_struct_index_by_type(llvm_ty: i64) -> i32:
+        for i in 0..self.struct_llvm_types.len() as i32:
+            if self.struct_llvm_types.get(i as i64) == llvm_ty:
+                return i
+        -1
 
-        let f_start = self.struct_field_starts.get(cur as i64)
-        let f_count = self.struct_field_counts.get(cur as i64)
-        for fi in 0..f_count:
-            let f_ty = self.struct_field_types.get((f_start + fi) as i64)
-            if f_ty == target_ty:
+    fn is_union_struct_index(struct_idx: i32) -> bool:
+        if struct_idx < 0 or struct_idx >= self.struct_index_syms.len() as i32:
+            return false
+        let name_sym = self.struct_index_syms.get(struct_idx as i64)
+        if name_sym == 0:
+            return false
+        self.sema.type_layout_struct_sub_kind(name_sym) == TypeDeclKind.Union
+
+    fn is_union_struct_type(llvm_ty: i64) -> bool:
+        self.is_union_struct_index(self.find_struct_index_by_type(llvm_ty))
+
+    fn struct_source_field_type(struct_idx: i32, source_fi: i32) -> i64:
+        if struct_idx < 0 or struct_idx >= self.struct_field_counts.len() as i32:
+            return 0
+        let f_count = self.struct_field_counts.get(struct_idx as i64)
+        if source_fi < 0 or source_fi >= f_count:
+            return 0
+        let f_start = self.struct_field_starts.get(struct_idx as i64)
+        self.struct_field_types.get((f_start + source_fi) as i64)
+
+    fn is_bitpacked_struct(llvm_ty: i64) -> bool:
+        self.bitpacked_by_llvm_type.contains(llvm_ty)
+
+    fn find_bitpacked_index_by_type(llvm_ty: i64) -> i32:
+        let opt = self.bitpacked_by_llvm_type.get(llvm_ty)
+        if opt.is_some(): return opt.unwrap() as i32
+        -1
+
+    fn get_bitpacked_field_info(llvm_ty: i64, field_idx: i32) -> i32:
+        // Returns bit_offset * 65536 + bit_width, or -1 if not bitpacked
+        let struct_idx = self.find_bitpacked_index_by_type(llvm_ty)
+        if struct_idx < 0: return -1
+        let bp_start_opt = self.bitpacked_structs.get(struct_idx)
+        if not bp_start_opt.is_some(): return -1
+        let bp_base = bp_start_opt.unwrap() as i32
+        let f_count = self.struct_field_counts.get(struct_idx as i64)
+        if field_idx < 0 or field_idx >= f_count: return -1
+        let bit_offset = self.bitpacked_field_bit_offsets.get((bp_base + field_idx) as i64)
+        let bit_width = self.bitpacked_field_bit_widths.get((bp_base + field_idx) as i64)
+        bit_offset * 65536 + bit_width
+
+    // Map source field index to LLVM struct field index (accounting for padding).
+    // Returns source_fi unchanged if no alignment padding exists for this struct.
+    fn get_llvm_field_index(llvm_ty: i64, source_fi: i32) -> i32:
+        let struct_idx = self.find_struct_index_by_type(llvm_ty)
+        if struct_idx < 0:
+            return source_fi
+        let f_start = self.struct_field_starts.get(struct_idx as i64)
+        let f_count = self.struct_field_counts.get(struct_idx as i64)
+        if source_fi < 0 or source_fi >= f_count:
+            return source_fi
+        if self.is_union_struct_index(struct_idx):
+            return 0
+        let map_idx = (f_start + source_fi) as i64
+        if map_idx >= self.struct_llvm_field_indices.len() as i64:
+            return source_fi
+        self.struct_llvm_field_indices.get(map_idx)
+
+    fn vec_contains_i32(values: &Vec[i32], needle: i32) -> bool:
+        for i in 0..values.len() as i32:
+            if values.get(i as i64) == needle:
                 return true
-            let next_idx = self.find_struct_index_by_type(f_ty)
-            if next_idx >= 0 and not self.vec_contains_i32(visited, next_idx):
-                visited.push(next_idx)
-                queue.push(next_idx)
-    false
+        false
 
-// ── Helper: span to line number ───────────────────────────────────
+    fn struct_reaches_type(start_idx: i32, target_ty: i64) -> bool:
+        var queue: Vec[i32] = Vec.new()
+        var visited: Vec[i32] = Vec.new()
+        queue.push(start_idx)
+        visited.push(start_idx)
 
-fn Codegen.span_to_line(self: Codegen, node: i32) -> i32:
-    let start = self.pool.get_start(node)
-    if start <= 0: return 1
-    let src = self.source_text
-    var line = 1
-    for i in 0..start:
-        if i < src.len() as i32:
-            if src.byte_at(i as i64) == 10:
-                line = line + 1
-    line
+        var qi = 0
+        while qi < queue.len() as i32:
+            let cur = queue.get(qi as i64)
+            qi = qi + 1
 
-// ── Helper: coerce integer widths ─────────────────────────────────
+            let f_start = self.struct_field_starts.get(cur as i64)
+            let f_count = self.struct_field_counts.get(cur as i64)
+            for fi in 0..f_count:
+                let f_ty = self.struct_field_types.get((f_start + fi) as i64)
+                if f_ty == target_ty:
+                    return true
+                let next_idx = self.find_struct_index_by_type(f_ty)
+                if next_idx >= 0 and not self.vec_contains_i32(visited, next_idx):
+                    visited.push(next_idx)
+                    queue.push(next_idx)
+        false
 
-fn Codegen.coerce_int(self: Codegen, val: i64, target_ty: i64) -> i64:
-    self.coerce_int_ext(val, target_ty, false)
+    // ── Helper: span to line number ───────────────────────────────────
 
-fn Codegen.coerce_int_ext(self: Codegen, val: i64, target_ty: i64, is_unsigned: bool) -> i64:
-    if val == 0: return val
-    let val_ty = wl_type_of(val)
-    if val_ty == target_ty: return val
-    let vk = wl_get_type_kind(val_ty)
-    let tk = wl_get_type_kind(target_ty)
-    if vk == wl_integer_type_kind() and tk == wl_integer_type_kind():
-        let vw = wl_get_int_type_width(val_ty)
-        let tw = wl_get_int_type_width(target_ty)
-        if vw < tw:
-            if vw == 1 or is_unsigned:
-                return wl_build_zext(self.builder, val, target_ty)
-            return wl_build_sext(self.builder, val, target_ty)
-        if vw > tw:
-            return wl_build_trunc(self.builder, val, target_ty)
-    val
+    fn span_to_line(node: i32) -> i32:
+        let start = self.pool.get_start(node)
+        if start <= 0: return 1
+        let src = self.source_text
+        var line = 1
+        for i in 0..start:
+            if i < src.len() as i32:
+                if src.byte_at(i as i64) == 10:
+                    line = line + 1
+        line
 
-// ── Helper: build default value for a type ────────────────────────
+    // ── Helper: coerce integer widths ─────────────────────────────────
 
-fn Codegen.build_default_value(self: Codegen, ty: i64) -> i64:
-    let kind = wl_get_type_kind(ty)
-    if kind == wl_integer_type_kind():
-        return wl_const_int(ty, 0, 0)
-    if kind == wl_float_type_kind() or kind == wl_double_type_kind():
-        return wl_const_real(ty, 0.0)
-    if kind == wl_pointer_type_kind():
-        return wl_const_null(ty)
-    if kind == wl_array_type_kind():
-        return wl_const_null(ty)
-    if kind == wl_struct_type_kind():
-        return wl_const_null(ty)
-    wl_const_int(wl_i32_type(self.context), 0, 0)
+    fn coerce_int(val: i64, target_ty: i64) -> i64:
+        self.coerce_int_ext(val, target_ty, false)
 
-fn Codegen.get_with_str_eq_fn_type(self: Codegen) -> i64:
-    let str_ty = self.resolve_named_type(self.intern.intern("str"))
-    let param_types: Vec[i64] = Vec.new()
-    param_types.push(str_ty)
-    param_types.push(str_ty)
-    wl_function_type(wl_i32_type(self.context), vec_data_i64(&param_types), 2, 0)
+    fn coerce_int_ext(val: i64, target_ty: i64, is_unsigned: bool) -> i64:
+        if val == 0: return val
+        let val_ty = wl_type_of(val)
+        if val_ty == target_ty: return val
+        let vk = wl_get_type_kind(val_ty)
+        let tk = wl_get_type_kind(target_ty)
+        if vk == wl_integer_type_kind() and tk == wl_integer_type_kind():
+            let vw = wl_get_int_type_width(val_ty)
+            let tw = wl_get_int_type_width(target_ty)
+            if vw < tw:
+                if vw == 1 or is_unsigned:
+                    return wl_build_zext(self.builder, val, target_ty)
+                return wl_build_sext(self.builder, val, target_ty)
+            if vw > tw:
+                return wl_build_trunc(self.builder, val, target_ty)
+        val
 
-fn Codegen.ensure_with_str_eq_declared(self: Codegen) -> i64:
-    let str_ty = self.resolve_named_type(self.intern.intern("str"))
-    let param_types: Vec[i64] = Vec.new()
-    param_types.push(str_ty)
-    param_types.push(str_ty)
-    self.ensure_internal_runtime_fn("with_str_eq", param_types, 2, wl_i32_type(self.context))
+    // ── Helper: build default value for a type ────────────────────────
 
-fn Codegen.ensure_with_str_cmp_declared(self: Codegen) -> i64:
-    let str_ty = self.resolve_named_type(self.intern.intern("str"))
-    let param_types: Vec[i64] = Vec.new()
-    param_types.push(str_ty)
-    param_types.push(str_ty)
-    self.ensure_internal_runtime_fn("with_str_cmp", param_types, 2, wl_i32_type(self.context))
+    fn build_default_value(ty: i64) -> i64:
+        let kind = wl_get_type_kind(ty)
+        if kind == wl_integer_type_kind():
+            return wl_const_int(ty, 0, 0)
+        if kind == wl_float_type_kind() or kind == wl_double_type_kind():
+            return wl_const_real(ty, 0.0)
+        if kind == wl_pointer_type_kind():
+            return wl_const_null(ty)
+        if kind == wl_array_type_kind():
+            return wl_const_null(ty)
+        if kind == wl_struct_type_kind():
+            return wl_const_null(ty)
+        wl_const_int(wl_i32_type(self.context), 0, 0)
 
-fn Codegen.compare_str_eq(self: Codegen, lhs: i64, rhs: i64, op: i32) -> i64:
-    let fn_val = self.ensure_with_str_eq_declared()
-    let fn_sym = self.intern.intern("with_str_eq")
-    let fn_ty = self.fn_fn_types.get(fn_sym).unwrap() as i64
-    let args: Vec[i64] = Vec.new()
-    args.push(lhs)
-    args.push(rhs)
-    let cmp = self.build_call_fn_value(fn_sym, fn_val, fn_ty, -1, 0, args, 2, "with_str_eq", 0)
-    let zero = wl_const_int(wl_i32_type(self.context), 0, 0)
-    if op == BinaryOp.OP_EQ:
-        return wl_build_icmp(self.builder, wl_int_ne(), cmp, zero)
-    wl_build_icmp(self.builder, wl_int_eq(), cmp, zero)
+    fn get_with_str_eq_fn_type() -> i64:
+        let str_ty = self.resolve_named_type(self.intern.intern("str"))
+        let param_types: Vec[i64] = Vec.new()
+        param_types.push(str_ty)
+        param_types.push(str_ty)
+        wl_function_type(wl_i32_type(self.context), vec_data_i64(&param_types), 2, 0)
 
-fn Codegen.compare_str_order(self: Codegen, lhs: i64, rhs: i64, op: i32) -> i64:
-    let fn_val = self.ensure_with_str_cmp_declared()
-    let fn_sym = self.intern.intern("with_str_cmp")
-    let fn_ty = self.fn_fn_types.get(fn_sym).unwrap() as i64
-    let args: Vec[i64] = Vec.new()
-    args.push(lhs)
-    args.push(rhs)
-    let cmp = self.build_call_fn_value(fn_sym, fn_val, fn_ty, -1, 0, args, 2, "with_str_cmp", 0)
-    let zero = wl_const_int(wl_i32_type(self.context), 0, 0)
-    if op == BinaryOp.OP_LT:
-        return wl_build_icmp(self.builder, wl_int_slt(), cmp, zero)
-    if op == BinaryOp.OP_GT:
-        return wl_build_icmp(self.builder, wl_int_sgt(), cmp, zero)
-    if op == BinaryOp.OP_LTE:
-        return wl_build_icmp(self.builder, wl_int_sle(), cmp, zero)
-    if op == BinaryOp.OP_GTE:
-        return wl_build_icmp(self.builder, wl_int_sge(), cmp, zero)
-    wl_get_undef(wl_i1_type(self.context))
+    mut fn ensure_with_str_eq_declared() -> i64:
+        let str_ty = self.resolve_named_type(self.intern.intern("str"))
+        let param_types: Vec[i64] = Vec.new()
+        param_types.push(str_ty)
+        param_types.push(str_ty)
+        self.ensure_internal_runtime_fn("with_str_eq", param_types, 2, wl_i32_type(self.context))
 
-fn Codegen.get_memcmp_fn_type(self: Codegen) -> i64:
-    let i32_ty = wl_i32_type(self.context)
-    let ptr_ty = wl_ptr_type(self.context)
-    let i64_ty = wl_i64_type(self.context)
-    let param_types: Vec[i64] = Vec.new()
-    param_types.push(ptr_ty)
-    param_types.push(ptr_ty)
-    param_types.push(i64_ty)
-    wl_function_type(i32_ty, vec_data_i64(&param_types), 3, 0)
+    mut fn ensure_with_str_cmp_declared() -> i64:
+        let str_ty = self.resolve_named_type(self.intern.intern("str"))
+        let param_types: Vec[i64] = Vec.new()
+        param_types.push(str_ty)
+        param_types.push(str_ty)
+        self.ensure_internal_runtime_fn("with_str_cmp", param_types, 2, wl_i32_type(self.context))
 
-fn Codegen.ensure_memcmp_declared(self: Codegen) -> i64:
-    let existing = wl_get_named_function(self.llmod, "memcmp")
-    if existing != 0:
-        return existing
-    let fn_ty = self.get_memcmp_fn_type()
-    wl_add_function(self.llmod, "memcmp", fn_ty)
-
-fn Codegen.compare_value_eq(self: Codegen, lhs: i64, rhs: i64, val_ty: i64, op: i32) -> i64:
-    let kind = wl_get_type_kind(val_ty)
-    if self.is_str_type(val_ty):
-        return self.compare_str_eq(lhs, rhs, op)
-    if kind == wl_struct_type_kind() or kind == wl_array_type_kind():
-        return self.compare_aggregate_eq(lhs, rhs, op)
-    if kind == wl_float_type_kind() or kind == wl_double_type_kind():
+    mut fn compare_str_eq(lhs: i64, rhs: i64, op: i32) -> i64:
+        let fn_val = self.ensure_with_str_eq_declared()
+        let fn_sym = self.intern.intern("with_str_eq")
+        let fn_ty = self.fn_fn_types.get(fn_sym).unwrap() as i64
+        let args: Vec[i64] = Vec.new()
+        args.push(lhs)
+        args.push(rhs)
+        let cmp = self.build_call_fn_value(fn_sym, fn_val, fn_ty, -1, 0, args, 2, "with_str_eq", 0)
+        let zero = wl_const_int(wl_i32_type(self.context), 0, 0)
         if op == BinaryOp.OP_EQ:
-            return wl_build_fcmp(self.builder, wl_real_oeq(), lhs, rhs)
-        return wl_build_fcmp(self.builder, wl_real_one(), lhs, rhs)
-    if op == BinaryOp.OP_EQ:
-        return wl_build_icmp(self.builder, wl_int_eq(), lhs, rhs)
-    wl_build_icmp(self.builder, wl_int_ne(), lhs, rhs)
+            return wl_build_icmp(self.builder, wl_int_ne(), cmp, zero)
+        wl_build_icmp(self.builder, wl_int_eq(), cmp, zero)
 
-fn Codegen.compare_aggregate_eq(self: Codegen, lhs: i64, rhs: i64, op: i32) -> i64:
-    let lhs_ty = wl_type_of(lhs)
-    let rhs_ty = wl_type_of(rhs)
-    let i1_ty = wl_i1_type(self.context)
-    if lhs_ty == 0 or rhs_ty == 0 or lhs_ty != rhs_ty:
-        return wl_get_undef(i1_ty)
-    if self.is_str_type(lhs_ty):
-        return self.compare_str_eq(lhs, rhs, op)
+    mut fn compare_str_order(lhs: i64, rhs: i64, op: i32) -> i64:
+        let fn_val = self.ensure_with_str_cmp_declared()
+        let fn_sym = self.intern.intern("with_str_cmp")
+        let fn_ty = self.fn_fn_types.get(fn_sym).unwrap() as i64
+        let args: Vec[i64] = Vec.new()
+        args.push(lhs)
+        args.push(rhs)
+        let cmp = self.build_call_fn_value(fn_sym, fn_val, fn_ty, -1, 0, args, 2, "with_str_cmp", 0)
+        let zero = wl_const_int(wl_i32_type(self.context), 0, 0)
+        if op == BinaryOp.OP_LT:
+            return wl_build_icmp(self.builder, wl_int_slt(), cmp, zero)
+        if op == BinaryOp.OP_GT:
+            return wl_build_icmp(self.builder, wl_int_sgt(), cmp, zero)
+        if op == BinaryOp.OP_LTE:
+            return wl_build_icmp(self.builder, wl_int_sle(), cmp, zero)
+        if op == BinaryOp.OP_GTE:
+            return wl_build_icmp(self.builder, wl_int_sge(), cmp, zero)
+        wl_get_undef(wl_i1_type(self.context))
 
-    let byte_size = self.abi_size_of(lhs_ty)
-    if byte_size <= 0:
+    fn get_memcmp_fn_type() -> i64:
+        let i32_ty = wl_i32_type(self.context)
+        let ptr_ty = wl_ptr_type(self.context)
+        let i64_ty = wl_i64_type(self.context)
+        let param_types: Vec[i64] = Vec.new()
+        param_types.push(ptr_ty)
+        param_types.push(ptr_ty)
+        param_types.push(i64_ty)
+        wl_function_type(i32_ty, vec_data_i64(&param_types), 3, 0)
+
+    fn ensure_memcmp_declared() -> i64:
+        let existing = wl_get_named_function(self.llmod, "memcmp")
+        if existing != 0:
+            return existing
+        let fn_ty = self.get_memcmp_fn_type()
+        wl_add_function(self.llmod, "memcmp", fn_ty)
+
+    mut fn compare_value_eq(lhs: i64, rhs: i64, val_ty: i64, op: i32) -> i64:
+        let kind = wl_get_type_kind(val_ty)
+        if self.is_str_type(val_ty):
+            return self.compare_str_eq(lhs, rhs, op)
+        if kind == wl_struct_type_kind() or kind == wl_array_type_kind():
+            return self.compare_aggregate_eq(lhs, rhs, op)
+        if kind == wl_float_type_kind() or kind == wl_double_type_kind():
+            if op == BinaryOp.OP_EQ:
+                return wl_build_fcmp(self.builder, wl_real_oeq(), lhs, rhs)
+            return wl_build_fcmp(self.builder, wl_real_one(), lhs, rhs)
         if op == BinaryOp.OP_EQ:
-            return wl_const_int(i1_ty, 1, 0)
-        return wl_const_int(i1_ty, 0, 0)
+            return wl_build_icmp(self.builder, wl_int_eq(), lhs, rhs)
+        wl_build_icmp(self.builder, wl_int_ne(), lhs, rhs)
 
-    // Field-wise comparison for structs to avoid padding byte mismatches.
-    let ty_kind = wl_get_type_kind(lhs_ty)
-    if ty_kind == wl_struct_type_kind():
-        let field_count = wl_count_struct_elem_types(lhs_ty)
-        if field_count == 0:
+    mut fn compare_aggregate_eq(lhs: i64, rhs: i64, op: i32) -> i64:
+        let lhs_ty = wl_type_of(lhs)
+        let rhs_ty = wl_type_of(rhs)
+        let i1_ty = wl_i1_type(self.context)
+        if lhs_ty == 0 or rhs_ty == 0 or lhs_ty != rhs_ty:
+            return wl_get_undef(i1_ty)
+        if self.is_str_type(lhs_ty):
+            return self.compare_str_eq(lhs, rhs, op)
+
+        let byte_size = self.abi_size_of(lhs_ty)
+        if byte_size <= 0:
             if op == BinaryOp.OP_EQ:
                 return wl_const_int(i1_ty, 1, 0)
             return wl_const_int(i1_ty, 0, 0)
-        var result = wl_const_int(i1_ty, 1, 0)
-        var fi = 0
-        while fi < field_count:
-            let lf = wl_build_extract_value(self.builder, lhs, fi)
-            let rf = wl_build_extract_value(self.builder, rhs, fi)
-            let field_ty = wl_struct_get_type_at(lhs_ty, fi)
-            let field_eq = self.compare_value_eq(lf, rf, field_ty, BinaryOp.OP_EQ)
-            result = wl_build_and(self.builder, result, field_eq)
-            fi = fi + 1
-        if op == BinaryOp.OP_EQ:
-            return result
-        return wl_build_not(self.builder, result)
 
-    if ty_kind == wl_array_type_kind():
-        let elem_count = wl_get_array_length(lhs_ty) as i32
-        if elem_count == 0:
+        // Field-wise comparison for structs to avoid padding byte mismatches.
+        let ty_kind = wl_get_type_kind(lhs_ty)
+        if ty_kind == wl_struct_type_kind():
+            let field_count = wl_count_struct_elem_types(lhs_ty)
+            if field_count == 0:
+                if op == BinaryOp.OP_EQ:
+                    return wl_const_int(i1_ty, 1, 0)
+                return wl_const_int(i1_ty, 0, 0)
+            var result = wl_const_int(i1_ty, 1, 0)
+            var fi = 0
+            while fi < field_count:
+                let lf = wl_build_extract_value(self.builder, lhs, fi)
+                let rf = wl_build_extract_value(self.builder, rhs, fi)
+                let field_ty = wl_struct_get_type_at(lhs_ty, fi)
+                let field_eq = self.compare_value_eq(lf, rf, field_ty, BinaryOp.OP_EQ)
+                result = wl_build_and(self.builder, result, field_eq)
+                fi = fi + 1
             if op == BinaryOp.OP_EQ:
-                return wl_const_int(i1_ty, 1, 0)
-            return wl_const_int(i1_ty, 0, 0)
-        let elem_ty = wl_get_element_type(lhs_ty)
-        var result = wl_const_int(i1_ty, 1, 0)
-        var ai = 0
-        while ai < elem_count:
-            let lf = wl_build_extract_value(self.builder, lhs, ai)
-            let rf = wl_build_extract_value(self.builder, rhs, ai)
-            let elem_eq = self.compare_value_eq(lf, rf, elem_ty, BinaryOp.OP_EQ)
-            result = wl_build_and(self.builder, result, elem_eq)
-            ai = ai + 1
+                return result
+            return wl_build_not(self.builder, result)
+
+        if ty_kind == wl_array_type_kind():
+            let elem_count = wl_get_array_length(lhs_ty) as i32
+            if elem_count == 0:
+                if op == BinaryOp.OP_EQ:
+                    return wl_const_int(i1_ty, 1, 0)
+                return wl_const_int(i1_ty, 0, 0)
+            let elem_ty = wl_get_element_type(lhs_ty)
+            var result = wl_const_int(i1_ty, 1, 0)
+            var ai = 0
+            while ai < elem_count:
+                let lf = wl_build_extract_value(self.builder, lhs, ai)
+                let rf = wl_build_extract_value(self.builder, rhs, ai)
+                let elem_eq = self.compare_value_eq(lf, rf, elem_ty, BinaryOp.OP_EQ)
+                result = wl_build_and(self.builder, result, elem_eq)
+                ai = ai + 1
+            if op == BinaryOp.OP_EQ:
+                return result
+            return wl_build_not(self.builder, result)
+
+        // Fallback: memcmp for arrays and other non-struct aggregates.
+        let lhs_slot = self.create_entry_alloca(lhs_ty)
+        let rhs_slot = self.create_entry_alloca(rhs_ty)
+        wl_build_store(self.builder, lhs, lhs_slot)
+        wl_build_store(self.builder, rhs, rhs_slot)
+
+        let ptr_ty = wl_ptr_type(self.context)
+        let lhs_ptr = wl_build_bitcast(self.builder, lhs_slot, ptr_ty)
+        let rhs_ptr = wl_build_bitcast(self.builder, rhs_slot, ptr_ty)
+        let args: Vec[i64] = Vec.new()
+        args.push(lhs_ptr)
+        args.push(rhs_ptr)
+        args.push(wl_const_int(wl_i64_type(self.context), byte_size, 0))
+
+        let memcmp_fn = self.ensure_memcmp_declared()
+        let memcmp_ty = self.get_memcmp_fn_type()
+        let cmp = wl_build_call(self.builder, memcmp_ty, memcmp_fn, vec_data_i64(&args), 3)
+        let zero = wl_const_int(wl_i32_type(self.context), 0, 0)
         if op == BinaryOp.OP_EQ:
-            return result
-        return wl_build_not(self.builder, result)
+            return wl_build_icmp(self.builder, wl_int_eq(), cmp, zero)
+        wl_build_icmp(self.builder, wl_int_ne(), cmp, zero)
 
-    // Fallback: memcmp for arrays and other non-struct aggregates.
-    let lhs_slot = self.create_entry_alloca(lhs_ty)
-    let rhs_slot = self.create_entry_alloca(rhs_ty)
-    wl_build_store(self.builder, lhs, lhs_slot)
-    wl_build_store(self.builder, rhs, rhs_slot)
+    // ── Helper: create entry alloca ───────────────────────────────────
 
-    let ptr_ty = wl_ptr_type(self.context)
-    let lhs_ptr = wl_build_bitcast(self.builder, lhs_slot, ptr_ty)
-    let rhs_ptr = wl_build_bitcast(self.builder, rhs_slot, ptr_ty)
-    let args: Vec[i64] = Vec.new()
-    args.push(lhs_ptr)
-    args.push(rhs_ptr)
-    args.push(wl_const_int(wl_i64_type(self.context), byte_size, 0))
-
-    let memcmp_fn = self.ensure_memcmp_declared()
-    let memcmp_ty = self.get_memcmp_fn_type()
-    let cmp = wl_build_call(self.builder, memcmp_ty, memcmp_fn, vec_data_i64(&args), 3)
-    let zero = wl_const_int(wl_i32_type(self.context), 0, 0)
-    if op == BinaryOp.OP_EQ:
-        return wl_build_icmp(self.builder, wl_int_eq(), cmp, zero)
-    wl_build_icmp(self.builder, wl_int_ne(), cmp, zero)
-
-// ── Helper: create entry alloca ───────────────────────────────────
-
-fn Codegen.create_entry_alloca(self: Codegen, ty: i64) -> i64:
-    wl_create_entry_alloca(self.builder, self.current_function, ty)
+    fn create_entry_alloca(ty: i64) -> i64:
+        wl_create_entry_alloca(self.builder, self.current_function, ty)
 
 fn vec_data_i64(v: &Vec[i64]) -> i64:
     wl_vec_data_ptr(v as i64)
@@ -2140,1471 +2362,1472 @@ fn codegen_owned_text(text: str) -> str:
         return ""
     with_str_clone(text)
 
-fn Codegen.capture_sema_symbol_texts(mut self: Codegen):
-    let texts: Vec[str] = Vec.new()
-    for i in 0..self.sema.pool.state.symbol_texts.len() as i32:
-        texts.push(codegen_owned_text(self.sema.pool.state.symbol_texts.get(i as i64)))
-    self.sema_symbol_texts = texts
+impl Codegen:
+    mut fn capture_sema_symbol_texts():
+        let texts: Vec[str] = Vec.new()
+        for i in 0..self.sema.pool.state.symbol_texts.len() as i32:
+            texts.push(codegen_owned_text(self.sema.pool.state.symbol_texts.get(i as i64)))
+        self.sema_symbol_texts = texts
 
-fn Codegen.sema_symbol_text(self: Codegen, sym: i32) -> str:
-    if sym > 0 and sym < self.sema_symbol_texts.len() as i32:
-        return self.sema_symbol_texts.get(sym as i64)
-    if sym > 0 and sym < self.sema.pool.state.symbol_texts.len() as i32:
-        return self.sema.pool.state.symbol_texts.get(sym as i64)
-    self.sema.pool_resolve(sym)
+    fn sema_symbol_text(sym: i32) -> str:
+        if sym > 0 and sym < self.sema_symbol_texts.len() as i32:
+            return self.sema_symbol_texts.get(sym as i64)
+        if sym > 0 and sym < self.sema.pool.state.symbol_texts.len() as i32:
+            return self.sema.pool.state.symbol_texts.get(sym as i64)
+        self.sema.pool_resolve(sym)
 
-// ── Resolve type expression → LLVM type ───────────────────────────
+    // ── Resolve type expression → LLVM type ───────────────────────────
 
-fn Codegen.resolve_type(self: Codegen, type_node: i32) -> i64:
-    if type_node == 0: return wl_void_type(self.context)
-    if type_node < 0 or type_node >= self.pool.node_count():
-        with_eprint(f"error: invalid type node {type_node} during code generation")
-        self.had_error = 1
-        return 0
-    let kind = self.pool.kind(type_node)
+    mut fn resolve_type(type_node: i32) -> i64:
+        if type_node == 0: return wl_void_type(self.context)
+        if type_node < 0 or type_node >= self.pool.node_count():
+            with_eprint(f"error: invalid type node {type_node} during code generation")
+            self.had_error = 1
+            return 0
+        let kind = self.pool.kind(type_node)
 
-    // with_eprint(f"[codegen] resolve_type node={type_node} kind={kind}")
+        // with_eprint(f"[codegen] resolve_type node={type_node} kind={kind}")
 
-    if kind == NodeKind.NK_IDENT:
-        let sym = self.pool.get_data0(type_node)
-        let named = self.resolve_named_type(sym)
-        if named != 0:
-            return named
-        let sema_tid = self.sema.resolve_type_expr(type_node)
-        if sema_tid > 0:
-            let sema_ty = self.sema_type_to_llvm(sema_tid)
-            if sema_ty != 0:
-                return sema_ty
-        return 0
+        if kind == NodeKind.NK_IDENT:
+            let sym = self.pool.get_data0(type_node)
+            let named = self.resolve_named_type(sym)
+            if named != 0:
+                return named
+            let sema_tid = self.sema.resolve_type_expr_frozen(type_node)
+            if sema_tid > 0:
+                let sema_ty = self.sema_type_to_llvm(sema_tid)
+                if sema_ty != 0:
+                    return sema_ty
+            return 0
 
-    if kind == NodeKind.NK_TYPE_NAMED:
-        let sym = self.pool.get_data0(type_node)
-        let named = self.resolve_named_type(sym)
-        if named != 0:
-            return named
-        let sema_tid = self.sema.resolve_type_expr(type_node)
-        if sema_tid > 0:
-            let sema_ty = self.sema_type_to_llvm(sema_tid)
-            if sema_ty != 0:
-                return sema_ty
-        return 0
+        if kind == NodeKind.NK_TYPE_NAMED:
+            let sym = self.pool.get_data0(type_node)
+            let named = self.resolve_named_type(sym)
+            if named != 0:
+                return named
+            let sema_tid = self.sema.resolve_type_expr_frozen(type_node)
+            if sema_tid > 0:
+                let sema_ty = self.sema_type_to_llvm(sema_tid)
+                if sema_ty != 0:
+                    return sema_ty
+            return 0
 
-    if kind == NodeKind.NK_TYPE_PTR:
-        // Check for dyn trait pointer
-        let pointee = self.pool.get_data0(type_node)
-        if self.pool.kind(pointee) == NodeKind.NK_TYPE_TRAIT_OBJ:
-            // Fat pointer {data_ptr, vtable_ptr}
-            return self.get_dyn_fat_ptr_type()
-        return wl_ptr_type(self.context)
-
-    if kind == NodeKind.NK_TYPE_REF:
-        let pointee = self.pool.get_data0(type_node)
-        if self.pool.kind(pointee) == NodeKind.NK_TYPE_TRAIT_OBJ:
-            return self.get_dyn_fat_ptr_type()
-        return wl_ptr_type(self.context)
-
-    if kind == NodeKind.NK_TYPE_FN:
-        // Function type → fat pointer {fn_ptr, ctx_ptr}
-        let ptr_ty = wl_ptr_type(self.context)
-        let fat_types: Vec[i64] = Vec.new()
-        fat_types.push(ptr_ty)
-        fat_types.push(ptr_ty)
-        return wl_struct_type(self.context, vec_data_i64(&fat_types), 2, 0)
-
-    if kind == NodeKind.NK_TYPE_EXTERN_FN:
-        return wl_ptr_type(self.context)
-
-    if kind == NodeKind.NK_INDEX:
-        let sema_tid = self.sema.resolve_type_level_arg_expr(type_node)
-        if sema_tid > 0:
-            let sema_ty = self.sema_type_to_llvm(sema_tid)
-            if sema_ty != 0:
-                return sema_ty
-        return 0
-
-    if kind == NodeKind.NK_TYPE_ARRAY:
-        let elem_node = self.pool.get_data0(type_node)
-        let size_lo = self.pool.get_data1(type_node)
-        let elem_ty = self.resolve_type(elem_node)
-        return wl_array_type(elem_ty, size_lo as i64)
-
-    if kind == NodeKind.NK_TYPE_SLICE:
-        let elem_node = self.pool.get_data0(type_node)
-        self.resolve_type(elem_node)
-        // Slice is {ptr, i64} like str
-        let body_types: Vec[i64] = Vec.new()
-        body_types.push(wl_ptr_type(self.context))
-        body_types.push(wl_i64_type(self.context))
-        return wl_struct_type(self.context, vec_data_i64(&body_types), 2, 0)
-
-    if kind == NodeKind.NK_TYPE_OPTIONAL:
-        let inner_node = self.pool.get_data0(type_node)
-        let payload_ty = self.resolve_type(inner_node)
-        let opt = self.get_or_create_option_type(0, payload_ty)
-        return opt
-
-    if kind == NodeKind.NK_TYPE_TUPLE:
-        let extra_start = self.pool.get_data0(type_node)
-        let elem_count = self.pool.get_data1(type_node)
-        let elem_types: Vec[i64] = Vec.new()
-        for i in 0..elem_count:
-            let et_node = self.pool.get_extra(extra_start + i)
-            elem_types.push(self.resolve_type(et_node))
-        return wl_struct_type(self.context, vec_data_i64(&elem_types), elem_count, 0)
-
-    if kind == NodeKind.NK_TYPE_GENERIC:
-        let name_sym = self.pool.get_data0(type_node)
-        let g_extra = self.pool.get_data1(type_node)
-        let g_count = self.pool.get_data2(type_node)
-        // Box[T] is always a pointer (fat pointer for Box[dyn Trait])
-        if self.sema.type_symbol_is_std_box(name_sym) != 0 and g_count == 1:
-            let inner_node = self.pool.get_extra(g_extra)
-            if self.pool.kind(inner_node) == NodeKind.NK_TYPE_TRAIT_OBJ:
+        if kind == NodeKind.NK_TYPE_PTR:
+            // Check for dyn trait pointer
+            let pointee = self.pool.get_data0(type_node)
+            if self.pool.kind(pointee) == NodeKind.NK_TYPE_TRAIT_OBJ:
+                // Fat pointer {data_ptr, vtable_ptr}
                 return self.get_dyn_fat_ptr_type()
             return wl_ptr_type(self.context)
-        // ContextError[E] = { message: str, source: E }
-        if name_sym == self.sym_context_error and g_count == 1:
-            let src_node = self.pool.get_extra(g_extra)
-            let src_ty = self.resolve_type(src_node)
-            return self.get_or_create_context_error_type(src_ty)
-        // Codegen-level resolution must run before the Sema fallback when
-        // monomorphizing generic struct fields. Sema does not see Codegen's
-        // active type bindings, so asking it first would turn Vec[(K, V)]
-        // into a fallback type and poison codegen with had_error.
-        if name_sym == self.sym_option and g_count == 1:
-            let opt_arg = self.resolve_type(self.pool.get_extra(g_extra))
-            if opt_arg != 0:
-                return self.get_or_create_option_type(0, opt_arg)
-        if name_sym == self.sym_vec and g_count == 1:
-            let vec_arg = self.resolve_type(self.pool.get_extra(g_extra))
-            if vec_arg != 0:
-                return self.get_or_create_vec_type(0, vec_arg)
-        if name_sym == self.sym_result and g_count == 2:
-            let res_ok = self.resolve_type(self.pool.get_extra(g_extra))
-            let res_err = self.resolve_type(self.pool.get_extra(g_extra + 1))
-            if res_ok != 0 and res_err != 0:
-                return self.get_or_create_result_type(0, res_ok, res_err)
-        // Sema-based path for other builtin containers (HashMap, HashSet)
-        // and fully concrete generic instantiations.
-        let sema_tid = self.sema.resolve_type_expr(type_node)
-        if sema_tid > 0:
-            let llvm_ty = self.sema_type_to_llvm(sema_tid)
-            if llvm_ty != 0:
-                return llvm_ty
-        // Monomorphize user-defined generic structs
-        let gs_opt = self.generic_structs.get(name_sym)
-        if gs_opt.is_some():
-            return self.monomorphize_struct(name_sym, g_extra, g_count)
-        return 0
 
-    if kind == NodeKind.NK_TYPE_TRAIT_OBJ:
-        // dyn Trait → fat pointer {data_ptr, vtable_ptr}
-        return self.get_dyn_fat_ptr_type()
+        if kind == NodeKind.NK_TYPE_REF:
+            let pointee = self.pool.get_data0(type_node)
+            if self.pool.kind(pointee) == NodeKind.NK_TYPE_TRAIT_OBJ:
+                return self.get_dyn_fat_ptr_type()
+            return wl_ptr_type(self.context)
 
-    if kind == NodeKind.NK_TYPE_INFERRED:
-        return 0  // Cannot resolve inferred types
+        if kind == NodeKind.NK_TYPE_FN:
+            // Function type → fat pointer {fn_ptr, ctx_ptr}
+            let ptr_ty = wl_ptr_type(self.context)
+            let fat_types: Vec[i64] = Vec.new()
+            fat_types.push(ptr_ty)
+            fat_types.push(ptr_ty)
+            return wl_struct_type(self.context, vec_data_i64(&fat_types), 2, 0)
 
-    if kind == NodeKind.NK_TYPE_ASSOC:
-        // Self.Name — resolve associated type from current impl
-        let base_sym = self.pool.get_data0(type_node)
-        let assoc_sym = self.pool.get_data1(type_node)
-        if base_sym == self.sym_Self and self.current_function_name_sym != 0:
-            let impl_opt = self.sema.method_impl_nodes.get(self.current_function_name_sym)
-            if impl_opt.is_some():
-                let impl_nd = impl_opt.unwrap()
-                let impl_ex = self.pool.get_data1(impl_nd)
-                let impl_ac = self.pool.get_extra(impl_ex)
-                for iai in 0..impl_ac:
-                    let at_name = self.pool.get_extra(impl_ex + 1 + iai * 2)
-                    if at_name == assoc_sym:
-                        let at_type_nd = self.pool.get_extra(impl_ex + 1 + iai * 2 + 1)
-                        return self.resolve_type(at_type_nd)
-        // Type parameter: check type_binding_syms for base_sym → resolve via sema
-        for tbi in 0..self.type_bindings_len:
-            if self.type_binding_syms.get(tbi as i64) == base_sym:
-                // base_sym is a bound type param — use sema to resolve assoc type
-                let sema_resolved = self.sema.resolve_type_expr(type_node)
-                if sema_resolved > 0:
-                    let llvm_ty = self.sema_type_to_llvm(sema_resolved)
-                    if llvm_ty != 0:
-                        return llvm_ty
-                break
-        return wl_i32_type(self.context)
+        if kind == NodeKind.NK_TYPE_EXTERN_FN:
+            return wl_ptr_type(self.context)
 
-    // Fallback — always warn so silent miscompilation is visible
-    with_eprint(f"warning: [type-resolve] unhandled type node kind={kind} node={type_node} span={self.pool.get_start(type_node)}..{self.pool.get_end(type_node)}")
-    self.type_fallback()
+        if kind == NodeKind.NK_INDEX:
+            let sema_tid = self.sema.resolve_type_level_arg_expr_frozen(type_node)
+            if sema_tid > 0:
+                let sema_ty = self.sema_type_to_llvm(sema_tid)
+                if sema_ty != 0:
+                    return sema_ty
+            return 0
 
-fn Codegen.resolve_primitive_named_type(self: Codegen, sym: i32) -> i64:
-    if sym == self.sym_bool: return wl_i1_type(self.context)
-    if sym == self.sym_usize: return wl_i64_type(self.context)
-    if sym == self.sym_isize: return wl_i64_type(self.context)
-    if sym == self.sym_void: return wl_void_type(self.context)
-    if sym == self.sym_never: return wl_void_type(self.context)
-    if sym == self.sym_unit: return wl_i32_type(self.context)
-    let name = self.intern.resolve(sym)
-    if name == "i32": return wl_i32_type(self.context)
-    if name == "i64": return wl_i64_type(self.context)
-    if name == "i128": return wl_i128_type(self.context)
-    if name == "i16": return wl_i16_type(self.context)
-    if name == "i8": return wl_i8_type(self.context)
-    if name == "u8": return wl_i8_type(self.context)
-    if name == "u16": return wl_i16_type(self.context)
-    if name == "u32": return wl_i32_type(self.context)
-    if name == "u64": return wl_i64_type(self.context)
-    if name == "u128": return wl_i128_type(self.context)
-    if name == "f64": return wl_f64_type(self.context)
-    if name == "f32": return wl_f32_type(self.context)
-    0
+        if kind == NodeKind.NK_TYPE_ARRAY:
+            let elem_node = self.pool.get_data0(type_node)
+            let size_lo = self.pool.get_data1(type_node)
+            let elem_ty = self.resolve_type(elem_node)
+            return wl_array_type(elem_ty, size_lo as i64)
 
-fn Codegen.resolve_user_named_type(self: Codegen, sym: i32) -> i64:
-    let de_opt = self.disc_enum_type_map.get(sym)
-    if de_opt.is_some():
-        let de_idx = de_opt.unwrap()
-        if de_idx >= 0 and de_idx < self.disc_enum_has_payload.len() as i32:
-            if self.disc_enum_has_payload.get(de_idx as i64) == 0:
-                return self.disc_enum_repr_types.get(de_idx as i64)
-    // User-defined struct types
-    let st_opt = self.struct_type_map.get(sym)
-    if st_opt.is_some():
-        let idx = st_opt.unwrap()
-        // Bitpacked structs: return the iN backing type
-        let bp_ty = self.bitpacked_backing_types.get(idx)
-        if bp_ty.is_some():
-            return bp_ty.unwrap()
-        return self.struct_llvm_types.get(idx as i64)
-    // User-defined enum types
-    let et_opt = self.enum_type_map.get(sym)
-    if et_opt.is_some():
-        let idx = et_opt.unwrap()
-        return self.enum_llvm_types.get(idx as i64)
-    // Type aliases
-    let al_opt = self.type_aliases.get(sym)
-    if al_opt.is_some():
-        return al_opt.unwrap() as i64
-    // Check active type bindings (monomorphization)
-    for i in 0..self.type_bindings_len:
-        let binding_sym = self.type_binding_syms.get(i as i64)
-        let want_text = self.intern.resolve(sym)
-        let binding_text = self.intern.resolve(binding_sym)
-        let sema_want_text = if want_text.len() > 0: want_text else: self.sema_symbol_text(sym)
-        let sema_binding_text = if binding_text.len() > 0: binding_text else: self.sema_symbol_text(binding_sym)
-        if binding_sym == sym or (sema_want_text.len() > 0 and sema_want_text == sema_binding_text):
-            return self.type_binding_types.get(i as i64)
-    // Unsupported
-    0
+        if kind == NodeKind.NK_TYPE_SLICE:
+            let elem_node = self.pool.get_data0(type_node)
+            self.resolve_type(elem_node)
+            // Slice is {ptr, i64} like str
+            let body_types: Vec[i64] = Vec.new()
+            body_types.push(wl_ptr_type(self.context))
+            body_types.push(wl_i64_type(self.context))
+            return wl_struct_type(self.context, vec_data_i64(&body_types), 2, 0)
 
-fn Codegen.resolve_named_type(self: Codegen, sym: i32) -> i64:
-    // Resolve Self to current method owner type
-    if sym == self.sym_Self and self.current_method_owner_sym != 0:
-        return self.resolve_user_named_type(self.current_method_owner_sym)
-    let prim = self.resolve_primitive_named_type(sym)
-    if prim != 0:
-        return prim
-    self.resolve_user_named_type(sym)
+        if kind == NodeKind.NK_TYPE_OPTIONAL:
+            let inner_node = self.pool.get_data0(type_node)
+            let payload_ty = self.resolve_type(inner_node)
+            let opt = self.get_or_create_option_type(0, payload_ty)
+            return opt
 
-fn Codegen.type_expr_to_sema_type(self: Codegen, type_node: i32) -> i32:
-    if type_node == 0:
-        return self.sema.ty_void as i32
-    let kind = self.pool.kind(type_node)
-    if kind == NodeKind.NK_IDENT or kind == NodeKind.NK_TYPE_NAMED:
-        let sym = self.pool.get_data0(type_node)
-        let name = self.codegen_symbol_text(sym)
-        let sema_sym = if name.len() > 0: self.sema.pool_lookup_symbol(name) else: 0
-        let lookup_sym = if sema_sym != 0: sema_sym else: sym
-        let prim = self.sema.primitive_type_by_sym(lookup_sym)
+        if kind == NodeKind.NK_TYPE_TUPLE:
+            let extra_start = self.pool.get_data0(type_node)
+            let elem_count = self.pool.get_data1(type_node)
+            let elem_types: Vec[i64] = Vec.new()
+            for i in 0..elem_count:
+                let et_node = self.pool.get_extra(extra_start + i)
+                elem_types.push(self.resolve_type(et_node))
+            return wl_struct_type(self.context, vec_data_i64(&elem_types), elem_count, 0)
+
+        if kind == NodeKind.NK_TYPE_GENERIC:
+            let name_sym = self.pool.get_data0(type_node)
+            let g_extra = self.pool.get_data1(type_node)
+            let g_count = self.pool.get_data2(type_node)
+            // Box[T] is always a pointer (fat pointer for Box[dyn Trait])
+            if self.sema.type_symbol_is_std_box(name_sym) != 0 and g_count == 1:
+                let inner_node = self.pool.get_extra(g_extra)
+                if self.pool.kind(inner_node) == NodeKind.NK_TYPE_TRAIT_OBJ:
+                    return self.get_dyn_fat_ptr_type()
+                return wl_ptr_type(self.context)
+            // ContextError[E] = { message: str, source: E }
+            if name_sym == self.sym_context_error and g_count == 1:
+                let src_node = self.pool.get_extra(g_extra)
+                let src_ty = self.resolve_type(src_node)
+                return self.get_or_create_context_error_type(src_ty)
+            // Codegen-level resolution must run before the Sema fallback when
+            // monomorphizing generic struct fields. Sema does not see Codegen's
+            // active type bindings, so asking it first would turn Vec[(K, V)]
+            // into a fallback type and poison codegen with had_error.
+            if name_sym == self.sym_option and g_count == 1:
+                let opt_arg = self.resolve_type(self.pool.get_extra(g_extra))
+                if opt_arg != 0:
+                    return self.get_or_create_option_type(0, opt_arg)
+            if name_sym == self.sym_vec and g_count == 1:
+                let vec_arg = self.resolve_type(self.pool.get_extra(g_extra))
+                if vec_arg != 0:
+                    return self.get_or_create_vec_type(0, vec_arg)
+            if name_sym == self.sym_result and g_count == 2:
+                let res_ok = self.resolve_type(self.pool.get_extra(g_extra))
+                let res_err = self.resolve_type(self.pool.get_extra(g_extra + 1))
+                if res_ok != 0 and res_err != 0:
+                    return self.get_or_create_result_type(0, res_ok, res_err)
+            // Sema-based path for other builtin containers (HashMap, HashSet)
+            // and fully concrete generic instantiations.
+            let sema_tid = self.sema.resolve_type_expr_frozen(type_node)
+            if sema_tid > 0:
+                let llvm_ty = self.sema_type_to_llvm(sema_tid)
+                if llvm_ty != 0:
+                    return llvm_ty
+            // Monomorphize user-defined generic structs
+            let gs_opt = self.generic_structs.get(name_sym)
+            if gs_opt.is_some():
+                return self.monomorphize_struct(name_sym, g_extra, g_count)
+            return 0
+
+        if kind == NodeKind.NK_TYPE_TRAIT_OBJ:
+            // dyn Trait → fat pointer {data_ptr, vtable_ptr}
+            return self.get_dyn_fat_ptr_type()
+
+        if kind == NodeKind.NK_TYPE_INFERRED:
+            return 0  // Cannot resolve inferred types
+
+        if kind == NodeKind.NK_TYPE_ASSOC:
+            // Self.Name — resolve associated type from current impl
+            let base_sym = self.pool.get_data0(type_node)
+            let assoc_sym = self.pool.get_data1(type_node)
+            if base_sym == self.sym_Self and self.current_function_name_sym != 0:
+                let impl_opt = self.sema.method_impl_nodes.get(self.current_function_name_sym)
+                if impl_opt.is_some():
+                    let impl_nd = impl_opt.unwrap()
+                    let impl_ex = self.pool.get_data1(impl_nd)
+                    let impl_ac = self.pool.get_extra(impl_ex)
+                    for iai in 0..impl_ac:
+                        let at_name = self.pool.get_extra(impl_ex + 1 + iai * 2)
+                        if at_name == assoc_sym:
+                            let at_type_nd = self.pool.get_extra(impl_ex + 1 + iai * 2 + 1)
+                            return self.resolve_type(at_type_nd)
+            // Type parameter: check type_binding_syms for base_sym → resolve via sema
+            for tbi in 0..self.type_bindings_len:
+                if self.type_binding_syms.get(tbi as i64) == base_sym:
+                    // base_sym is a bound type param — use sema to resolve assoc type
+                    let sema_resolved = self.sema.resolve_type_expr_frozen(type_node)
+                    if sema_resolved > 0:
+                        let llvm_ty = self.sema_type_to_llvm(sema_resolved)
+                        if llvm_ty != 0:
+                            return llvm_ty
+                    break
+            return wl_i32_type(self.context)
+
+        // Fallback — always warn so silent miscompilation is visible
+        with_eprint(f"warning: [type-resolve] unhandled type node kind={kind} node={type_node} span={self.pool.get_start(type_node)}..{self.pool.get_end(type_node)}")
+        self.type_fallback()
+
+    fn resolve_primitive_named_type(sym: i32) -> i64:
+        if sym == self.sym_bool: return wl_i1_type(self.context)
+        if sym == self.sym_usize: return wl_i64_type(self.context)
+        if sym == self.sym_isize: return wl_i64_type(self.context)
+        if sym == self.sym_void: return wl_void_type(self.context)
+        if sym == self.sym_never: return wl_void_type(self.context)
+        if sym == self.sym_unit: return wl_i32_type(self.context)
+        let name = self.intern.resolve(sym)
+        if name == "i32": return wl_i32_type(self.context)
+        if name == "i64": return wl_i64_type(self.context)
+        if name == "i128": return wl_i128_type(self.context)
+        if name == "i16": return wl_i16_type(self.context)
+        if name == "i8": return wl_i8_type(self.context)
+        if name == "u8": return wl_i8_type(self.context)
+        if name == "u16": return wl_i16_type(self.context)
+        if name == "u32": return wl_i32_type(self.context)
+        if name == "u64": return wl_i64_type(self.context)
+        if name == "u128": return wl_i128_type(self.context)
+        if name == "f64": return wl_f64_type(self.context)
+        if name == "f32": return wl_f32_type(self.context)
+        0
+
+    fn resolve_user_named_type(sym: i32) -> i64:
+        let de_opt = self.disc_enum_type_map.get(sym)
+        if de_opt.is_some():
+            let de_idx = de_opt.unwrap()
+            if de_idx >= 0 and de_idx < self.disc_enum_has_payload.len() as i32:
+                if self.disc_enum_has_payload.get(de_idx as i64) == 0:
+                    return self.disc_enum_repr_types.get(de_idx as i64)
+        // User-defined struct types
+        let st_opt = self.struct_type_map.get(sym)
+        if st_opt.is_some():
+            let idx = st_opt.unwrap()
+            // Bitpacked structs: return the iN backing type
+            let bp_ty = self.bitpacked_backing_types.get(idx)
+            if bp_ty.is_some():
+                return bp_ty.unwrap()
+            return self.struct_llvm_types.get(idx as i64)
+        // User-defined enum types
+        let et_opt = self.enum_type_map.get(sym)
+        if et_opt.is_some():
+            let idx = et_opt.unwrap()
+            return self.enum_llvm_types.get(idx as i64)
+        // Type aliases
+        let al_opt = self.type_aliases.get(sym)
+        if al_opt.is_some():
+            return al_opt.unwrap() as i64
+        // Check active type bindings (monomorphization)
+        for i in 0..self.type_bindings_len:
+            let binding_sym = self.type_binding_syms.get(i as i64)
+            let want_text = self.intern.resolve(sym)
+            let binding_text = self.intern.resolve(binding_sym)
+            let sema_want_text = if want_text.len() > 0: want_text else: self.sema_symbol_text(sym)
+            let sema_binding_text = if binding_text.len() > 0: binding_text else: self.sema_symbol_text(binding_sym)
+            if binding_sym == sym or (sema_want_text.len() > 0 and sema_want_text == sema_binding_text):
+                return self.type_binding_types.get(i as i64)
+        // Unsupported
+        0
+
+    fn resolve_named_type(sym: i32) -> i64:
+        // Resolve Self to current method owner type
+        if sym == self.sym_Self and self.current_method_owner_sym != 0:
+            return self.resolve_user_named_type(self.current_method_owner_sym)
+        let prim = self.resolve_primitive_named_type(sym)
         if prim != 0:
             return prim
-        if self.sema.named_types.contains(lookup_sym):
-            return self.sema.named_types.get(lookup_sym).unwrap() as i32
-        let llvm_ty = self.resolve_named_type(sym)
-        if llvm_ty != 0:
-            return self.llvm_type_to_sema_type(llvm_ty)
-        return 0
-    if kind == NodeKind.NK_TYPE_PTR or kind == NodeKind.NK_TYPE_REF or kind == NodeKind.NK_TYPE_SLICE or kind == NodeKind.NK_TYPE_OPTIONAL:
-        let inner = self.type_expr_to_sema_type(self.pool.get_data0(type_node))
-        if inner == 0:
+        self.resolve_user_named_type(sym)
+
+    mut fn type_expr_to_sema_type(type_node: i32) -> i32:
+        if type_node == 0:
+            return self.sema.ty_void as i32
+        let kind = self.pool.kind(type_node)
+        if kind == NodeKind.NK_IDENT or kind == NodeKind.NK_TYPE_NAMED:
+            let sym = self.pool.get_data0(type_node)
+            let name = self.codegen_symbol_text(sym)
+            let sema_sym = if name.len() > 0: self.sema.pool_lookup_symbol(name) else: 0
+            let lookup_sym = if sema_sym != 0: sema_sym else: sym
+            let prim = self.sema.primitive_type_by_sym(lookup_sym)
+            if prim != 0:
+                return prim
+            if self.sema.named_types.contains(lookup_sym):
+                return self.sema.named_types.get(lookup_sym).unwrap() as i32
+            let llvm_ty = self.resolve_named_type(sym)
+            if llvm_ty != 0:
+                return self.llvm_type_to_sema_type(llvm_ty)
             return 0
-        if kind == NodeKind.NK_TYPE_PTR:
-            return self.sema.find_exact_type(TypeKind.TY_PTR, inner, self.pool.get_data1(type_node), self.pool.get_data2(type_node)) as i32
-        if kind == NodeKind.NK_TYPE_REF:
-            return self.sema.find_exact_type(TypeKind.TY_REF, inner, self.pool.get_data1(type_node), 0) as i32
-        if kind == NodeKind.NK_TYPE_SLICE:
-            return self.sema.find_exact_type(TypeKind.TY_SLICE, inner, self.pool.get_data1(type_node), 0) as i32
-        let option_sym = self.sema.pool_lookup_symbol("Option")
-        if option_sym != 0:
-            let args: Vec[i32] = Vec.new()
-            args.push(inner)
-            return self.sema.find_generic_inst_type(option_sym, args, 1) as i32
-        return 0
-    if kind == NodeKind.NK_TYPE_ARRAY:
-        let elem = self.type_expr_to_sema_type(self.pool.get_data0(type_node))
-        if elem == 0:
+        if kind == NodeKind.NK_TYPE_PTR or kind == NodeKind.NK_TYPE_REF or kind == NodeKind.NK_TYPE_SLICE or kind == NodeKind.NK_TYPE_OPTIONAL:
+            let inner = self.type_expr_to_sema_type(self.pool.get_data0(type_node))
+            if inner == 0:
+                return 0
+            if kind == NodeKind.NK_TYPE_PTR:
+                return self.sema.find_exact_type(TypeKind.TY_PTR, inner, self.pool.get_data1(type_node), self.pool.get_data2(type_node)) as i32
+            if kind == NodeKind.NK_TYPE_REF:
+                return self.sema.find_exact_type(TypeKind.TY_REF, inner, self.pool.get_data1(type_node), 0) as i32
+            if kind == NodeKind.NK_TYPE_SLICE:
+                return self.sema.find_exact_type(TypeKind.TY_SLICE, inner, self.pool.get_data1(type_node), 0) as i32
+            let option_sym = self.sema.pool_lookup_symbol("Option")
+            if option_sym != 0:
+                let args: Vec[i32] = Vec.new()
+                args.push(inner)
+                return self.sema.find_generic_inst_type(option_sym, args, 1) as i32
             return 0
-        return self.sema.find_exact_type(TypeKind.TY_ARRAY, elem, self.pool.get_data1(type_node), self.pool.get_data2(type_node)) as i32
-    if kind == NodeKind.NK_TYPE_TUPLE:
-        let start = self.pool.get_data0(type_node)
-        let count = self.pool.get_data1(type_node)
-        let elems: Vec[i32] = Vec.new()
-        for ei in 0..count:
-            let elem = self.type_expr_to_sema_type(self.pool.get_extra(start + ei))
+        if kind == NodeKind.NK_TYPE_ARRAY:
+            let elem = self.type_expr_to_sema_type(self.pool.get_data0(type_node))
             if elem == 0:
                 return 0
-            elems.push(elem)
-        return self.sema.find_tuple_type(elems, count) as i32
-    if kind == NodeKind.NK_TYPE_GENERIC:
-        let raw_base = self.pool.get_data0(type_node)
-        let base_name = self.codegen_symbol_text(raw_base)
-        let sema_base = if base_name.len() > 0: self.sema.pool_lookup_symbol(base_name) else: 0
-        let base_sym = if sema_base != 0: sema_base else: raw_base
-        let arg_start = self.pool.get_data1(type_node)
-        let arg_count = self.pool.get_data2(type_node)
-        let args: Vec[i32] = Vec.new()
-        for ai in 0..arg_count:
-            let arg = self.type_expr_to_sema_type(self.pool.get_extra(arg_start + ai))
-            if arg == 0:
-                return 0
-            args.push(arg)
-        return self.sema.find_generic_inst_type(base_sym, args, arg_count) as i32
-    if kind == NodeKind.NK_INDEX:
-        return self.ast_static_type_expr(type_node)
-    0
+            return self.sema.find_exact_type(TypeKind.TY_ARRAY, elem, self.pool.get_data1(type_node), self.pool.get_data2(type_node)) as i32
+        if kind == NodeKind.NK_TYPE_TUPLE:
+            let start = self.pool.get_data0(type_node)
+            let count = self.pool.get_data1(type_node)
+            let elems: Vec[i32] = Vec.new()
+            for ei in 0..count:
+                let elem = self.type_expr_to_sema_type(self.pool.get_extra(start + ei))
+                if elem == 0:
+                    return 0
+                elems.push(elem)
+            return self.sema.find_tuple_type(elems, count) as i32
+        if kind == NodeKind.NK_TYPE_GENERIC:
+            let raw_base = self.pool.get_data0(type_node)
+            let base_name = self.codegen_symbol_text(raw_base)
+            let sema_base = if base_name.len() > 0: self.sema.pool_lookup_symbol(base_name) else: 0
+            let base_sym = if sema_base != 0: sema_base else: raw_base
+            let arg_start = self.pool.get_data1(type_node)
+            let arg_count = self.pool.get_data2(type_node)
+            let args: Vec[i32] = Vec.new()
+            for ai in 0..arg_count:
+                let arg = self.type_expr_to_sema_type(self.pool.get_extra(arg_start + ai))
+                if arg == 0:
+                    return 0
+                args.push(arg)
+            return self.sema.find_generic_inst_type(base_sym, args, arg_count) as i32
+        if kind == NodeKind.NK_INDEX:
+            return self.ast_static_type_expr(type_node)
+        0
 
-// Get sema TypeId for an expression node. Uses local_sema_types for idents.
-fn Codegen.sema_type_of_node(self: Codegen, node: i32) -> i32:
-    if node == 0:
-        return 0
-    if self.sema.typed_expr_types.contains(node):
-        let typed = self.sema.typed_expr_types.get(node).unwrap()
-        if typed > 0:
-            return typed
-    let nk = self.pool.kind(node)
-    if nk == NodeKind.NK_IDENT:
-        let sym = self.pool.get_data0(node)
-        let opt = self.local_sema_types.get(sym)
-        if opt.is_some():
-            return opt.unwrap()
-        let canon = self.canonical_local_sym(sym)
-        if canon != 0 and canon != sym:
-            let canon_opt = self.local_sema_types.get(canon)
-            if canon_opt.is_some():
-                return canon_opt.unwrap()
-    if nk == NodeKind.NK_UNARY:
-        let op = self.pool.get_data0(node)
-        if op == UnaryOp.UOP_REF or op == UnaryOp.UOP_RAW_REF_CONST or op == UnaryOp.UOP_RAW_REF_MUT:
-            let inner_ty = self.sema_type_of_node(self.pool.get_data1(node))
-            if inner_ty > 0:
-                if op == UnaryOp.UOP_REF:
-                    return self.sema.find_exact_type(TypeKind.TY_REF, inner_ty, 0, 0) as i32
-                let is_mut = if op == UnaryOp.UOP_RAW_REF_MUT: 1 else: 0
-                return self.sema.find_exact_type(TypeKind.TY_PTR, inner_ty, is_mut, 0) as i32
-    // Literal types
-    if nk == NodeKind.NK_STRING_LIT:
-        return self.sema.ty_str as i32
-    if nk == NodeKind.NK_FSTRING:
-        return self.sema.ty_str as i32
-    if nk == NodeKind.NK_INT_LIT:
-        let suffix_ty = self.sema.literal_suffix_type(self.pool.literal_suffix(node as NodeId))
-        if suffix_ty != 0:
-            return suffix_ty
-        let fast = self.pool.int_literal_fast_i64(node as NodeId)
-        if fast.ok != 0 and (fast.value < -2147483648 or fast.value > 2147483647):
-            return self.sema.ty_i64 as i32
-        return self.sema.ty_i32 as i32
-    if nk == NodeKind.NK_FLOAT_LIT:
-        return self.sema.ty_f64 as i32
-    if nk == NodeKind.NK_BOOL_LIT:
-        return self.sema.ty_bool as i32
-    0
-
-// Extract LLVM type of the i'th generic arg from a sema TypeKind.TY_GENERIC_INST type.
-fn Codegen.sema_generic_arg_llvm(self: Codegen, sema_tid: i32, arg_idx: i32) -> i64:
-    if sema_tid <= 0:
-        return 0
-    if self.sema.get_type_kind(sema_tid) != TypeKind.TY_GENERIC_INST:
-        return 0
-    let ac = self.sema.get_generic_inst_arg_count(sema_tid)
-    if arg_idx >= ac:
-        return 0
-    let inner_tid = self.sema.get_generic_inst_arg(sema_tid, arg_idx)
-    self.sema_type_to_llvm(inner_tid)
-
-fn Codegen.generic_enum_payload_llvm_type(self: Codegen, payload_tys: &Vec[i32]) -> i64:
-    let count = payload_tys.len() as i32
-    if count <= 0:
-        return 0
-    if count == 1:
-        return self.sema_type_to_llvm(payload_tys.get(0))
-    let fields: Vec[i64] = Vec.new()
-    for pi in 0..count:
-        var field_ty = self.sema_type_to_llvm(payload_tys.get(pi as i64))
-        if field_ty == 0:
-            field_ty = self.type_fallback()
-        fields.push(field_ty)
-    wl_struct_type(self.context, vec_data_i64(&fields), count, 0)
-
-fn Codegen.get_or_create_generic_enum_type(self: Codegen, sema_tid: i32) -> i64:
-    let resolved = self.sema.resolve_alias(sema_tid)
-    if resolved <= 0 or self.sema.get_type_kind(resolved) != TypeKind.TY_GENERIC_INST:
-        return 0
-    let cached = self.generic_enum_inst_types.get(resolved)
-    if cached.is_some():
-        return cached.unwrap() as i64
-    let base_sym = self.sema.get_generic_inst_base(resolved)
-    if base_sym == 0 or not self.sema.named_types.contains(base_sym):
-        return 0
-    let base_tid = self.sema.named_types.get(base_sym).unwrap()
-    if self.sema.get_type_kind(base_tid) != TypeKind.TY_ENUM:
-        return 0
-    let cg_base_sym = self.sema_sym_to_codegen_sym(base_sym)
-    if cg_base_sym == 0:
-        return 0
-
-    let base_name = self.sema_symbol_text(base_sym)
-    let enum_name = if base_name.len() > 0: base_name else: self.intern.resolve(cg_base_sym)
-    let mono_name = f"{enum_name}__enuminst_{resolved}"
-    let mono_sym = self.intern.intern(mono_name)
-    let enum_type = wl_struct_create_named(self.context, mono_name)
-    let enum_idx = self.enum_llvm_types.len() as i32
-    self.enum_llvm_types.push(enum_type)
-    self.enum_variant_starts.push(self.enum_variant_names.len() as i32)
-    self.enum_variant_counts.push(0)
-    self.enum_type_map.insert(mono_sym, enum_idx)
-    self.enum_by_llvm.insert(enum_type, mono_sym)
-    self.generic_enum_inst_types.insert(resolved, enum_type)
-    self.generic_enum_inst_syms.insert(resolved, mono_sym)
-
-    let owner_decl = self.generic_type_decl_node(cg_base_sym)
-    if owner_decl != 0:
-        self.mono_struct_base.insert(mono_sym, cg_base_sym)
-        let tp_count = self.type_decl_tp_count(owner_decl)
-        let tp_flat_start = self.mono_struct_tp_flat_syms.len() as i32
-        var tp_pos = self.type_decl_tp_start(owner_decl)
-        for ti in 0..tp_count:
-            let tp_sym = self.pool.get_extra(tp_pos)
-            let bound_count = self.pool.get_extra(tp_pos + 1)
-            let arg_tid = if ti < self.sema.get_generic_inst_arg_count(resolved): self.sema.get_generic_inst_arg(resolved, ti) else: 0
-            var arg_llvm = if arg_tid > 0: self.sema_type_to_llvm(arg_tid) else: 0
-            if arg_llvm == 0:
-                arg_llvm = self.type_fallback()
-            self.mono_struct_tp_flat_syms.push(tp_sym)
-            self.mono_struct_tp_flat_types.push(arg_llvm)
-            self.mono_struct_tp_flat_sema_types.push(arg_tid)
-            tp_pos = tp_pos + 2 + bound_count
-        self.mono_struct_tp_starts.insert(mono_sym, tp_flat_start)
-        self.mono_struct_tp_counts.insert(mono_sym, tp_count)
-
-    let te_start = self.sema.get_type_d1(base_tid)
-    let variant_count = self.sema.get_type_d2(base_tid)
-    let v_start = self.enum_variant_names.len() as i32
-    var pos = te_start
-    var max_payload_size: i64 = 0
-    var invalid_layout = 0
-    for vi in 0..variant_count:
-        let variant_name = self.sema.type_extra.get(pos as i64)
-        let payload_count = self.sema.type_extra.get((pos + 1) as i64)
-        var payload_ty: i64 = 0
-        if payload_count > 0:
-            let payload_tys = self.sema.resolve_generic_enum_payload(resolved, base_sym, variant_name, payload_count)
-            if payload_tys.len() as i32 == payload_count:
-                payload_ty = self.generic_enum_payload_llvm_type(&payload_tys)
-            if payload_ty == 0:
-                with_eprint("error: unresolved payload type for generic enum variant '" ++ self.sema_symbol_text(variant_name) ++ "' in '" ++ mono_name ++ "'")
-                self.had_error = 1
-                invalid_layout = 1
-            else:
-                let sz = self.abi_size_of(payload_ty)
-                if sz > max_payload_size:
-                    max_payload_size = sz
-        let cg_variant_name = self.sema_sym_to_codegen_sym(variant_name)
-        self.enum_variant_names.push(if cg_variant_name != 0: cg_variant_name else: variant_name)
-        self.enum_variant_payloads.push(payload_ty)
-        pos = pos + 2 + payload_count
-
-    if invalid_layout != 0:
-        return 0
-
-    let body: Vec[i64] = Vec.new()
-    body.push(wl_i32_type(self.context))
-    if max_payload_size > 0:
-        body.push(wl_array_type(wl_i8_type(self.context), max_payload_size))
-    wl_struct_set_body(enum_type, vec_data_i64(&body), body.len() as i32, 0)
-    self.enum_variant_starts.set_i32(enum_idx as i64, v_start)
-    self.enum_variant_counts.set_i32(enum_idx as i64, variant_count)
-    enum_type
-
-fn Codegen.mono_struct_sema_type(self: Codegen, mono_sym: i32) -> i32:
-    let mono_base_opt = self.mono_struct_base.get(mono_sym)
-    let tp_start_opt = self.mono_struct_tp_starts.get(mono_sym)
-    let tp_count_opt = self.mono_struct_tp_counts.get(mono_sym)
-    if not mono_base_opt.is_some() or not tp_start_opt.is_some() or not tp_count_opt.is_some():
-        return 0
-    let tp_flat_start = tp_start_opt.unwrap()
-    let tp_count = tp_count_opt.unwrap()
-    let sema_args: Vec[i32] = Vec.new()
-    for ti in 0..tp_count:
-        var arg_sema = 0
-        if tp_flat_start + ti < self.mono_struct_tp_flat_sema_types.len() as i32:
-            arg_sema = self.mono_struct_tp_flat_sema_types.get((tp_flat_start + ti) as i64)
-        if arg_sema == 0 and tp_flat_start + ti < self.mono_struct_tp_flat_types.len() as i32:
-            let arg_llvm = self.mono_struct_tp_flat_types.get((tp_flat_start + ti) as i64)
-            arg_sema = self.llvm_type_to_sema_type(arg_llvm)
-        if arg_sema == 0:
+    // Get sema TypeId for an expression node. Uses local_sema_types for idents.
+    fn sema_type_of_node(node: i32) -> i32:
+        if node == 0:
             return 0
-        sema_args.push(arg_sema)
-    let base_sym = mono_base_opt.unwrap()
-    let base_text = self.intern.resolve(base_sym)
-    let sema_base_sym = if base_text.len() > 0: self.sema.pool_lookup_symbol(base_text) else: 0
-    let found = self.sema.find_generic_inst_type(if sema_base_sym != 0: sema_base_sym else: base_sym, sema_args, tp_count)
-    if found != 0:
-        return found as i32
-    0
+        if self.sema.typed_expr_types.contains(node):
+            let typed = self.sema.typed_expr_types.get(node).unwrap()
+            if typed > 0:
+                return typed
+        let nk = self.pool.kind(node)
+        if nk == NodeKind.NK_IDENT:
+            let sym = self.pool.get_data0(node)
+            let opt = self.local_sema_types.get(sym)
+            if opt.is_some():
+                return opt.unwrap()
+            let canon = self.canonical_local_sym(sym)
+            if canon != 0 and canon != sym:
+                let canon_opt = self.local_sema_types.get(canon)
+                if canon_opt.is_some():
+                    return canon_opt.unwrap()
+        if nk == NodeKind.NK_UNARY:
+            let op = self.pool.get_data0(node)
+            if op == UnaryOp.UOP_REF or op == UnaryOp.UOP_RAW_REF_CONST or op == UnaryOp.UOP_RAW_REF_MUT:
+                let inner_ty = self.sema_type_of_node(self.pool.get_data1(node))
+                if inner_ty > 0:
+                    if op == UnaryOp.UOP_REF:
+                        return self.sema.find_exact_type(TypeKind.TY_REF, inner_ty, 0, 0) as i32
+                    let is_mut = if op == UnaryOp.UOP_RAW_REF_MUT: 1 else: 0
+                    return self.sema.find_exact_type(TypeKind.TY_PTR, inner_ty, is_mut, 0) as i32
+        // Literal types
+        if nk == NodeKind.NK_STRING_LIT:
+            return self.sema.ty_str as i32
+        if nk == NodeKind.NK_FSTRING:
+            return self.sema.ty_str as i32
+        if nk == NodeKind.NK_INT_LIT:
+            let suffix_ty = self.sema.literal_suffix_type(self.pool.literal_suffix(node as NodeId))
+            if suffix_ty != 0:
+                return suffix_ty
+            let fast = self.pool.int_literal_fast_i64(node as NodeId)
+            if fast.ok != 0 and (fast.value < -2147483648 or fast.value > 2147483647):
+                return self.sema.ty_i64 as i32
+            return self.sema.ty_i32 as i32
+        if nk == NodeKind.NK_FLOAT_LIT:
+            return self.sema.ty_f64 as i32
+        if nk == NodeKind.NK_BOOL_LIT:
+            return self.sema.ty_bool as i32
+        0
 
-fn Codegen.sema_sym_to_codegen_sym(self: Codegen, sym: i32) -> i32:
-    if sym <= 0:
-        return 0
-    let sema_text = self.sema_symbol_text(sym)
-    if sema_text.len() > 0:
-        return self.intern.intern(sema_text)
-    0
+    // Extract LLVM type of the i'th generic arg from a sema TypeKind.TY_GENERIC_INST type.
+    mut fn sema_generic_arg_llvm(sema_tid: i32, arg_idx: i32) -> i64:
+        if sema_tid <= 0:
+            return 0
+        if self.sema.get_type_kind(sema_tid) != TypeKind.TY_GENERIC_INST:
+            return 0
+        let ac = self.sema.get_generic_inst_arg_count(sema_tid)
+        if arg_idx >= ac:
+            return 0
+        let inner_tid = self.sema.get_generic_inst_arg(sema_tid, arg_idx)
+        self.sema_type_to_llvm(inner_tid)
 
-// Map sema TypeId to LLVM type. Handles TypeKind.TY_GENERIC_INST for builtin containers.
-fn Codegen.sema_type_to_llvm(self: Codegen, tid: i32) -> i64:
-    if tid <= 0:
-        return 0
-    let resolved_tid = self.sema.resolve_alias(tid)
-    let tk = self.sema.get_type_kind(resolved_tid)
-    if tk == TypeKind.TY_GENERIC_INST:
-        let base_sym = self.sema.get_type_d0(resolved_tid)
+    mut fn generic_enum_payload_llvm_type(payload_tys: &Vec[i32]) -> i64:
+        let count = payload_tys.len() as i32
+        if count <= 0:
+            return 0
+        if count == 1:
+            return self.sema_type_to_llvm(payload_tys.get(0))
+        let fields: Vec[i64] = Vec.new()
+        for pi in 0..count:
+            var field_ty = self.sema_type_to_llvm(payload_tys.get(pi as i64))
+            if field_ty == 0:
+                field_ty = self.type_fallback()
+            fields.push(field_ty)
+        wl_struct_type(self.context, vec_data_i64(&fields), count, 0)
+
+    mut fn get_or_create_generic_enum_type(sema_tid: i32) -> i64:
+        let resolved = self.sema.resolve_alias(sema_tid)
+        if resolved <= 0 or self.sema.get_type_kind(resolved) != TypeKind.TY_GENERIC_INST:
+            return 0
+        let cached = self.generic_enum_inst_types.get(resolved)
+        if cached.is_some():
+            return cached.unwrap() as i64
+        let base_sym = self.sema.get_generic_inst_base(resolved)
+        if base_sym == 0 or not self.sema.named_types.contains(base_sym):
+            return 0
+        let base_tid = self.sema.named_types.get(base_sym).unwrap()
+        if self.sema.get_type_kind(base_tid) != TypeKind.TY_ENUM:
+            return 0
         let cg_base_sym = self.sema_sym_to_codegen_sym(base_sym)
-        let arg_count = self.sema.get_generic_inst_arg_count(resolved_tid)
+        if cg_base_sym == 0:
+            return 0
+
         let base_name = self.sema_symbol_text(base_sym)
-        if base_name == "Sender" or base_name == "Receiver":
-            let ch_fields: Vec[i64] = Vec.new()
-            ch_fields.push(wl_i64_type(self.context))
-            return wl_struct_type(self.context, vec_data_i64(&ch_fields), 1, 0)
-        if self.sema.type_symbol_is_std_box(base_sym) != 0 and arg_count == 1:
-            let elem_tid = self.sema.get_generic_inst_arg(resolved_tid, 0)
-            let elem_resolved = self.sema.resolve_alias(elem_tid)
-            if self.sema.get_type_kind(elem_resolved) == TypeKind.TY_TRAIT_OBJ:
-                return self.get_dyn_fat_ptr_type()
-            return wl_ptr_type(self.context)
-        if cg_base_sym == self.sym_vec and arg_count > 0:
-            let elem_tid = self.sema.get_generic_inst_arg(resolved_tid, 0)
-            let elem_ty = self.sema_type_to_llvm(elem_tid)
-            if elem_ty != 0:
-                return self.get_or_create_vec_type(resolved_tid, elem_ty)
-        if cg_base_sym == self.sym_hashmap and arg_count > 1:
-            let key_tid = self.sema.get_generic_inst_arg(resolved_tid, 0)
-            let val_tid = self.sema.get_generic_inst_arg(resolved_tid, 1)
-            let key_ty = self.sema_type_to_llvm(key_tid)
-            let val_ty = self.sema_type_to_llvm(val_tid)
-            if key_ty != 0 and val_ty != 0:
-                return self.get_or_create_hashmap_type(resolved_tid, key_ty, val_ty)
-        if cg_base_sym == self.sym_hashset and arg_count > 0:
-            let elem_tid = self.sema.get_generic_inst_arg(resolved_tid, 0)
-            let elem_ty = self.sema_type_to_llvm(elem_tid)
-            if elem_ty != 0:
-                return self.get_or_create_hashset_type(resolved_tid, elem_ty)
-        if cg_base_sym == self.sym_slotmap and arg_count > 0:
-            let elem_tid = self.sema.get_generic_inst_arg(resolved_tid, 0)
-            let elem_ty = self.sema_type_to_llvm(elem_tid)
-            if elem_ty != 0:
-                return self.get_or_create_slotmap_type(resolved_tid, elem_ty)
-        if cg_base_sym == self.sym_handle:
-            let h_fields: Vec[i64] = Vec.new()
-            h_fields.push(wl_i32_type(self.context))
-            h_fields.push(wl_i32_type(self.context))
-            return wl_struct_type(self.context, vec_data_i64(&h_fields), 2, 0)
-        if cg_base_sym == self.sym_option and arg_count > 0:
-            let payload_tid = self.sema.get_generic_inst_arg(resolved_tid, 0)
-            let payload_ty = self.sema_type_to_llvm(payload_tid)
-            if payload_ty != 0:
-                return self.get_or_create_option_type(resolved_tid, payload_ty)
-        if cg_base_sym == self.sym_result and arg_count > 1:
-            let ok_tid = self.sema.get_generic_inst_arg(resolved_tid, 0)
-            let err_tid = self.sema.get_generic_inst_arg(resolved_tid, 1)
-            let ok_ty = self.sema_type_to_llvm(ok_tid)
-            let err_ty = self.sema_type_to_llvm(err_tid)
-            if ok_ty != 0 and err_ty != 0:
-                return self.get_or_create_result_type(resolved_tid, ok_ty, err_ty)
-        // VecSlot[T] = { data_ptr: i64, index: i64 }
-        if cg_base_sym == self.sym_vecslot:
-            let vs_fields: Vec[i64] = Vec.new()
-            vs_fields.push(wl_i64_type(self.context))
-            vs_fields.push(wl_i64_type(self.context))
-            return wl_struct_type(self.context, vec_data_i64(&vs_fields), 2, 0)
-        // SlotMapSlot[T] = { map_ptr: i64, index: u32, generation: u32 }
-        if cg_base_sym == self.sym_slotmapslot:
-            let sms_fields: Vec[i64] = Vec.new()
-            sms_fields.push(wl_i64_type(self.context))
-            sms_fields.push(wl_i32_type(self.context))
-            sms_fields.push(wl_i32_type(self.context))
-            return wl_struct_type(self.context, vec_data_i64(&sms_fields), 3, 0)
-        // VecRange[T] = { data_ptr: i64, offset: i64, len: i64 }
-        if cg_base_sym == self.sym_vecrange:
-            let vr_fields: Vec[i64] = Vec.new()
-            vr_fields.push(wl_i64_type(self.context))
-            vr_fields.push(wl_i64_type(self.context))
-            vr_fields.push(wl_i64_type(self.context))
-            return wl_struct_type(self.context, vec_data_i64(&vr_fields), 3, 0)
-        // VecIterRef[T] = { data_ptr: i64, len: i64, idx: i64 }
-        if cg_base_sym == self.sym_veciterref:
-            let vir_fields: Vec[i64] = Vec.new()
-            vir_fields.push(wl_i64_type(self.context))
-            vir_fields.push(wl_i64_type(self.context))
-            vir_fields.push(wl_i64_type(self.context))
-            return wl_struct_type(self.context, vec_data_i64(&vir_fields), 3, 0)
-        // VecIterPlace[T] = { data_ptr: i64, len: i64, idx: i64 }
-        if cg_base_sym == self.sym_veciterplace:
-            let vip_fields: Vec[i64] = Vec.new()
-            vip_fields.push(wl_i64_type(self.context))
-            vip_fields.push(wl_i64_type(self.context))
-            vip_fields.push(wl_i64_type(self.context))
-            return wl_struct_type(self.context, vec_data_i64(&vip_fields), 3, 0)
-        if base_sym != 0 and self.sema.named_types.contains(base_sym):
-            let base_tid = self.sema.named_types.get(base_sym).unwrap()
-            if self.sema.get_type_kind(base_tid) == TypeKind.TY_ENUM:
-                return self.get_or_create_generic_enum_type(resolved_tid)
-        // User-defined generic structs: monomorphize via type bindings
-        if cg_base_sym != 0 and self.generic_structs.contains(cg_base_sym):
-            let saved_len = self.type_bindings_len
-            let saved_syms = self.type_binding_syms
-            let saved_types = self.type_binding_types
-            let tp_syms: Vec[i32] = Vec.new()
-            let tp_types: Vec[i64] = Vec.new()
-            let gs_node = self.generic_structs.get(cg_base_sym).unwrap()
-            let tp_count = self.type_decl_tp_count(gs_node)
-            var tp_pos = self.type_decl_tp_start(gs_node)
+        let enum_name = if base_name.len() > 0: base_name else: self.intern.resolve(cg_base_sym)
+        let mono_name = f"{enum_name}__enuminst_{resolved}"
+        let mono_sym = self.intern.intern(mono_name)
+        let enum_type = wl_struct_create_named(self.context, mono_name)
+        let enum_idx = self.enum_llvm_types.len() as i32
+        self.enum_llvm_types.push(enum_type)
+        self.enum_variant_starts.push(self.enum_variant_names.len() as i32)
+        self.enum_variant_counts.push(0)
+        self.enum_type_map.insert(mono_sym, enum_idx)
+        self.enum_by_llvm.insert(enum_type, mono_sym)
+        self.generic_enum_inst_types.insert(resolved, enum_type)
+        self.generic_enum_inst_syms.insert(resolved, mono_sym)
+
+        let owner_decl = self.generic_type_decl_node(cg_base_sym)
+        if owner_decl != 0:
+            self.mono_struct_base.insert(mono_sym, cg_base_sym)
+            let tp_count = self.type_decl_tp_count(owner_decl)
+            let tp_flat_start = self.mono_struct_tp_flat_syms.len() as i32
+            var tp_pos = self.type_decl_tp_start(owner_decl)
             for ti in 0..tp_count:
                 let tp_sym = self.pool.get_extra(tp_pos)
-                tp_syms.push(tp_sym)
-                let bc = self.pool.get_extra(tp_pos + 1)
-                tp_pos = tp_pos + 2 + bc
-                var arg_ty: i64 = 0
-                if ti < arg_count:
-                    arg_ty = self.sema_type_to_llvm(self.sema.get_generic_inst_arg(resolved_tid, ti))
-                if arg_ty == 0:
-                    arg_ty = self.type_fallback()
-                tp_types.push(arg_ty)
-            self.type_binding_syms = tp_syms
-            self.type_binding_types = tp_types
-            self.type_bindings_len = tp_count
-            let mono_ty = self.monomorphize_struct(cg_base_sym, 0, 0)
-            self.type_bindings_len = saved_len
-            self.type_binding_syms = saved_syms
-            self.type_binding_types = saved_types
-            return mono_ty
-        return 0
-    if tk == TypeKind.TY_FLOAT:
-        let width = self.sema.get_type_d0(resolved_tid)
-        if width == 32: return wl_f32_type(self.context)
-        if width == 64: return wl_f64_type(self.context)
-        return wl_f64_type(self.context)
-    if tk == TypeKind.TY_INT:
-        let bits = self.sema.get_type_d0(resolved_tid)
-        if bits == 1:
-            return wl_i1_type(self.context)
-        if bits == 8:
-            return wl_i8_type(self.context)
-        if bits == 16:
-            return wl_i16_type(self.context)
-        if bits == 32:
-            return wl_i32_type(self.context)
-        if bits == 64:
-            return wl_i64_type(self.context)
-        if bits == 128:
-            return wl_i128_type(self.context)
-        if bits > 0:
-            // Non-standard bit width (sub-byte or custom): use LLVM arbitrary-width int
-            return wl_int_type_n(self.context, bits)
-        // bits == 0 means default-width int, which is i32
-        return wl_i32_type(self.context)
-    if tk == TypeKind.TY_BOOL:
-        return wl_i1_type(self.context)
-    if tk == TypeKind.TY_STR:
-        let str_sym = self.intern.intern("str")
-        return self.resolve_named_type(str_sym)
-    if tk == TypeKind.TY_VOID or tk == TypeKind.TY_NEVER:
-        return wl_void_type(self.context)
-    if tk == TypeKind.TY_STRUCT or tk == TypeKind.TY_ENUM:
-        let sym = self.sema.get_type_d0(resolved_tid)
-        // Distinct types are transparent: same LLVM type as inner type
-        if self.sema.distinct_type_names.contains(sym):
-            let inner_tid = self.sema.type_extra.get((self.sema.get_type_d1(resolved_tid) + 1) as i64)
-            return self.sema_type_to_llvm(inner_tid)
-        let cg_sym = self.sema_sym_to_codegen_sym(sym)
-        if cg_sym != 0:
-            return self.resolve_named_type(cg_sym)
-        return self.resolve_named_type(sym)
-    if tk == TypeKind.TY_TUPLE:
-        let elem_start = self.sema.get_type_d0(resolved_tid)
-        let elem_count = self.sema.get_type_d1(resolved_tid)
-        let elem_types: Vec[i64] = Vec.new()
-        for i in 0..elem_count:
-            let elem_tid = self.sema.type_extra.get((elem_start + i) as i64)
-            var elem_ty = self.sema_type_to_llvm(elem_tid)
-            if elem_ty == 0:
-                elem_ty = self.type_fallback()
-            elem_types.push(elem_ty)
-        if elem_count > 0:
-            return wl_struct_type(self.context, vec_data_i64(&elem_types), elem_count, 0)
-        return wl_i32_type(self.context)
-    if tk == TypeKind.TY_RANGE:
-        let elem_tid = self.sema.get_type_d0(resolved_tid)
-        var elem_ty = self.sema_type_to_llvm(elem_tid)
-        if elem_ty == 0:
-            elem_ty = wl_i32_type(self.context)
-        let range_fields: Vec[i64] = Vec.new()
-        range_fields.push(elem_ty)
-        range_fields.push(elem_ty)
-        range_fields.push(wl_i8_type(self.context))
-        return wl_struct_type(self.context, vec_data_i64(&range_fields), 3, 0)
-    if tk == TypeKind.TY_ARRAY:
-        let elem_tid = self.sema.get_type_d0(resolved_tid)
-        let arr_len = self.sema.get_type_d1(resolved_tid)
-        var elem_ty = self.sema_type_to_llvm(elem_tid)
-        if elem_ty == 0:
-            elem_ty = self.type_fallback()
-        return wl_array_type(elem_ty, arr_len as i64)
-    if tk == TypeKind.TY_PTR or tk == TypeKind.TY_REF:
-        let pointee_tid = self.sema.get_type_d0(resolved_tid)
-        let pointee_resolved = self.sema.resolve_alias(pointee_tid)
-        if self.sema.get_type_kind(pointee_resolved) == TypeKind.TY_TRAIT_OBJ:
-            return self.get_dyn_fat_ptr_type()
-        return wl_ptr_type(self.context)
-    if tk == TypeKind.TY_FN:
-        let ptr_ty = wl_ptr_type(self.context)
-        let fat_types: Vec[i64] = Vec.new()
-        fat_types.push(ptr_ty)
-        fat_types.push(ptr_ty)
-        return wl_struct_type(self.context, vec_data_i64(&fat_types), 2, 0)
-    if tk == TypeKind.TY_EXTERN_FN:
-        return wl_ptr_type(self.context)
-    if tk == TypeKind.TY_SLICE:
-        let slice_fields: Vec[i64] = Vec.new()
-        slice_fields.push(wl_ptr_type(self.context))
-        slice_fields.push(wl_i64_type(self.context))
-        return wl_struct_type(self.context, vec_data_i64(&slice_fields), 2, 0)
-    0
+                let bound_count = self.pool.get_extra(tp_pos + 1)
+                let arg_tid = if ti < self.sema.get_generic_inst_arg_count(resolved): self.sema.get_generic_inst_arg(resolved, ti) else: 0
+                var arg_llvm = if arg_tid > 0: self.sema_type_to_llvm(arg_tid) else: 0
+                if arg_llvm == 0:
+                    arg_llvm = self.type_fallback()
+                self.mono_struct_tp_flat_syms.push(tp_sym)
+                self.mono_struct_tp_flat_types.push(arg_llvm)
+                self.mono_struct_tp_flat_sema_types.push(arg_tid)
+                tp_pos = tp_pos + 2 + bound_count
+            self.mono_struct_tp_starts.insert(mono_sym, tp_flat_start)
+            self.mono_struct_tp_counts.insert(mono_sym, tp_count)
 
-// Reverse map: LLVM type → sema TypeId (for primitives and str)
-fn Codegen.llvm_type_to_sema_type(self: Codegen, ty: i64) -> i32:
-    let kind = wl_get_type_kind(ty)
-    if kind == wl_integer_type_kind():
-        let bits = wl_get_int_type_width(ty)
-        if bits == 1: return self.sema.ty_bool as i32
-        if bits == 8: return self.sema.ty_i8 as i32
-        if bits == 16: return self.sema.ty_i16 as i32
-        if bits == 32: return self.sema.ty_i32 as i32
-        if bits == 64: return self.sema.ty_i64 as i32
-        if bits == 128: return self.sema.ty_i128 as i32
-        if bits > 0:
-            return self.sema.find_exact_type(TypeKind.TY_INT, bits, 1, 0) as i32
-    if kind == wl_float_type_kind():
-        return self.sema.ty_f32 as i32
-    if kind == wl_double_type_kind():
-        return self.sema.ty_f64 as i32
-    if kind == wl_void_type_kind():
-        return self.sema.ty_void as i32
-    if ty == wl_i32_type(self.context): return self.sema.ty_i32 as i32
-    if ty == wl_i64_type(self.context): return self.sema.ty_i64 as i32
-    if ty == wl_i128_type(self.context): return self.sema.ty_i128 as i32
-    if ty == wl_i1_type(self.context): return self.sema.ty_bool as i32
-    if ty == wl_i8_type(self.context): return self.sema.ty_i8 as i32
-    if ty == wl_i16_type(self.context): return self.sema.ty_i16 as i32
-    if ty == wl_f64_type(self.context): return self.sema.ty_f64 as i32
-    if ty == wl_f32_type(self.context): return self.sema.ty_f32 as i32
-    if self.is_str_type(ty): return self.sema.ty_str as i32
-    if ty == wl_ptr_type(self.context):
-        // Could be str, ptr, or struct-by-ref — default to str
-        return self.sema.ty_str as i32
-    if kind == wl_struct_type_kind():
-        let st_sym = self.find_struct_type_by_llvm(ty)
-        if st_sym == self.sym_str:
-            return self.sema.ty_str as i32
-        if st_sym != 0:
-            if self.sema.named_types.contains(st_sym):
-                return self.sema.named_types.get(st_sym).unwrap() as i32
-            let mono_base_opt = self.mono_struct_base.get(st_sym)
-            let tp_start_opt = self.mono_struct_tp_starts.get(st_sym)
-            let tp_count_opt = self.mono_struct_tp_counts.get(st_sym)
-            if mono_base_opt.is_some() and tp_start_opt.is_some() and tp_count_opt.is_some():
-                let tp_flat_start = tp_start_opt.unwrap()
-                let tp_count = tp_count_opt.unwrap()
-                let sema_args: Vec[i32] = Vec.new()
-                for ti in 0..tp_count:
-                    var arg_sema = 0
-                    if tp_flat_start + ti < self.mono_struct_tp_flat_sema_types.len() as i32:
-                        arg_sema = self.mono_struct_tp_flat_sema_types.get((tp_flat_start + ti) as i64)
-                    if arg_sema == 0 and tp_flat_start + ti < self.mono_struct_tp_flat_types.len() as i32:
-                        let arg_llvm = self.mono_struct_tp_flat_types.get((tp_flat_start + ti) as i64)
-                        arg_sema = self.llvm_type_to_sema_type(arg_llvm)
-                    if arg_sema == 0:
-                        return 0
-                    sema_args.push(arg_sema)
-                let found = self.sema.find_generic_inst_type(mono_base_opt.unwrap(), sema_args, tp_count)
-                if found != 0:
-                    return found as i32
-        let enum_sym_opt = self.enum_by_llvm.get(ty)
-        if enum_sym_opt.is_some():
-            let enum_sym = enum_sym_opt.unwrap()
-            if self.sema.named_types.contains(enum_sym):
-                return self.sema.named_types.get(enum_sym).unwrap() as i32
-            let enum_text = self.intern.resolve(enum_sym)
-            let sema_enum_sym = if enum_text.len() > 0: self.sema.pool_lookup_symbol(enum_text) else: 0
-            if sema_enum_sym != 0 and self.sema.named_types.contains(sema_enum_sym):
-                return self.sema.named_types.get(sema_enum_sym).unwrap() as i32
-    0
-
-// ── Builtin str type ──────────────────────────────────────────────
-
-fn Codegen.declare_builtin_str_type(self: Codegen):
-    let str_sym = self.intern.intern("str")
-    // str = { i8*, i64 }
-    let str_type = wl_struct_create_named(self.context, "str")
-    wl_struct_set_body_2(str_type, wl_ptr_type(self.context), wl_i64_type(self.context), 0)
-
-    let idx = self.struct_llvm_types.len() as i32
-    self.struct_llvm_types.push(str_type)
-    self.struct_index_syms.push(str_sym)
-    self.struct_field_starts.push(self.struct_field_names.len() as i32)
-    self.struct_field_counts.push(2)
-
-    let ptr_sym = self.intern.intern("ptr")
-    let len_sym = self.intern.intern("len")
-    self.struct_field_names.push(ptr_sym)
-    self.struct_field_names.push(len_sym)
-    self.struct_field_types.push(wl_ptr_type(self.context))
-    self.struct_field_types.push(wl_i64_type(self.context))
-    self.struct_field_type_nodes.push(0)
-    self.struct_field_type_nodes.push(0)
-    self.struct_field_defaults.push(0)
-    self.struct_field_defaults.push(0)
-    self.struct_llvm_field_indices.push(0)
-    self.struct_llvm_field_indices.push(1)
-
-    self.struct_type_map.insert(str_sym, idx)
-
-fn Codegen.declare_builtin_cstr_type(self: Codegen):
-    let cstr_sym = self.intern.intern("CStr")
-    if self.struct_type_map.get(cstr_sym).is_some():
-        return
-    let cstr_type = wl_struct_create_named(self.context, "CStr")
-    wl_struct_set_body_2(cstr_type, wl_ptr_type(self.context), wl_i64_type(self.context), 0)
-
-    let idx = self.struct_llvm_types.len() as i32
-    self.struct_llvm_types.push(cstr_type)
-    self.struct_index_syms.push(cstr_sym)
-    self.struct_field_starts.push(self.struct_field_names.len() as i32)
-    self.struct_field_counts.push(2)
-
-    let ptr_sym = self.intern.intern("ptr")
-    let len_sym = self.intern.intern("len")
-    self.struct_field_names.push(ptr_sym)
-    self.struct_field_names.push(len_sym)
-    self.struct_field_types.push(wl_ptr_type(self.context))
-    self.struct_field_types.push(wl_i64_type(self.context))
-    self.struct_field_type_nodes.push(0)
-    self.struct_field_type_nodes.push(0)
-    self.struct_field_defaults.push(0)
-    self.struct_field_defaults.push(0)
-    self.struct_llvm_field_indices.push(0)
-    self.struct_llvm_field_indices.push(1)
-
-    self.struct_type_map.insert(cstr_sym, idx)
-
-fn Codegen.predeclare_struct_type(self: Codegen, name_sym: i32):
-    if self.struct_type_map.get(name_sym).is_some():
-        return
-    let name_str = self.intern.resolve(name_sym)
-    let st_type = wl_struct_create_named(self.context, name_str)
-    let idx = self.struct_llvm_types.len() as i32
-    self.struct_llvm_types.push(st_type)
-    self.struct_index_syms.push(name_sym)
-    self.struct_field_starts.push(0)
-    self.struct_field_counts.push(0)
-    self.struct_type_map.insert(name_sym, idx)
-
-fn Codegen.codegen_sym_for_sema_sym(self: Codegen, sema_sym: i32) -> i32:
-    let text = self.sema_symbol_text(sema_sym)
-    if text.len() > 0:
-        return self.intern.intern(text)
-    sema_sym
-
-fn Codegen.codegen_resolve_sema_type(self: Codegen, tid: i32) -> i32:
-    let resolved = self.mir_input.mir_resolve_alias(tid)
-    if resolved > 0 and self.mir_input.mir_get_type_kind(resolved) != 0:
-        return resolved
-    self.sema.resolve_alias(tid as TypeId) as i32
-
-fn Codegen.codegen_get_type_kind(self: Codegen, tid: i32) -> i32:
-    if tid >= 0 and tid < self.mir_input.sema_type_kinds.len() as i32:
-        return self.mir_input.mir_get_type_kind(tid)
-    self.sema.get_type_kind(tid)
-
-fn Codegen.codegen_get_type_d0(self: Codegen, tid: i32) -> i32:
-    if tid >= 0 and tid < self.mir_input.sema_type_d0.len() as i32:
-        return self.mir_input.mir_get_type_d0(tid)
-    self.sema.get_type_d0(tid)
-
-fn Codegen.codegen_get_type_d1(self: Codegen, tid: i32) -> i32:
-    if tid >= 0 and tid < self.mir_input.sema_type_d1.len() as i32:
-        return self.mir_input.mir_get_type_d1(tid)
-    self.sema.get_type_d1(tid)
-
-fn Codegen.codegen_get_type_d2(self: Codegen, tid: i32) -> i32:
-    if tid >= 0 and tid < self.mir_input.sema_type_d2.len() as i32:
-        return self.mir_input.mir_get_type_d2(tid)
-    self.sema.get_type_d2(tid)
-
-fn Codegen.codegen_get_type_extra(self: Codegen, idx: i32) -> i32:
-    if idx >= 0 and idx < self.mir_input.sema_type_extra.len() as i32:
-        return self.mir_input.mir_get_type_extra(idx)
-    if idx >= 0 and idx < self.sema.type_extra.len() as i32:
-        return self.sema.type_extra.get(idx as i64)
-    0
-
-fn Codegen.codegen_generator_state_field_count(self: Codegen, state_tid: i32) -> i32:
-    if self.sema.generator_state_field_counts.contains(state_tid):
-        return self.sema.generator_state_field_counts.get(state_tid).unwrap()
-    self.codegen_get_type_d2(state_tid)
-
-fn Codegen.codegen_generator_state_field_sym(self: Codegen, state_tid: i32, field_i: i32, extra_start: i32) -> i32:
-    let key = sema_pair_key(state_tid, field_i)
-    if self.sema.generator_state_field_names.contains(key):
-        return self.sema.generator_state_field_names.get(key).unwrap()
-    self.codegen_get_type_extra(extra_start + field_i * 3)
-
-fn Codegen.codegen_generator_state_field_type(self: Codegen, state_tid: i32, field_i: i32, extra_start: i32) -> i32:
-    let key = sema_pair_key(state_tid, field_i)
-    if self.sema.generator_state_field_types.contains(key):
-        return self.sema.generator_state_field_types.get(key).unwrap()
-    self.codegen_get_type_extra(extra_start + field_i * 3 + 1)
-
-fn Codegen.predeclare_generator_state_types(self: Codegen):
-    for si in 0..self.sema.sig_names.len() as i32:
-        let fn_sym = self.sema.sig_names.get(si as i64)
-        if not self.sema.generator_fn_state_types.contains(fn_sym):
-            continue
-        let state_tid = self.sema.generator_fn_state_types.get(fn_sym).unwrap()
-        let resolved = self.codegen_resolve_sema_type(state_tid)
-        if resolved <= 0 or self.codegen_get_type_kind(resolved) != TypeKind.TY_STRUCT:
-            continue
-        let state_sym = self.codegen_get_type_d0(resolved)
-        let cg_state_sym = self.codegen_sym_for_sema_sym(state_sym)
-        self.predeclare_struct_type(cg_state_sym)
-
-fn Codegen.declare_generator_state_type(self: Codegen, state_tid: i32):
-    let resolved = self.codegen_resolve_sema_type(state_tid)
-    if resolved <= 0 or self.codegen_get_type_kind(resolved) != TypeKind.TY_STRUCT:
-        return
-    let state_sym = self.codegen_get_type_d0(resolved)
-    let cg_state_sym = self.codegen_sym_for_sema_sym(state_sym)
-    if not self.struct_type_map.get(cg_state_sym).is_some():
-        self.predeclare_struct_type(cg_state_sym)
-    let idx = self.struct_type_map.get(cg_state_sym).unwrap()
-    let existing_count = self.struct_field_counts.get(idx as i64)
-    if existing_count > 0:
-        return
-    let st_type = self.struct_llvm_types.get(idx as i64)
-    let extra_start = self.codegen_get_type_d1(resolved)
-    let field_count = self.codegen_generator_state_field_count(resolved)
-    self.struct_field_starts.set_i32(idx as i64, self.struct_field_names.len() as i32)
-    self.struct_field_counts.set_i32(idx as i64, field_count)
-
-    let field_types: Vec[i64] = Vec.new()
-    for fi in 0..field_count:
-        let field_sym = self.codegen_generator_state_field_sym(resolved, fi, extra_start)
-        let field_tid = self.codegen_generator_state_field_type(resolved, fi, extra_start)
-        var field_ty = self.mir_sema_type_to_llvm(field_tid)
-        if field_ty == 0:
-            field_ty = self.type_fallback()
-        self.struct_field_names.push(field_sym)
-        self.struct_field_types.push(field_ty)
-        self.struct_field_type_nodes.push(0)
-        self.struct_field_defaults.push(0)
-        self.struct_llvm_field_indices.push(fi)
-        field_types.push(field_ty)
-    wl_struct_set_body(st_type, vec_data_i64(&field_types), field_count, 0)
-
-fn Codegen.declare_generator_state_types(self: Codegen):
-    for si in 0..self.sema.sig_names.len() as i32:
-        let fn_sym = self.sema.sig_names.get(si as i64)
-        if self.sema.generator_fn_state_types.contains(fn_sym):
-            self.declare_generator_state_type(self.sema.generator_fn_state_types.get(fn_sym).unwrap())
-
-fn Codegen.predeclare_enum_type(self: Codegen, name_sym: i32):
-    if self.enum_type_map.get(name_sym).is_some():
-        return
-    let name_str = self.intern.resolve(name_sym)
-    let enum_type = wl_struct_create_named(self.context, name_str)
-    let idx = self.enum_llvm_types.len() as i32
-    self.enum_llvm_types.push(enum_type)
-    self.enum_variant_starts.push(0)
-    self.enum_variant_counts.push(0)
-    self.enum_type_map.insert(name_sym, idx)
-    self.enum_by_llvm.insert(enum_type, name_sym)
-
-fn Codegen.type_decl_tp_meta_start(self: Codegen, type_node: i32) -> i32:
-    let extra_start = self.pool.get_data1(type_node)
-    let sub_kind = type_decl_sub_kind(self.pool.get_data2(type_node))
-    if sub_kind == TypeDeclKind.Struct:
-        let field_count = self.pool.get_extra(extra_start)
-        return extra_start + 1 + field_count * 4 + 1
-    if sub_kind == TypeDeclKind.Enum:
-        let variant_count = self.pool.get_extra(extra_start)
-        var pos = extra_start + 1
+        let te_start = self.sema.get_type_d1(base_tid)
+        let variant_count = self.sema.get_type_d2(base_tid)
+        let v_start = self.enum_variant_names.len() as i32
+        var pos = te_start
+        var max_payload_size: i64 = 0
+        var invalid_layout = 0
         for vi in 0..variant_count:
-            pos = pos + 1 // variant name
-            let payload_count = self.pool.get_extra(pos)
-            pos = pos + 1 + payload_count
-        return pos + 1
-    if sub_kind == TypeDeclKind.DiscEnum:
-        let variant_count = self.pool.get_extra(extra_start + 1)
-        var pos = extra_start + 2
-        for vi in 0..variant_count:
-            pos = pos + 1 // variant name
-            pos = pos + 1 // disc value
-            let payload_count = self.pool.get_extra(pos)
-            pos = pos + 1 + payload_count
-        return pos + 1
-    if sub_kind == TypeDeclKind.Alias or sub_kind == TypeDeclKind.Distinct:
-        return extra_start + 2
-    -1
-
-fn Codegen.type_decl_tp_start(self: Codegen, type_node: i32) -> i32:
-    let meta_start = self.type_decl_tp_meta_start(type_node)
-    if meta_start < 0:
-        return 0
-    if meta_start >= self.pool.extra_len():
-        return 0
-    self.pool.get_extra(meta_start)
-
-fn Codegen.type_decl_tp_count(self: Codegen, type_node: i32) -> i32:
-    let meta_start = self.type_decl_tp_meta_start(type_node)
-    if meta_start < 0:
-        return 0
-    if meta_start + 1 >= self.pool.extra_len():
-        return 0
-    self.pool.get_extra(meta_start + 1)
-
-fn Codegen.generic_type_decl_node(self: Codegen, type_sym: i32) -> i32:
-    if type_sym <= 0:
-        return 0
-    let gs = self.generic_structs.get(type_sym)
-    if gs.is_some():
-        return gs.unwrap()
-    for di in 0..self.pool.decl_count():
-        let decl = self.pool.get_decl(di)
-        if self.pool.kind(decl) != NodeKind.NK_TYPE_DECL:
-            continue
-        let decl_sym = self.pool.get_data0(decl)
-        if decl_sym != type_sym:
-            let decl_name_raw = self.intern.resolve(decl_sym)
-            let decl_name = if decl_name_raw.len() > 0: decl_name_raw else: self.sema_symbol_text(decl_sym)
-            let type_name_raw = self.intern.resolve(type_sym)
-            let type_name = if type_name_raw.len() > 0: type_name_raw else: self.sema_symbol_text(type_sym)
-            if decl_name.len() == 0 or type_name.len() == 0 or decl_name != type_name:
-                continue
-        let sub_kind = type_decl_sub_kind(self.pool.get_data2(decl))
-        if sub_kind != TypeDeclKind.Struct and sub_kind != TypeDeclKind.Enum:
-            return 0
-        if self.type_decl_tp_count(decl) > 0:
-            return decl as i32
-        return 0
-    0
-
-// ── Declare struct type ───────────────────────────────────────────
-
-fn Codegen.declare_struct_type(self: Codegen, name_sym: i32, type_node: i32):
-    // type_node is the NodeKind.NK_TYPE_DECL node with TypeDeclSubKind.TDK_STRUCT
-    let extra_start = self.pool.get_data1(type_node)
-    let field_count = self.pool.get_extra(extra_start)
-
-    let name_str = self.intern.resolve(name_sym)
-    if not self.struct_type_map.get(name_sym).is_some():
-        self.predeclare_struct_type(name_sym)
-    let idx = self.struct_type_map.get(name_sym).unwrap()
-    let st_type = self.struct_llvm_types.get(idx as i64)
-    self.struct_field_starts.set_i32(idx as i64, self.struct_field_names.len() as i32)
-    self.struct_field_counts.set_i32(idx as i64, field_count)
-
-    // Parse fields: [field_name, field_type, field_default]*
-    let ft_vec: Vec[i64] = Vec.new()
-    var invalid_layout = 0
-    for fi in 0..field_count:
-        let offset = extra_start + 1 + fi * 3
-        let f_name = self.pool.get_extra(offset)
-        let f_type_node = self.pool.get_extra(offset + 1)
-        let f_default = self.pool.get_extra(offset + 2)
-        let f_ty = self.resolve_type(f_type_node)
-        self.debug_type_layout_field(name_str, fi, f_name, f_type_node, f_ty)
-
-        if f_ty == 0:
-            with_eprint("error: unresolved type for field '" ++ self.intern.resolve(f_name) ++ "' in struct '" ++ name_str ++ "'")
-            invalid_layout = 1
-            self.had_error = 1
-        if f_ty == st_type:
-            with_eprint("error: recursive value field '" ++ self.intern.resolve(f_name) ++ "' in struct '" ++ name_str ++ "' (use pointer or reference)")
-            invalid_layout = 1
-            self.had_error = 1
-        let dep_idx = self.find_struct_index_by_type(f_ty)
-        if dep_idx >= 0 and dep_idx != idx and self.struct_reaches_type(dep_idx, st_type):
-            with_eprint("error: recursive value-cycle detected while lowering struct '" ++ name_str ++ "'")
-            invalid_layout = 1
-            self.had_error = 1
-
-        self.struct_field_names.push(f_name)
-        self.struct_field_types.push(f_ty)
-        self.struct_field_type_nodes.push(f_type_node)
-        self.struct_field_defaults.push(f_default)
-        ft_vec.push(f_ty)
-
-    if invalid_layout != 0:
-        // Push identity mapping for error case
-        for fi in 0..field_count:
-            self.struct_llvm_field_indices.push(fi)
-        return
-
-    // Read alignment array from AST extras
-    let align_base = extra_start + 1 + field_count * 3
-    var has_alignment = false
-    for fi in 0..field_count:
-        if self.pool.get_extra(align_base + fi) != 0:
-            has_alignment = true
-            break
-
-    let packed_kind = self.pool.get_data2(type_node)
-    let is_packed = type_decl_is_packed(packed_kind)
-    let is_bitpacked = type_decl_is_bitpacked(packed_kind)
-
-    if is_bitpacked:
-        // Bitpacked struct: store as iN where N = sum of field bit widths.
-        // Fields are packed MSB-first with no gaps.
-        var total_bits: i32 = 0
-        let bp_field_start = self.bitpacked_field_bit_offsets.len() as i32
-        for fi in 0..field_count:
-            let f_ty = ft_vec.get(fi as i64)
-            var field_bits: i32 = 0
-            let f_tk = wl_get_type_kind(f_ty)
-            if f_tk == wl_integer_type_kind():
-                field_bits = wl_get_int_type_width(f_ty)
-            else if self.is_bitpacked_struct(f_ty):
-                // Nested bitpacked struct: inline its bits
-                let nested_idx = self.find_bitpacked_index_by_type(f_ty)
-                let nested_bits = self.bitpacked_total_bits.get(nested_idx)
-                field_bits = if nested_bits.is_some(): nested_bits.unwrap() as i32 else: (self.abi_size_of(f_ty) * 8) as i32
-            else:
-                // Non-integer field: use 8 bits per byte of ABI size
-                field_bits = (self.abi_size_of(f_ty) * 8) as i32
-            self.bitpacked_field_bit_offsets.push(total_bits)
-            self.bitpacked_field_bit_widths.push(field_bits)
-            total_bits = total_bits + field_bits
-        // Use iN as the backing type
-        let backing_ty = wl_int_type_n(self.context, total_bits)
-        self.bitpacked_structs.insert(idx, bp_field_start)
-        self.bitpacked_total_bits.insert(idx, total_bits)
-        // Store the backing integer type separately (struct_llvm_types keeps the named struct)
-        self.bitpacked_backing_types.insert(idx, backing_ty)
-        self.bitpacked_by_llvm_type.insert(backing_ty, idx)
-        // Identity field index mapping (not used for GEP but needed for bookkeeping)
-        for fi in 0..field_count:
-            self.struct_llvm_field_indices.push(fi)
-        return
-
-    if has_alignment and not is_packed:
-        // Build padded LLVM struct type (Zig-style approach).
-        // Walk fields, insert [N x i8] padding arrays between fields
-        // to match the C ABI layout specified by @[align(N)] annotations.
-        let dl = wl_get_module_data_layout(self.llmod)
-        let padded_types: Vec[i64] = Vec.new()
-        var byte_offset: i64 = 0
-        var use_packed = false
-        var max_align: i64 = 1
-
-        for fi in 0..field_count:
-            let f_ty = ft_vec.get(fi as i64)
-            let explicit_align = self.pool.get_extra(align_base + fi) as i64
-            let natural_align = if dl != 0: wl_abi_align_of(dl, f_ty) as i64 else: 1
-            let field_align = if explicit_align > 0: explicit_align else: natural_align
-            if field_align > max_align:
-                max_align = field_align
-
-            // If explicit alignment is less than natural, LLVM struct must be packed
-            if explicit_align > 0 and explicit_align < natural_align:
-                use_packed = true
-
-            // Insert padding to reach aligned offset
-            if field_align > 1 and byte_offset > 0:
-                let remainder = byte_offset % field_align
-                if remainder != 0:
-                    let pad_size = field_align - remainder
-                    padded_types.push(wl_array_type(wl_i8_type(self.context), pad_size))
-                    byte_offset = byte_offset + pad_size
-
-            // Record LLVM field index for this source field
-            self.struct_llvm_field_indices.push(padded_types.len() as i32)
-
-            padded_types.push(f_ty)
-            let f_size = if dl != 0: wl_abi_size_of(dl, f_ty) else: wl_size_of(f_ty)
-            byte_offset = byte_offset + f_size
-
-        // Tail padding to align struct size to max alignment
-        if max_align > 1:
-            let remainder = byte_offset % max_align
-            if remainder != 0:
-                let pad_size = max_align - remainder
-                padded_types.push(wl_array_type(wl_i8_type(self.context), pad_size))
-
-        let packed_flag = if use_packed: 1 else: 0
-        wl_struct_set_body(st_type, vec_data_i64(&padded_types), padded_types.len() as i32, packed_flag)
-    else:
-        // No alignment annotations — identity mapping, direct field types
-        for fi in 0..field_count:
-            self.struct_llvm_field_indices.push(fi)
-        wl_struct_set_body(st_type, vec_data_i64(&ft_vec), field_count, is_packed)
-
-// ── Declare union type ────────────────────────────────────────────
-
-fn Codegen.declare_union_type(self: Codegen, name_sym: i32, type_node: i32):
-    // Union layout: {[max_size x i8]} — all fields overlap at offset 0.
-    // Field access uses bitcast of pointer to field type.
-    let extra_start = self.pool.get_data1(type_node)
-    let field_count = self.pool.get_extra(extra_start)
-    let name_str = self.intern.resolve(name_sym)
-
-    if not self.struct_type_map.get(name_sym).is_some():
-        self.predeclare_struct_type(name_sym)
-    let idx = self.struct_type_map.get(name_sym).unwrap()
-    let st_type = self.struct_llvm_types.get(idx as i64)
-    self.struct_field_starts.set_i32(idx as i64, self.struct_field_names.len() as i32)
-    self.struct_field_counts.set_i32(idx as i64, field_count)
-
-    // Find max ABI size/alignment among all fields. LLVMSizeOf returns an
-    // LLVM constant value, not a host integer, so use Sema's layout model here.
-    var max_size: i64 = 0
-    var max_align: i64 = 1
-    var max_align_ty: i64 = 0
-    var max_align_size: i64 = 0
-    var invalid_layout = 0
-    for fi in 0..field_count:
-        let offset = extra_start + 1 + fi * 3
-        let f_name = self.pool.get_extra(offset)
-        let f_type_node = self.pool.get_extra(offset + 1)
-        let f_default = self.pool.get_extra(offset + 2)
-        let f_ty = self.resolve_type(f_type_node)
-        if f_ty == 0:
-            with_eprint("error: unresolved type for field '" ++ self.intern.resolve(f_name) ++ "' in union '" ++ name_str ++ "'")
-            invalid_layout = 1
-            self.had_error = 1
-        self.struct_field_names.push(f_name)
-        self.struct_field_types.push(f_ty)
-        self.struct_field_type_nodes.push(f_type_node)
-        self.struct_field_defaults.push(f_default)
-        self.struct_llvm_field_indices.push(0)
-        let f_tid = self.sema.resolve_type_expr(f_type_node)
-        let f_size = if f_tid > 0: self.sema.type_layout_size_of_frozen(f_tid) else: self.abi_size_of(f_ty)
-        let f_align = if f_tid > 0: self.sema.type_layout_align_of_frozen(f_tid) else: 1
-        if f_size > max_size:
-            max_size = f_size
-        if f_align > max_align:
-            max_align = f_align
-            max_align_ty = f_ty
-            max_align_size = f_size
-
-    if invalid_layout != 0:
-        return
-
-    if max_align_ty == 0:
-        max_align_ty = wl_i8_type(self.context)
-        max_align_size = 1
-    if max_align_size <= 0:
-        max_align_size = 1
-    if max_align <= 0:
-        max_align = 1
-    if max_size <= 0:
-        max_size = 1
-
-    let rem = max_size % max_align
-    if rem != 0:
-        max_size = max_size + (max_align - rem)
-
-    let body: Vec[i64] = Vec.new()
-    body.push(max_align_ty)
-    if max_size > max_align_size:
-        body.push(wl_array_type(wl_i8_type(self.context), max_size - max_align_size))
-    wl_struct_set_body(st_type, vec_data_i64(&body), body.len() as i32, 0)
-
-// ── Declare enum type ─────────────────────────────────────────────
-
-fn Codegen.declare_enum_type(self: Codegen, name_sym: i32, type_node: i32):
-    let extra_start = self.pool.get_data1(type_node)
-    let variant_count = self.pool.get_extra(extra_start)
-    let enum_name = self.intern.resolve(name_sym)
-
-    // Find the largest payload to determine enum struct size.
-    // Enum is { i32 tag, [N x i8] payload }.
-    var max_payload_size: i64 = 0
-    var invalid_layout = 0
-    let v_starts = self.enum_variant_names.len() as i32
-    var offset = extra_start + 1
-    for vi in 0..variant_count:
-        let v_name = self.pool.get_extra(offset)
-        let v_payload_count = self.pool.get_extra(offset + 1)
-        offset = offset + 2
-        var payload_ty: i64 = 0
-        if v_payload_count > 0:
-            // Build all payload field types into a struct
-            let payload_fields: Vec[i64] = Vec.new()
-            for pi in 0..v_payload_count:
-                let payload_type_node = self.pool.get_extra(offset + pi)
-                let field_ty = self.resolve_type(payload_type_node)
-                if field_ty == 0:
-                    with_eprint("error: unresolved payload type for enum variant '" ++ self.intern.resolve(v_name) ++ "' in '" ++ enum_name ++ "'")
+            let variant_name = self.sema.type_extra.get(pos as i64)
+            let payload_count = self.sema.type_extra.get((pos + 1) as i64)
+            var payload_ty: i64 = 0
+            if payload_count > 0:
+                let payload_tys = self.sema.resolve_generic_enum_payload_frozen(resolved, base_sym, variant_name, payload_count)
+                if payload_tys.len() as i32 == payload_count:
+                    payload_ty = self.generic_enum_payload_llvm_type(&payload_tys)
+                if payload_ty == 0:
+                    with_eprint("error: unresolved payload type for generic enum variant '" ++ self.sema_symbol_text(variant_name) ++ "' in '" ++ mono_name ++ "'")
                     self.had_error = 1
                     invalid_layout = 1
-                payload_fields.push(field_ty)
-            if invalid_layout == 0:
-                payload_ty = wl_struct_type(self.context, vec_data_i64(&payload_fields), v_payload_count, 0)
-            if payload_ty != 0:
-                let sz = self.abi_size_of(payload_ty)
-                if sz > max_payload_size:
-                    max_payload_size = sz
-            offset = offset + v_payload_count
-        self.enum_variant_names.push(v_name)
-        self.enum_variant_payloads.push(payload_ty)
+                else:
+                    let sz = self.abi_size_of(payload_ty)
+                    if sz > max_payload_size:
+                        max_payload_size = sz
+            let cg_variant_name = self.sema_sym_to_codegen_sym(variant_name)
+            self.enum_variant_names.push(if cg_variant_name != 0: cg_variant_name else: variant_name)
+            self.enum_variant_payloads.push(payload_ty)
+            pos = pos + 2 + payload_count
 
-    if invalid_layout != 0:
-        return
+        if invalid_layout != 0:
+            return 0
 
-    // Build enum struct: { i32, [N x i8] }
-    if not self.enum_type_map.get(name_sym).is_some():
-        self.predeclare_enum_type(name_sym)
-    let idx = self.enum_type_map.get(name_sym).unwrap()
-    let enum_type = self.enum_llvm_types.get(idx as i64)
-    let body: Vec[i64] = Vec.new()
-    body.push(wl_i32_type(self.context))
-    if max_payload_size > 0:
-        body.push(wl_array_type(wl_i8_type(self.context), max_payload_size))
-    wl_struct_set_body(enum_type, vec_data_i64(&body), body.len() as i32, 0)
-
-    self.enum_variant_starts.set_i32(idx as i64, v_starts)
-    self.enum_variant_counts.set_i32(idx as i64, variant_count)
-
-fn Codegen.declare_disc_enum_type(self: Codegen, name_sym: i32, type_node: i32):
-    let extra_start = self.pool.get_data1(type_node)
-    let repr_type_node = self.pool.get_extra(extra_start)
-    let variant_count = self.pool.get_extra(extra_start + 1)
-    let repr_ty = self.resolve_type(repr_type_node)
-    if repr_ty == 0:
-        return
-
-    let idx = self.disc_enum_repr_types.len() as i32
-    self.disc_enum_name_syms.push(name_sym)
-    self.disc_enum_repr_types.push(repr_ty)
-    let v_start = self.disc_enum_variant_names.len() as i32
-    self.disc_enum_variant_starts.push(v_start)
-    self.disc_enum_variant_counts.push(variant_count)
-    self.disc_enum_type_map.insert(name_sym, idx)
-
-    // First pass: collect variant info and compute max payload size
-    var max_payload_size: i64 = 0
-    var any_has_payload = 0
-    var offset = extra_start + 2
-    for vi in 0..variant_count:
-        let v_name = self.pool.get_extra(offset)
-        let disc_value = self.pool.get_extra(offset + 1)
-        let payload_count = self.pool.get_extra(offset + 2)
-        var payload_ty: i64 = 0
-        if payload_count > 0:
-            any_has_payload = 1
-            let payload_fields: Vec[i64] = Vec.new()
-            for pi in 0..payload_count:
-                let payload_type_node = self.pool.get_extra(offset + 3 + pi)
-                let field_ty = self.resolve_type(payload_type_node)
-                if field_ty != 0:
-                    payload_fields.push(field_ty)
-            if payload_fields.len() as i32 == payload_count:
-                payload_ty = wl_struct_type(self.context, vec_data_i64(&payload_fields), payload_count, 0)
-                let sz = self.abi_size_of(payload_ty)
-                if sz > max_payload_size:
-                    max_payload_size = sz
-        offset = offset + 3 + payload_count
-        self.disc_enum_variant_names.push(v_name)
-        self.disc_enum_variant_values.push(disc_value)
-        self.disc_enum_variant_payloads.push(payload_ty)
-
-    self.disc_enum_has_payload.push(any_has_payload)
-
-    // If any variant has payload, also register in the regular enum tables
-    // so the existing match payload extraction code can find the type info.
-    if any_has_payload != 0:
-        if not self.enum_type_map.get(name_sym).is_some():
-            self.predeclare_enum_type(name_sym)
-        let enum_idx = self.enum_type_map.get(name_sym).unwrap()
-        let enum_type = self.enum_llvm_types.get(enum_idx as i64)
-        // Build struct: { repr_type, [max_payload_size x i8] }
         let body: Vec[i64] = Vec.new()
-        body.push(repr_ty)
+        body.push(wl_i32_type(self.context))
         if max_payload_size > 0:
             body.push(wl_array_type(wl_i8_type(self.context), max_payload_size))
         wl_struct_set_body(enum_type, vec_data_i64(&body), body.len() as i32, 0)
-        // Register variant info in regular enum tables for payload extraction
-        let enum_v_start = self.enum_variant_names.len() as i32
-        let dv_start = v_start
-        for vi in 0..variant_count:
-            self.enum_variant_names.push(self.disc_enum_variant_names.get((dv_start + vi) as i64))
-            self.enum_variant_payloads.push(self.disc_enum_variant_payloads.get((dv_start + vi) as i64))
-        self.enum_variant_starts.set_i32(enum_idx as i64, enum_v_start)
+        self.enum_variant_starts.set_i32(enum_idx as i64, v_start)
         self.enum_variant_counts.set_i32(enum_idx as i64, variant_count)
+        enum_type
 
-fn Codegen.gen_disc_enum_from_int_val(self: Codegen, de_idx: i32, arg_val: i64) -> i64:
-    let repr_ty = self.disc_enum_repr_types.get(de_idx as i64)
-    let v_start = self.disc_enum_variant_starts.get(de_idx as i64)
-    let v_count = self.disc_enum_variant_counts.get(de_idx as i64)
-    let input = self.coerce_int(arg_val, repr_ty)
-    // Return Option[repr_type]: Some(disc_val) or None
-    // Use insertvalue to build Option values directly (no allocas in case blocks)
-    let i32_ty = wl_i32_type(self.context)
-    let opt_ty = self.get_or_create_option_type(0, repr_ty)
-    // None = { tag=1, payload=0 }
-    var none_val = wl_get_undef(opt_ty)
-    none_val = wl_build_insert_value(self.builder, none_val, wl_const_int(i32_ty, 1, 0), 0)
-    none_val = wl_build_insert_value(self.builder, none_val, wl_const_int(repr_ty, 0, 0), 1)
-    let result_alloca = self.create_entry_alloca(opt_ty)
-    wl_build_store(self.builder, none_val, result_alloca)
-    let default_bb = wl_append_bb(self.context, self.current_function, "from_int.default")
-    let end_bb = wl_append_bb(self.context, self.current_function, "from_int.end")
-    let sw = wl_build_switch(self.builder, input, default_bb, v_count)
-    for vi in 0..v_count:
-        let disc_val = self.disc_enum_variant_values.get((v_start + vi) as i64)
-        let case_bb = wl_append_bb(self.context, self.current_function, "from_int.case")
-        wl_add_case(sw, wl_const_int(repr_ty, disc_val as i64, 1), case_bb)
-        wl_position_at_end(self.builder, case_bb)
-        // Some(disc_val) = { tag=0, payload=disc_val }
-        var some_val = wl_get_undef(opt_ty)
-        some_val = wl_build_insert_value(self.builder, some_val, wl_const_int(i32_ty, 0, 0), 0)
-        some_val = wl_build_insert_value(self.builder, some_val, wl_const_int(repr_ty, disc_val as i64, 1), 1)
-        wl_build_store(self.builder, some_val, result_alloca)
+    fn mono_struct_sema_type(mono_sym: i32) -> i32:
+        let mono_base_opt = self.mono_struct_base.get(mono_sym)
+        let tp_start_opt = self.mono_struct_tp_starts.get(mono_sym)
+        let tp_count_opt = self.mono_struct_tp_counts.get(mono_sym)
+        if not mono_base_opt.is_some() or not tp_start_opt.is_some() or not tp_count_opt.is_some():
+            return 0
+        let tp_flat_start = tp_start_opt.unwrap()
+        let tp_count = tp_count_opt.unwrap()
+        let sema_args: Vec[i32] = Vec.new()
+        for ti in 0..tp_count:
+            var arg_sema = 0
+            if tp_flat_start + ti < self.mono_struct_tp_flat_sema_types.len() as i32:
+                arg_sema = self.mono_struct_tp_flat_sema_types.get((tp_flat_start + ti) as i64)
+            if arg_sema == 0 and tp_flat_start + ti < self.mono_struct_tp_flat_types.len() as i32:
+                let arg_llvm = self.mono_struct_tp_flat_types.get((tp_flat_start + ti) as i64)
+                arg_sema = self.llvm_type_to_sema_type(arg_llvm)
+            if arg_sema == 0:
+                return 0
+            sema_args.push(arg_sema)
+        let base_sym = mono_base_opt.unwrap()
+        let base_text = self.intern.resolve(base_sym)
+        let sema_base_sym = if base_text.len() > 0: self.sema.pool_lookup_symbol(base_text) else: 0
+        let found = self.sema.find_generic_inst_type(if sema_base_sym != 0: sema_base_sym else: base_sym, sema_args, tp_count)
+        if found != 0:
+            return found as i32
+        0
+
+    fn sema_sym_to_codegen_sym(sym: i32) -> i32:
+        if sym <= 0:
+            return 0
+        let sema_text = self.sema_symbol_text(sym)
+        if sema_text.len() > 0:
+            return self.intern.intern(sema_text)
+        0
+
+    // Map sema TypeId to LLVM type. Handles TypeKind.TY_GENERIC_INST for builtin containers.
+    mut fn sema_type_to_llvm(tid: i32) -> i64:
+        if tid <= 0:
+            return 0
+        let resolved_tid = self.sema.resolve_alias(tid)
+        let tk = self.sema.get_type_kind(resolved_tid)
+        if tk == TypeKind.TY_GENERIC_INST:
+            let base_sym = self.sema.get_type_d0(resolved_tid)
+            let cg_base_sym = self.sema_sym_to_codegen_sym(base_sym)
+            let arg_count = self.sema.get_generic_inst_arg_count(resolved_tid)
+            let base_name = self.sema_symbol_text(base_sym)
+            if base_name == "Sender" or base_name == "Receiver":
+                let ch_fields: Vec[i64] = Vec.new()
+                ch_fields.push(wl_i64_type(self.context))
+                return wl_struct_type(self.context, vec_data_i64(&ch_fields), 1, 0)
+            if self.sema.type_symbol_is_std_box(base_sym) != 0 and arg_count == 1:
+                let elem_tid = self.sema.get_generic_inst_arg(resolved_tid, 0)
+                let elem_resolved = self.sema.resolve_alias(elem_tid)
+                if self.sema.get_type_kind(elem_resolved) == TypeKind.TY_TRAIT_OBJ:
+                    return self.get_dyn_fat_ptr_type()
+                return wl_ptr_type(self.context)
+            if cg_base_sym == self.sym_vec and arg_count > 0:
+                let elem_tid = self.sema.get_generic_inst_arg(resolved_tid, 0)
+                let elem_ty = self.sema_type_to_llvm(elem_tid)
+                if elem_ty != 0:
+                    return self.get_or_create_vec_type(resolved_tid, elem_ty)
+            if cg_base_sym == self.sym_hashmap and arg_count > 1:
+                let key_tid = self.sema.get_generic_inst_arg(resolved_tid, 0)
+                let val_tid = self.sema.get_generic_inst_arg(resolved_tid, 1)
+                let key_ty = self.sema_type_to_llvm(key_tid)
+                let val_ty = self.sema_type_to_llvm(val_tid)
+                if key_ty != 0 and val_ty != 0:
+                    return self.get_or_create_hashmap_type(resolved_tid, key_ty, val_ty)
+            if cg_base_sym == self.sym_hashset and arg_count > 0:
+                let elem_tid = self.sema.get_generic_inst_arg(resolved_tid, 0)
+                let elem_ty = self.sema_type_to_llvm(elem_tid)
+                if elem_ty != 0:
+                    return self.get_or_create_hashset_type(resolved_tid, elem_ty)
+            if cg_base_sym == self.sym_slotmap and arg_count > 0:
+                let elem_tid = self.sema.get_generic_inst_arg(resolved_tid, 0)
+                let elem_ty = self.sema_type_to_llvm(elem_tid)
+                if elem_ty != 0:
+                    return self.get_or_create_slotmap_type(resolved_tid, elem_ty)
+            if cg_base_sym == self.sym_handle:
+                let h_fields: Vec[i64] = Vec.new()
+                h_fields.push(wl_i32_type(self.context))
+                h_fields.push(wl_i32_type(self.context))
+                return wl_struct_type(self.context, vec_data_i64(&h_fields), 2, 0)
+            if cg_base_sym == self.sym_option and arg_count > 0:
+                let payload_tid = self.sema.get_generic_inst_arg(resolved_tid, 0)
+                let payload_ty = self.sema_type_to_llvm(payload_tid)
+                if payload_ty != 0:
+                    return self.get_or_create_option_type(resolved_tid, payload_ty)
+            if cg_base_sym == self.sym_result and arg_count > 1:
+                let ok_tid = self.sema.get_generic_inst_arg(resolved_tid, 0)
+                let err_tid = self.sema.get_generic_inst_arg(resolved_tid, 1)
+                let ok_ty = self.sema_type_to_llvm(ok_tid)
+                let err_ty = self.sema_type_to_llvm(err_tid)
+                if ok_ty != 0 and err_ty != 0:
+                    return self.get_or_create_result_type(resolved_tid, ok_ty, err_ty)
+            // VecSlot[T] = { data_ptr: i64, index: i64 }
+            if cg_base_sym == self.sym_vecslot:
+                let vs_fields: Vec[i64] = Vec.new()
+                vs_fields.push(wl_i64_type(self.context))
+                vs_fields.push(wl_i64_type(self.context))
+                return wl_struct_type(self.context, vec_data_i64(&vs_fields), 2, 0)
+            // SlotMapSlot[T] = { map_ptr: i64, index: u32, generation: u32 }
+            if cg_base_sym == self.sym_slotmapslot:
+                let sms_fields: Vec[i64] = Vec.new()
+                sms_fields.push(wl_i64_type(self.context))
+                sms_fields.push(wl_i32_type(self.context))
+                sms_fields.push(wl_i32_type(self.context))
+                return wl_struct_type(self.context, vec_data_i64(&sms_fields), 3, 0)
+            // VecRange[T] = { data_ptr: i64, offset: i64, len: i64 }
+            if cg_base_sym == self.sym_vecrange:
+                let vr_fields: Vec[i64] = Vec.new()
+                vr_fields.push(wl_i64_type(self.context))
+                vr_fields.push(wl_i64_type(self.context))
+                vr_fields.push(wl_i64_type(self.context))
+                return wl_struct_type(self.context, vec_data_i64(&vr_fields), 3, 0)
+            // VecIterRef[T] = { data_ptr: i64, len: i64, idx: i64 }
+            if cg_base_sym == self.sym_veciterref:
+                let vir_fields: Vec[i64] = Vec.new()
+                vir_fields.push(wl_i64_type(self.context))
+                vir_fields.push(wl_i64_type(self.context))
+                vir_fields.push(wl_i64_type(self.context))
+                return wl_struct_type(self.context, vec_data_i64(&vir_fields), 3, 0)
+            // VecIterPlace[T] = { data_ptr: i64, len: i64, idx: i64 }
+            if cg_base_sym == self.sym_veciterplace:
+                let vip_fields: Vec[i64] = Vec.new()
+                vip_fields.push(wl_i64_type(self.context))
+                vip_fields.push(wl_i64_type(self.context))
+                vip_fields.push(wl_i64_type(self.context))
+                return wl_struct_type(self.context, vec_data_i64(&vip_fields), 3, 0)
+            if base_sym != 0 and self.sema.named_types.contains(base_sym):
+                let base_tid = self.sema.named_types.get(base_sym).unwrap()
+                if self.sema.get_type_kind(base_tid) == TypeKind.TY_ENUM:
+                    return self.get_or_create_generic_enum_type(resolved_tid)
+            // User-defined generic structs: monomorphize via type bindings
+            if cg_base_sym != 0 and self.generic_structs.contains(cg_base_sym):
+                let saved_len = self.type_bindings_len
+                let saved_syms = self.type_binding_syms
+                let saved_types = self.type_binding_types
+                let tp_syms: Vec[i32] = Vec.new()
+                let tp_types: Vec[i64] = Vec.new()
+                let gs_node = self.generic_structs.get(cg_base_sym).unwrap()
+                let tp_count = self.type_decl_tp_count(gs_node)
+                var tp_pos = self.type_decl_tp_start(gs_node)
+                for ti in 0..tp_count:
+                    let tp_sym = self.pool.get_extra(tp_pos)
+                    tp_syms.push(tp_sym)
+                    let bc = self.pool.get_extra(tp_pos + 1)
+                    tp_pos = tp_pos + 2 + bc
+                    var arg_ty: i64 = 0
+                    if ti < arg_count:
+                        arg_ty = self.sema_type_to_llvm(self.sema.get_generic_inst_arg(resolved_tid, ti))
+                    if arg_ty == 0:
+                        arg_ty = self.type_fallback()
+                    tp_types.push(arg_ty)
+                self.type_binding_syms = tp_syms
+                self.type_binding_types = tp_types
+                self.type_bindings_len = tp_count
+                let mono_ty = self.monomorphize_struct(cg_base_sym, 0, 0)
+                self.type_bindings_len = saved_len
+                self.type_binding_syms = saved_syms
+                self.type_binding_types = saved_types
+                return mono_ty
+            return 0
+        if tk == TypeKind.TY_FLOAT:
+            let width = self.sema.get_type_d0(resolved_tid)
+            if width == 32: return wl_f32_type(self.context)
+            if width == 64: return wl_f64_type(self.context)
+            return wl_f64_type(self.context)
+        if tk == TypeKind.TY_INT:
+            let bits = self.sema.get_type_d0(resolved_tid)
+            if bits == 1:
+                return wl_i1_type(self.context)
+            if bits == 8:
+                return wl_i8_type(self.context)
+            if bits == 16:
+                return wl_i16_type(self.context)
+            if bits == 32:
+                return wl_i32_type(self.context)
+            if bits == 64:
+                return wl_i64_type(self.context)
+            if bits == 128:
+                return wl_i128_type(self.context)
+            if bits > 0:
+                // Non-standard bit width (sub-byte or custom): use LLVM arbitrary-width int
+                return wl_int_type_n(self.context, bits)
+            // bits == 0 means default-width int, which is i32
+            return wl_i32_type(self.context)
+        if tk == TypeKind.TY_BOOL:
+            return wl_i1_type(self.context)
+        if tk == TypeKind.TY_STR:
+            let str_sym = self.intern.intern("str")
+            return self.resolve_named_type(str_sym)
+        if tk == TypeKind.TY_VOID or tk == TypeKind.TY_NEVER:
+            return wl_void_type(self.context)
+        if tk == TypeKind.TY_STRUCT or tk == TypeKind.TY_ENUM:
+            let sym = self.sema.get_type_d0(resolved_tid)
+            // Distinct types are transparent: same LLVM type as inner type
+            if self.sema.distinct_type_names.contains(sym):
+                let inner_tid = self.sema.type_extra.get((self.sema.get_type_d1(resolved_tid) + 1) as i64)
+                return self.sema_type_to_llvm(inner_tid)
+            let cg_sym = self.sema_sym_to_codegen_sym(sym)
+            if cg_sym != 0:
+                return self.resolve_named_type(cg_sym)
+            return self.resolve_named_type(sym)
+        if tk == TypeKind.TY_TUPLE:
+            let elem_start = self.sema.get_type_d0(resolved_tid)
+            let elem_count = self.sema.get_type_d1(resolved_tid)
+            let elem_types: Vec[i64] = Vec.new()
+            for i in 0..elem_count:
+                let elem_tid = self.sema.type_extra.get((elem_start + i) as i64)
+                var elem_ty = self.sema_type_to_llvm(elem_tid)
+                if elem_ty == 0:
+                    elem_ty = self.type_fallback()
+                elem_types.push(elem_ty)
+            if elem_count > 0:
+                return wl_struct_type(self.context, vec_data_i64(&elem_types), elem_count, 0)
+            return wl_i32_type(self.context)
+        if tk == TypeKind.TY_RANGE:
+            let elem_tid = self.sema.get_type_d0(resolved_tid)
+            var elem_ty = self.sema_type_to_llvm(elem_tid)
+            if elem_ty == 0:
+                elem_ty = wl_i32_type(self.context)
+            let range_fields: Vec[i64] = Vec.new()
+            range_fields.push(elem_ty)
+            range_fields.push(elem_ty)
+            range_fields.push(wl_i8_type(self.context))
+            return wl_struct_type(self.context, vec_data_i64(&range_fields), 3, 0)
+        if tk == TypeKind.TY_ARRAY:
+            let elem_tid = self.sema.get_type_d0(resolved_tid)
+            let arr_len = self.sema.get_type_d1(resolved_tid)
+            var elem_ty = self.sema_type_to_llvm(elem_tid)
+            if elem_ty == 0:
+                elem_ty = self.type_fallback()
+            return wl_array_type(elem_ty, arr_len as i64)
+        if tk == TypeKind.TY_PTR or tk == TypeKind.TY_REF:
+            let pointee_tid = self.sema.get_type_d0(resolved_tid)
+            let pointee_resolved = self.sema.resolve_alias(pointee_tid)
+            if self.sema.get_type_kind(pointee_resolved) == TypeKind.TY_TRAIT_OBJ:
+                return self.get_dyn_fat_ptr_type()
+            return wl_ptr_type(self.context)
+        if tk == TypeKind.TY_FN:
+            let ptr_ty = wl_ptr_type(self.context)
+            let fat_types: Vec[i64] = Vec.new()
+            fat_types.push(ptr_ty)
+            fat_types.push(ptr_ty)
+            return wl_struct_type(self.context, vec_data_i64(&fat_types), 2, 0)
+        if tk == TypeKind.TY_EXTERN_FN:
+            return wl_ptr_type(self.context)
+        if tk == TypeKind.TY_SLICE:
+            let slice_fields: Vec[i64] = Vec.new()
+            slice_fields.push(wl_ptr_type(self.context))
+            slice_fields.push(wl_i64_type(self.context))
+            return wl_struct_type(self.context, vec_data_i64(&slice_fields), 2, 0)
+        0
+
+    // Reverse map: LLVM type → sema TypeId (for primitives and str)
+    fn llvm_type_to_sema_type(ty: i64) -> i32:
+        let kind = wl_get_type_kind(ty)
+        if kind == wl_integer_type_kind():
+            let bits = wl_get_int_type_width(ty)
+            if bits == 1: return self.sema.ty_bool as i32
+            if bits == 8: return self.sema.ty_i8 as i32
+            if bits == 16: return self.sema.ty_i16 as i32
+            if bits == 32: return self.sema.ty_i32 as i32
+            if bits == 64: return self.sema.ty_i64 as i32
+            if bits == 128: return self.sema.ty_i128 as i32
+            if bits > 0:
+                return self.sema.find_exact_type(TypeKind.TY_INT, bits, 1, 0) as i32
+        if kind == wl_float_type_kind():
+            return self.sema.ty_f32 as i32
+        if kind == wl_double_type_kind():
+            return self.sema.ty_f64 as i32
+        if kind == wl_void_type_kind():
+            return self.sema.ty_void as i32
+        if ty == wl_i32_type(self.context): return self.sema.ty_i32 as i32
+        if ty == wl_i64_type(self.context): return self.sema.ty_i64 as i32
+        if ty == wl_i128_type(self.context): return self.sema.ty_i128 as i32
+        if ty == wl_i1_type(self.context): return self.sema.ty_bool as i32
+        if ty == wl_i8_type(self.context): return self.sema.ty_i8 as i32
+        if ty == wl_i16_type(self.context): return self.sema.ty_i16 as i32
+        if ty == wl_f64_type(self.context): return self.sema.ty_f64 as i32
+        if ty == wl_f32_type(self.context): return self.sema.ty_f32 as i32
+        if self.is_str_type(ty): return self.sema.ty_str as i32
+        if ty == wl_ptr_type(self.context):
+            // Could be str, ptr, or struct-by-ref — default to str
+            return self.sema.ty_str as i32
+        if kind == wl_struct_type_kind():
+            let st_sym = self.find_struct_type_by_llvm(ty)
+            if st_sym == self.sym_str:
+                return self.sema.ty_str as i32
+            if st_sym != 0:
+                if self.sema.named_types.contains(st_sym):
+                    return self.sema.named_types.get(st_sym).unwrap() as i32
+                let mono_base_opt = self.mono_struct_base.get(st_sym)
+                let tp_start_opt = self.mono_struct_tp_starts.get(st_sym)
+                let tp_count_opt = self.mono_struct_tp_counts.get(st_sym)
+                if mono_base_opt.is_some() and tp_start_opt.is_some() and tp_count_opt.is_some():
+                    let tp_flat_start = tp_start_opt.unwrap()
+                    let tp_count = tp_count_opt.unwrap()
+                    let sema_args: Vec[i32] = Vec.new()
+                    for ti in 0..tp_count:
+                        var arg_sema = 0
+                        if tp_flat_start + ti < self.mono_struct_tp_flat_sema_types.len() as i32:
+                            arg_sema = self.mono_struct_tp_flat_sema_types.get((tp_flat_start + ti) as i64)
+                        if arg_sema == 0 and tp_flat_start + ti < self.mono_struct_tp_flat_types.len() as i32:
+                            let arg_llvm = self.mono_struct_tp_flat_types.get((tp_flat_start + ti) as i64)
+                            arg_sema = self.llvm_type_to_sema_type(arg_llvm)
+                        if arg_sema == 0:
+                            return 0
+                        sema_args.push(arg_sema)
+                    let found = self.sema.find_generic_inst_type(mono_base_opt.unwrap(), sema_args, tp_count)
+                    if found != 0:
+                        return found as i32
+            let enum_sym_opt = self.enum_by_llvm.get(ty)
+            if enum_sym_opt.is_some():
+                let enum_sym = enum_sym_opt.unwrap()
+                if self.sema.named_types.contains(enum_sym):
+                    return self.sema.named_types.get(enum_sym).unwrap() as i32
+                let enum_text = self.intern.resolve(enum_sym)
+                let sema_enum_sym = if enum_text.len() > 0: self.sema.pool_lookup_symbol(enum_text) else: 0
+                if sema_enum_sym != 0 and self.sema.named_types.contains(sema_enum_sym):
+                    return self.sema.named_types.get(sema_enum_sym).unwrap() as i32
+        0
+
+    // ── Builtin str type ──────────────────────────────────────────────
+
+    fn declare_builtin_str_type():
+        let str_sym = self.intern.intern("str")
+        // str = { i8*, i64 }
+        let str_type = wl_struct_create_named(self.context, "str")
+        wl_struct_set_body_2(str_type, wl_ptr_type(self.context), wl_i64_type(self.context), 0)
+
+        let idx = self.struct_llvm_types.len() as i32
+        self.struct_llvm_types.push(str_type)
+        self.struct_index_syms.push(str_sym)
+        self.struct_field_starts.push(self.struct_field_names.len() as i32)
+        self.struct_field_counts.push(2)
+
+        let ptr_sym = self.intern.intern("ptr")
+        let len_sym = self.intern.intern("len")
+        self.struct_field_names.push(ptr_sym)
+        self.struct_field_names.push(len_sym)
+        self.struct_field_types.push(wl_ptr_type(self.context))
+        self.struct_field_types.push(wl_i64_type(self.context))
+        self.struct_field_type_nodes.push(0)
+        self.struct_field_type_nodes.push(0)
+        self.struct_field_defaults.push(0)
+        self.struct_field_defaults.push(0)
+        self.struct_llvm_field_indices.push(0)
+        self.struct_llvm_field_indices.push(1)
+
+        self.struct_type_map.insert(str_sym, idx)
+
+    fn declare_builtin_cstr_type():
+        let cstr_sym = self.intern.intern("CStr")
+        if self.struct_type_map.get(cstr_sym).is_some():
+            return
+        let cstr_type = wl_struct_create_named(self.context, "CStr")
+        wl_struct_set_body_2(cstr_type, wl_ptr_type(self.context), wl_i64_type(self.context), 0)
+
+        let idx = self.struct_llvm_types.len() as i32
+        self.struct_llvm_types.push(cstr_type)
+        self.struct_index_syms.push(cstr_sym)
+        self.struct_field_starts.push(self.struct_field_names.len() as i32)
+        self.struct_field_counts.push(2)
+
+        let ptr_sym = self.intern.intern("ptr")
+        let len_sym = self.intern.intern("len")
+        self.struct_field_names.push(ptr_sym)
+        self.struct_field_names.push(len_sym)
+        self.struct_field_types.push(wl_ptr_type(self.context))
+        self.struct_field_types.push(wl_i64_type(self.context))
+        self.struct_field_type_nodes.push(0)
+        self.struct_field_type_nodes.push(0)
+        self.struct_field_defaults.push(0)
+        self.struct_field_defaults.push(0)
+        self.struct_llvm_field_indices.push(0)
+        self.struct_llvm_field_indices.push(1)
+
+        self.struct_type_map.insert(cstr_sym, idx)
+
+    fn predeclare_struct_type(name_sym: i32):
+        if self.struct_type_map.get(name_sym).is_some():
+            return
+        let name_str = self.intern.resolve(name_sym)
+        let st_type = wl_struct_create_named(self.context, name_str)
+        let idx = self.struct_llvm_types.len() as i32
+        self.struct_llvm_types.push(st_type)
+        self.struct_index_syms.push(name_sym)
+        self.struct_field_starts.push(0)
+        self.struct_field_counts.push(0)
+        self.struct_type_map.insert(name_sym, idx)
+
+    fn codegen_sym_for_sema_sym(sema_sym: i32) -> i32:
+        let text = self.sema_symbol_text(sema_sym)
+        if text.len() > 0:
+            return self.intern.intern(text)
+        sema_sym
+
+    fn codegen_resolve_sema_type(tid: i32) -> i32:
+        let resolved = self.mir_input.mir_resolve_alias(tid)
+        if resolved > 0 and self.mir_input.mir_get_type_kind(resolved) != 0:
+            return resolved
+        self.sema.resolve_alias(tid as TypeId) as i32
+
+    fn codegen_get_type_kind(tid: i32) -> i32:
+        if tid >= 0 and tid < self.mir_input.sema_type_kinds.len() as i32:
+            return self.mir_input.mir_get_type_kind(tid)
+        self.sema.get_type_kind(tid)
+
+    fn codegen_get_type_d0(tid: i32) -> i32:
+        if tid >= 0 and tid < self.mir_input.sema_type_d0.len() as i32:
+            return self.mir_input.mir_get_type_d0(tid)
+        self.sema.get_type_d0(tid)
+
+    fn codegen_get_type_d1(tid: i32) -> i32:
+        if tid >= 0 and tid < self.mir_input.sema_type_d1.len() as i32:
+            return self.mir_input.mir_get_type_d1(tid)
+        self.sema.get_type_d1(tid)
+
+    fn codegen_get_type_d2(tid: i32) -> i32:
+        if tid >= 0 and tid < self.mir_input.sema_type_d2.len() as i32:
+            return self.mir_input.mir_get_type_d2(tid)
+        self.sema.get_type_d2(tid)
+
+    fn codegen_get_type_extra(idx: i32) -> i32:
+        if idx >= 0 and idx < self.mir_input.sema_type_extra.len() as i32:
+            return self.mir_input.mir_get_type_extra(idx)
+        if idx >= 0 and idx < self.sema.type_extra.len() as i32:
+            return self.sema.type_extra.get(idx as i64)
+        0
+
+    fn codegen_generator_state_field_count(state_tid: i32) -> i32:
+        if self.sema.generator_state_field_counts.contains(state_tid):
+            return self.sema.generator_state_field_counts.get(state_tid).unwrap()
+        self.codegen_get_type_d2(state_tid)
+
+    fn codegen_generator_state_field_sym(state_tid: i32, field_i: i32, extra_start: i32) -> i32:
+        let key = sema_pair_key(state_tid, field_i)
+        if self.sema.generator_state_field_names.contains(key):
+            return self.sema.generator_state_field_names.get(key).unwrap()
+        self.codegen_get_type_extra(extra_start + field_i * 3)
+
+    fn codegen_generator_state_field_type(state_tid: i32, field_i: i32, extra_start: i32) -> i32:
+        let key = sema_pair_key(state_tid, field_i)
+        if self.sema.generator_state_field_types.contains(key):
+            return self.sema.generator_state_field_types.get(key).unwrap()
+        self.codegen_get_type_extra(extra_start + field_i * 3 + 1)
+
+    fn predeclare_generator_state_types():
+        for si in 0..self.sema.sig_names.len() as i32:
+            let fn_sym = self.sema.sig_names.get(si as i64)
+            if not self.sema.generator_fn_state_types.contains(fn_sym):
+                continue
+            let state_tid = self.sema.generator_fn_state_types.get(fn_sym).unwrap()
+            let resolved = self.codegen_resolve_sema_type(state_tid)
+            if resolved <= 0 or self.codegen_get_type_kind(resolved) != TypeKind.TY_STRUCT:
+                continue
+            let state_sym = self.codegen_get_type_d0(resolved)
+            let cg_state_sym = self.codegen_sym_for_sema_sym(state_sym)
+            self.predeclare_struct_type(cg_state_sym)
+
+    mut fn declare_generator_state_type(state_tid: i32):
+        let resolved = self.codegen_resolve_sema_type(state_tid)
+        if resolved <= 0 or self.codegen_get_type_kind(resolved) != TypeKind.TY_STRUCT:
+            return
+        let state_sym = self.codegen_get_type_d0(resolved)
+        let cg_state_sym = self.codegen_sym_for_sema_sym(state_sym)
+        if not self.struct_type_map.get(cg_state_sym).is_some():
+            self.predeclare_struct_type(cg_state_sym)
+        let idx = self.struct_type_map.get(cg_state_sym).unwrap()
+        let existing_count = self.struct_field_counts.get(idx as i64)
+        if existing_count > 0:
+            return
+        let st_type = self.struct_llvm_types.get(idx as i64)
+        let extra_start = self.codegen_get_type_d1(resolved)
+        let field_count = self.codegen_generator_state_field_count(resolved)
+        self.struct_field_starts.set_i32(idx as i64, self.struct_field_names.len() as i32)
+        self.struct_field_counts.set_i32(idx as i64, field_count)
+
+        let field_types: Vec[i64] = Vec.new()
+        for fi in 0..field_count:
+            let field_sym = self.codegen_generator_state_field_sym(resolved, fi, extra_start)
+            let field_tid = self.codegen_generator_state_field_type(resolved, fi, extra_start)
+            var field_ty = self.mir_sema_type_to_llvm(field_tid)
+            if field_ty == 0:
+                field_ty = self.type_fallback()
+            self.struct_field_names.push(field_sym)
+            self.struct_field_types.push(field_ty)
+            self.struct_field_type_nodes.push(0)
+            self.struct_field_defaults.push(0)
+            self.struct_llvm_field_indices.push(fi)
+            field_types.push(field_ty)
+        wl_struct_set_body(st_type, vec_data_i64(&field_types), field_count, 0)
+
+    mut fn declare_generator_state_types():
+        for si in 0..self.sema.sig_names.len() as i32:
+            let fn_sym = self.sema.sig_names.get(si as i64)
+            if self.sema.generator_fn_state_types.contains(fn_sym):
+                self.declare_generator_state_type(self.sema.generator_fn_state_types.get(fn_sym).unwrap())
+
+    fn predeclare_enum_type(name_sym: i32):
+        if self.enum_type_map.get(name_sym).is_some():
+            return
+        let name_str = self.intern.resolve(name_sym)
+        let enum_type = wl_struct_create_named(self.context, name_str)
+        let idx = self.enum_llvm_types.len() as i32
+        self.enum_llvm_types.push(enum_type)
+        self.enum_variant_starts.push(0)
+        self.enum_variant_counts.push(0)
+        self.enum_type_map.insert(name_sym, idx)
+        self.enum_by_llvm.insert(enum_type, name_sym)
+
+    fn type_decl_tp_meta_start(type_node: i32) -> i32:
+        let extra_start = self.pool.get_data1(type_node)
+        let sub_kind = type_decl_sub_kind(self.pool.get_data2(type_node))
+        if sub_kind == TypeDeclKind.Struct:
+            let field_count = self.pool.get_extra(extra_start)
+            return extra_start + 1 + field_count * 4 + 1
+        if sub_kind == TypeDeclKind.Enum:
+            let variant_count = self.pool.get_extra(extra_start)
+            var pos = extra_start + 1
+            for vi in 0..variant_count:
+                pos = pos + 1 // variant name
+                let payload_count = self.pool.get_extra(pos)
+                pos = pos + 1 + payload_count
+            return pos + 1
+        if sub_kind == TypeDeclKind.DiscEnum:
+            let variant_count = self.pool.get_extra(extra_start + 1)
+            var pos = extra_start + 2
+            for vi in 0..variant_count:
+                pos = pos + 1 // variant name
+                pos = pos + 1 // disc value
+                let payload_count = self.pool.get_extra(pos)
+                pos = pos + 1 + payload_count
+            return pos + 1
+        if sub_kind == TypeDeclKind.Alias or sub_kind == TypeDeclKind.Distinct:
+            return extra_start + 2
+        -1
+
+    fn type_decl_tp_start(type_node: i32) -> i32:
+        let meta_start = self.type_decl_tp_meta_start(type_node)
+        if meta_start < 0:
+            return 0
+        if meta_start >= self.pool.extra_len():
+            return 0
+        self.pool.get_extra(meta_start)
+
+    fn type_decl_tp_count(type_node: i32) -> i32:
+        let meta_start = self.type_decl_tp_meta_start(type_node)
+        if meta_start < 0:
+            return 0
+        if meta_start + 1 >= self.pool.extra_len():
+            return 0
+        self.pool.get_extra(meta_start + 1)
+
+    fn generic_type_decl_node(type_sym: i32) -> i32:
+        if type_sym <= 0:
+            return 0
+        let gs = self.generic_structs.get(type_sym)
+        if gs.is_some():
+            return gs.unwrap()
+        for di in 0..self.pool.decl_count():
+            let decl = self.pool.get_decl(di)
+            if self.pool.kind(decl) != NodeKind.NK_TYPE_DECL:
+                continue
+            let decl_sym = self.pool.get_data0(decl)
+            if decl_sym != type_sym:
+                let decl_name_raw = self.intern.resolve(decl_sym)
+                let decl_name = if decl_name_raw.len() > 0: decl_name_raw else: self.sema_symbol_text(decl_sym)
+                let type_name_raw = self.intern.resolve(type_sym)
+                let type_name = if type_name_raw.len() > 0: type_name_raw else: self.sema_symbol_text(type_sym)
+                if decl_name.len() == 0 or type_name.len() == 0 or decl_name != type_name:
+                    continue
+            let sub_kind = type_decl_sub_kind(self.pool.get_data2(decl))
+            if sub_kind != TypeDeclKind.Struct and sub_kind != TypeDeclKind.Enum:
+                return 0
+            if self.type_decl_tp_count(decl) > 0:
+                return decl as i32
+            return 0
+        0
+
+    // ── Declare struct type ───────────────────────────────────────────
+
+    mut fn declare_struct_type(name_sym: i32, type_node: i32):
+        // type_node is the NodeKind.NK_TYPE_DECL node with TypeDeclSubKind.TDK_STRUCT
+        let extra_start = self.pool.get_data1(type_node)
+        let field_count = self.pool.get_extra(extra_start)
+
+        let name_str = self.intern.resolve(name_sym)
+        if not self.struct_type_map.get(name_sym).is_some():
+            self.predeclare_struct_type(name_sym)
+        let idx = self.struct_type_map.get(name_sym).unwrap()
+        let st_type = self.struct_llvm_types.get(idx as i64)
+        self.struct_field_starts.set_i32(idx as i64, self.struct_field_names.len() as i32)
+        self.struct_field_counts.set_i32(idx as i64, field_count)
+
+        // Parse fields: [field_name, field_type, field_default]*
+        let ft_vec: Vec[i64] = Vec.new()
+        var invalid_layout = 0
+        for fi in 0..field_count:
+            let offset = extra_start + 1 + fi * 3
+            let f_name = self.pool.get_extra(offset)
+            let f_type_node = self.pool.get_extra(offset + 1)
+            let f_default = self.pool.get_extra(offset + 2)
+            let f_ty = self.resolve_type(f_type_node)
+            self.debug_type_layout_field(name_str, fi, f_name, f_type_node, f_ty)
+
+            if f_ty == 0:
+                with_eprint("error: unresolved type for field '" ++ self.intern.resolve(f_name) ++ "' in struct '" ++ name_str ++ "'")
+                invalid_layout = 1
+                self.had_error = 1
+            if f_ty == st_type:
+                with_eprint("error: recursive value field '" ++ self.intern.resolve(f_name) ++ "' in struct '" ++ name_str ++ "' (use pointer or reference)")
+                invalid_layout = 1
+                self.had_error = 1
+            let dep_idx = self.find_struct_index_by_type(f_ty)
+            if dep_idx >= 0 and dep_idx != idx and self.struct_reaches_type(dep_idx, st_type):
+                with_eprint("error: recursive value-cycle detected while lowering struct '" ++ name_str ++ "'")
+                invalid_layout = 1
+                self.had_error = 1
+
+            self.struct_field_names.push(f_name)
+            self.struct_field_types.push(f_ty)
+            self.struct_field_type_nodes.push(f_type_node)
+            self.struct_field_defaults.push(f_default)
+            ft_vec.push(f_ty)
+
+        if invalid_layout != 0:
+            // Push identity mapping for error case
+            for fi in 0..field_count:
+                self.struct_llvm_field_indices.push(fi)
+            return
+
+        // Read alignment array from AST extras
+        let align_base = extra_start + 1 + field_count * 3
+        var has_alignment = false
+        for fi in 0..field_count:
+            if self.pool.get_extra(align_base + fi) != 0:
+                has_alignment = true
+                break
+
+        let packed_kind = self.pool.get_data2(type_node)
+        let is_packed = type_decl_is_packed(packed_kind)
+        let is_bitpacked = type_decl_is_bitpacked(packed_kind)
+
+        if is_bitpacked:
+            // Bitpacked struct: store as iN where N = sum of field bit widths.
+            // Fields are packed MSB-first with no gaps.
+            var total_bits: i32 = 0
+            let bp_field_start = self.bitpacked_field_bit_offsets.len() as i32
+            for fi in 0..field_count:
+                let f_ty = ft_vec.get(fi as i64)
+                var field_bits: i32 = 0
+                let f_tk = wl_get_type_kind(f_ty)
+                if f_tk == wl_integer_type_kind():
+                    field_bits = wl_get_int_type_width(f_ty)
+                else if self.is_bitpacked_struct(f_ty):
+                    // Nested bitpacked struct: inline its bits
+                    let nested_idx = self.find_bitpacked_index_by_type(f_ty)
+                    let nested_bits = self.bitpacked_total_bits.get(nested_idx)
+                    field_bits = if nested_bits.is_some(): nested_bits.unwrap() as i32 else: (self.abi_size_of(f_ty) * 8) as i32
+                else:
+                    // Non-integer field: use 8 bits per byte of ABI size
+                    field_bits = (self.abi_size_of(f_ty) * 8) as i32
+                self.bitpacked_field_bit_offsets.push(total_bits)
+                self.bitpacked_field_bit_widths.push(field_bits)
+                total_bits = total_bits + field_bits
+            // Use iN as the backing type
+            let backing_ty = wl_int_type_n(self.context, total_bits)
+            self.bitpacked_structs.insert(idx, bp_field_start)
+            self.bitpacked_total_bits.insert(idx, total_bits)
+            // Store the backing integer type separately (struct_llvm_types keeps the named struct)
+            self.bitpacked_backing_types.insert(idx, backing_ty)
+            self.bitpacked_by_llvm_type.insert(backing_ty, idx)
+            // Identity field index mapping (not used for GEP but needed for bookkeeping)
+            for fi in 0..field_count:
+                self.struct_llvm_field_indices.push(fi)
+            return
+
+        if has_alignment and not is_packed:
+            // Build padded LLVM struct type (Zig-style approach).
+            // Walk fields, insert [N x i8] padding arrays between fields
+            // to match the C ABI layout specified by @[align(N)] annotations.
+            let dl = wl_get_module_data_layout(self.llmod)
+            let padded_types: Vec[i64] = Vec.new()
+            var byte_offset: i64 = 0
+            var use_packed = false
+            var max_align: i64 = 1
+
+            for fi in 0..field_count:
+                let f_ty = ft_vec.get(fi as i64)
+                let explicit_align = self.pool.get_extra(align_base + fi) as i64
+                let natural_align = if dl != 0: wl_abi_align_of(dl, f_ty) as i64 else: 1
+                let field_align = if explicit_align > 0: explicit_align else: natural_align
+                if field_align > max_align:
+                    max_align = field_align
+
+                // If explicit alignment is less than natural, LLVM struct must be packed
+                if explicit_align > 0 and explicit_align < natural_align:
+                    use_packed = true
+
+                // Insert padding to reach aligned offset
+                if field_align > 1 and byte_offset > 0:
+                    let remainder = byte_offset % field_align
+                    if remainder != 0:
+                        let pad_size = field_align - remainder
+                        padded_types.push(wl_array_type(wl_i8_type(self.context), pad_size))
+                        byte_offset = byte_offset + pad_size
+
+                // Record LLVM field index for this source field
+                self.struct_llvm_field_indices.push(padded_types.len() as i32)
+
+                padded_types.push(f_ty)
+                let f_size = if dl != 0: wl_abi_size_of(dl, f_ty) else: wl_size_of(f_ty)
+                byte_offset = byte_offset + f_size
+
+            // Tail padding to align struct size to max alignment
+            if max_align > 1:
+                let remainder = byte_offset % max_align
+                if remainder != 0:
+                    let pad_size = max_align - remainder
+                    padded_types.push(wl_array_type(wl_i8_type(self.context), pad_size))
+
+            let packed_flag = if use_packed: 1 else: 0
+            wl_struct_set_body(st_type, vec_data_i64(&padded_types), padded_types.len() as i32, packed_flag)
+        else:
+            // No alignment annotations — identity mapping, direct field types
+            for fi in 0..field_count:
+                self.struct_llvm_field_indices.push(fi)
+            wl_struct_set_body(st_type, vec_data_i64(&ft_vec), field_count, is_packed)
+
+    // ── Declare union type ────────────────────────────────────────────
+
+    mut fn declare_union_type(name_sym: i32, type_node: i32):
+        // Union layout: {[max_size x i8]} — all fields overlap at offset 0.
+        // Field access uses bitcast of pointer to field type.
+        let extra_start = self.pool.get_data1(type_node)
+        let field_count = self.pool.get_extra(extra_start)
+        let name_str = self.intern.resolve(name_sym)
+
+        if not self.struct_type_map.get(name_sym).is_some():
+            self.predeclare_struct_type(name_sym)
+        let idx = self.struct_type_map.get(name_sym).unwrap()
+        let st_type = self.struct_llvm_types.get(idx as i64)
+        self.struct_field_starts.set_i32(idx as i64, self.struct_field_names.len() as i32)
+        self.struct_field_counts.set_i32(idx as i64, field_count)
+
+        // Find max ABI size/alignment among all fields. LLVMSizeOf returns an
+        // LLVM constant value, not a host integer, so use Sema's layout model here.
+        var max_size: i64 = 0
+        var max_align: i64 = 1
+        var max_align_ty: i64 = 0
+        var max_align_size: i64 = 0
+        var invalid_layout = 0
+        for fi in 0..field_count:
+            let offset = extra_start + 1 + fi * 3
+            let f_name = self.pool.get_extra(offset)
+            let f_type_node = self.pool.get_extra(offset + 1)
+            let f_default = self.pool.get_extra(offset + 2)
+            let f_ty = self.resolve_type(f_type_node)
+            if f_ty == 0:
+                with_eprint("error: unresolved type for field '" ++ self.intern.resolve(f_name) ++ "' in union '" ++ name_str ++ "'")
+                invalid_layout = 1
+                self.had_error = 1
+            self.struct_field_names.push(f_name)
+            self.struct_field_types.push(f_ty)
+            self.struct_field_type_nodes.push(f_type_node)
+            self.struct_field_defaults.push(f_default)
+            self.struct_llvm_field_indices.push(0)
+            let f_tid = self.sema.resolve_type_expr_frozen(f_type_node)
+            let f_size = if f_tid > 0: self.sema.type_layout_size_of_frozen(f_tid) else: self.abi_size_of(f_ty)
+            let f_align = if f_tid > 0: self.sema.type_layout_align_of_frozen(f_tid) else: 1
+            if f_size > max_size:
+                max_size = f_size
+            if f_align > max_align:
+                max_align = f_align
+                max_align_ty = f_ty
+                max_align_size = f_size
+
+        if invalid_layout != 0:
+            return
+
+        if max_align_ty == 0:
+            max_align_ty = wl_i8_type(self.context)
+            max_align_size = 1
+        if max_align_size <= 0:
+            max_align_size = 1
+        if max_align <= 0:
+            max_align = 1
+        if max_size <= 0:
+            max_size = 1
+
+        let rem = max_size % max_align
+        if rem != 0:
+            max_size = max_size + (max_align - rem)
+
+        let body: Vec[i64] = Vec.new()
+        body.push(max_align_ty)
+        if max_size > max_align_size:
+            body.push(wl_array_type(wl_i8_type(self.context), max_size - max_align_size))
+        wl_struct_set_body(st_type, vec_data_i64(&body), body.len() as i32, 0)
+
+    // ── Declare enum type ─────────────────────────────────────────────
+
+    mut fn declare_enum_type(name_sym: i32, type_node: i32):
+        let extra_start = self.pool.get_data1(type_node)
+        let variant_count = self.pool.get_extra(extra_start)
+        let enum_name = self.intern.resolve(name_sym)
+
+        // Find the largest payload to determine enum struct size.
+        // Enum is { i32 tag, [N x i8] payload }.
+        var max_payload_size: i64 = 0
+        var invalid_layout = 0
+        let v_starts = self.enum_variant_names.len() as i32
+        var offset = extra_start + 1
+        for vi in 0..variant_count:
+            let v_name = self.pool.get_extra(offset)
+            let v_payload_count = self.pool.get_extra(offset + 1)
+            offset = offset + 2
+            var payload_ty: i64 = 0
+            if v_payload_count > 0:
+                // Build all payload field types into a struct
+                let payload_fields: Vec[i64] = Vec.new()
+                for pi in 0..v_payload_count:
+                    let payload_type_node = self.pool.get_extra(offset + pi)
+                    let field_ty = self.resolve_type(payload_type_node)
+                    if field_ty == 0:
+                        with_eprint("error: unresolved payload type for enum variant '" ++ self.intern.resolve(v_name) ++ "' in '" ++ enum_name ++ "'")
+                        self.had_error = 1
+                        invalid_layout = 1
+                    payload_fields.push(field_ty)
+                if invalid_layout == 0:
+                    payload_ty = wl_struct_type(self.context, vec_data_i64(&payload_fields), v_payload_count, 0)
+                if payload_ty != 0:
+                    let sz = self.abi_size_of(payload_ty)
+                    if sz > max_payload_size:
+                        max_payload_size = sz
+                offset = offset + v_payload_count
+            self.enum_variant_names.push(v_name)
+            self.enum_variant_payloads.push(payload_ty)
+
+        if invalid_layout != 0:
+            return
+
+        // Build enum struct: { i32, [N x i8] }
+        if not self.enum_type_map.get(name_sym).is_some():
+            self.predeclare_enum_type(name_sym)
+        let idx = self.enum_type_map.get(name_sym).unwrap()
+        let enum_type = self.enum_llvm_types.get(idx as i64)
+        let body: Vec[i64] = Vec.new()
+        body.push(wl_i32_type(self.context))
+        if max_payload_size > 0:
+            body.push(wl_array_type(wl_i8_type(self.context), max_payload_size))
+        wl_struct_set_body(enum_type, vec_data_i64(&body), body.len() as i32, 0)
+
+        self.enum_variant_starts.set_i32(idx as i64, v_starts)
+        self.enum_variant_counts.set_i32(idx as i64, variant_count)
+
+    mut fn declare_disc_enum_type(name_sym: i32, type_node: i32):
+        let extra_start = self.pool.get_data1(type_node)
+        let repr_type_node = self.pool.get_extra(extra_start)
+        let variant_count = self.pool.get_extra(extra_start + 1)
+        let repr_ty = self.resolve_type(repr_type_node)
+        if repr_ty == 0:
+            return
+
+        let idx = self.disc_enum_repr_types.len() as i32
+        self.disc_enum_name_syms.push(name_sym)
+        self.disc_enum_repr_types.push(repr_ty)
+        let v_start = self.disc_enum_variant_names.len() as i32
+        self.disc_enum_variant_starts.push(v_start)
+        self.disc_enum_variant_counts.push(variant_count)
+        self.disc_enum_type_map.insert(name_sym, idx)
+
+        // First pass: collect variant info and compute max payload size
+        var max_payload_size: i64 = 0
+        var any_has_payload = 0
+        var offset = extra_start + 2
+        for vi in 0..variant_count:
+            let v_name = self.pool.get_extra(offset)
+            let disc_value = self.pool.get_extra(offset + 1)
+            let payload_count = self.pool.get_extra(offset + 2)
+            var payload_ty: i64 = 0
+            if payload_count > 0:
+                any_has_payload = 1
+                let payload_fields: Vec[i64] = Vec.new()
+                for pi in 0..payload_count:
+                    let payload_type_node = self.pool.get_extra(offset + 3 + pi)
+                    let field_ty = self.resolve_type(payload_type_node)
+                    if field_ty != 0:
+                        payload_fields.push(field_ty)
+                if payload_fields.len() as i32 == payload_count:
+                    payload_ty = wl_struct_type(self.context, vec_data_i64(&payload_fields), payload_count, 0)
+                    let sz = self.abi_size_of(payload_ty)
+                    if sz > max_payload_size:
+                        max_payload_size = sz
+            offset = offset + 3 + payload_count
+            self.disc_enum_variant_names.push(v_name)
+            self.disc_enum_variant_values.push(disc_value)
+            self.disc_enum_variant_payloads.push(payload_ty)
+
+        self.disc_enum_has_payload.push(any_has_payload)
+
+        // If any variant has payload, also register in the regular enum tables
+        // so the existing match payload extraction code can find the type info.
+        if any_has_payload != 0:
+            if not self.enum_type_map.get(name_sym).is_some():
+                self.predeclare_enum_type(name_sym)
+            let enum_idx = self.enum_type_map.get(name_sym).unwrap()
+            let enum_type = self.enum_llvm_types.get(enum_idx as i64)
+            // Build struct: { repr_type, [max_payload_size x i8] }
+            let body: Vec[i64] = Vec.new()
+            body.push(repr_ty)
+            if max_payload_size > 0:
+                body.push(wl_array_type(wl_i8_type(self.context), max_payload_size))
+            wl_struct_set_body(enum_type, vec_data_i64(&body), body.len() as i32, 0)
+            // Register variant info in regular enum tables for payload extraction
+            let enum_v_start = self.enum_variant_names.len() as i32
+            let dv_start = v_start
+            for vi in 0..variant_count:
+                self.enum_variant_names.push(self.disc_enum_variant_names.get((dv_start + vi) as i64))
+                self.enum_variant_payloads.push(self.disc_enum_variant_payloads.get((dv_start + vi) as i64))
+            self.enum_variant_starts.set_i32(enum_idx as i64, enum_v_start)
+            self.enum_variant_counts.set_i32(enum_idx as i64, variant_count)
+
+    fn gen_disc_enum_from_int_val(de_idx: i32, arg_val: i64) -> i64:
+        let repr_ty = self.disc_enum_repr_types.get(de_idx as i64)
+        let v_start = self.disc_enum_variant_starts.get(de_idx as i64)
+        let v_count = self.disc_enum_variant_counts.get(de_idx as i64)
+        let input = self.coerce_int(arg_val, repr_ty)
+        // Return Option[repr_type]: Some(disc_val) or None
+        // Use insertvalue to build Option values directly (no allocas in case blocks)
+        let i32_ty = wl_i32_type(self.context)
+        let opt_ty = self.get_or_create_option_type(0, repr_ty)
+        // None = { tag=1, payload=0 }
+        var none_val = wl_get_undef(opt_ty)
+        none_val = wl_build_insert_value(self.builder, none_val, wl_const_int(i32_ty, 1, 0), 0)
+        none_val = wl_build_insert_value(self.builder, none_val, wl_const_int(repr_ty, 0, 0), 1)
+        let result_alloca = self.create_entry_alloca(opt_ty)
+        wl_build_store(self.builder, none_val, result_alloca)
+        let default_bb = wl_append_bb(self.context, self.current_function, "from_int.default")
+        let end_bb = wl_append_bb(self.context, self.current_function, "from_int.end")
+        let sw = wl_build_switch(self.builder, input, default_bb, v_count)
+        for vi in 0..v_count:
+            let disc_val = self.disc_enum_variant_values.get((v_start + vi) as i64)
+            let case_bb = wl_append_bb(self.context, self.current_function, "from_int.case")
+            wl_add_case(sw, wl_const_int(repr_ty, disc_val as i64, 1), case_bb)
+            wl_position_at_end(self.builder, case_bb)
+            // Some(disc_val) = { tag=0, payload=disc_val }
+            var some_val = wl_get_undef(opt_ty)
+            some_val = wl_build_insert_value(self.builder, some_val, wl_const_int(i32_ty, 0, 0), 0)
+            some_val = wl_build_insert_value(self.builder, some_val, wl_const_int(repr_ty, disc_val as i64, 1), 1)
+            wl_build_store(self.builder, some_val, result_alloca)
+            wl_build_br(self.builder, end_bb)
+        wl_position_at_end(self.builder, default_bb)
         wl_build_br(self.builder, end_bb)
-    wl_position_at_end(self.builder, default_bb)
-    wl_build_br(self.builder, end_bb)
-    wl_position_at_end(self.builder, end_bb)
-    wl_build_load(self.builder, opt_ty, result_alloca)
+        wl_position_at_end(self.builder, end_bb)
+        wl_build_load(self.builder, opt_ty, result_alloca)
 
-fn Codegen.find_disc_enum_sym_by_idx(self: Codegen, de_idx: i32) -> i32:
-    if de_idx >= 0 and de_idx < self.disc_enum_name_syms.len() as i32:
-        return self.disc_enum_name_syms.get(de_idx as i64)
-    0
+    fn find_disc_enum_sym_by_idx(de_idx: i32) -> i32:
+        if de_idx >= 0 and de_idx < self.disc_enum_name_syms.len() as i32:
+            return self.disc_enum_name_syms.get(de_idx as i64)
+        0
 
-// ── Declare function ──────────────────────────────────────────────
+    // ── Declare function ──────────────────────────────────────────────
 
-fn Codegen.function_symbol_name(self: Codegen, sym: i32) -> str:
-    let name = self.intern.resolve(sym)
-    if name.len() > 0:
-        return name
-    f"__fn_{sym}"
+    fn function_symbol_name(sym: i32) -> str:
+        let name = self.intern.resolve(sym)
+        if name.len() > 0:
+            return name
+        f"__fn_{sym}"
 
 fn codegen_hash_name_component(value: i64) -> str:
     if value < 0:
@@ -3643,428 +3866,431 @@ fn codegen_is_runtime_abi_symbol(base_name: str) -> bool:
 fn codegen_preserve_runtime_link_name(source_path: str, base_name: str) -> bool:
     codegen_is_runtime_source_file(source_path) and codegen_is_runtime_abi_symbol(base_name)
 
-fn Codegen.module_link_name_for_path(self: Codegen, source_path: str, base_name: str) -> str:
-    if self.module_object_mode == 0:
-        return base_name
-    if codegen_preserve_runtime_link_name(source_path, base_name):
-        return base_name
-    let canonical_path = codegen_canonical_module_path(source_path)
-    if canonical_path.len() == 0 or canonical_path == "<unknown>":
-        return base_name
-    "__with_mod_" ++ codegen_hash_name_component(with_str_hash(canonical_path)) ++ "__" ++ base_name
+impl Codegen:
+    fn module_link_name_for_path(source_path: str, base_name: str) -> str:
+        if self.module_object_mode == 0:
+            return base_name
+        if codegen_preserve_runtime_link_name(source_path, base_name):
+            return base_name
+        let canonical_path = codegen_canonical_module_path(source_path)
+        if canonical_path.len() == 0 or canonical_path == "<unknown>":
+            return base_name
+        "__with_mod_" ++ codegen_hash_name_component(with_str_hash(canonical_path)) ++ "__" ++ base_name
 
-fn Codegen.current_decl_module_link_name(self: Codegen, base_name: str) -> str:
-    self.module_link_name_for_path(self.current_decl_source_file, base_name)
+    fn current_decl_module_link_name(base_name: str) -> str:
+        self.module_link_name_for_path(self.current_decl_source_file, base_name)
 
-fn Codegen.ident_text_from_node(self: Codegen, node: i32) -> str:
-    if node == 0:
-        return ""
-    let start = self.pool.get_start(node)
-    let end = self.pool.get_end(node)
-    if start < 0 or end <= start:
-        return ""
-    if end > self.source_text.len() as i32:
-        return ""
-    self.source_text.slice(start as i64, end as i64)
+    fn ident_text_from_node(node: i32) -> str:
+        if node == 0:
+            return ""
+        let start = self.pool.get_start(node)
+        let end = self.pool.get_end(node)
+        if start < 0 or end <= start:
+            return ""
+        if end > self.source_text.len() as i32:
+            return ""
+        self.source_text.slice(start as i64, end as i64)
 
-fn Codegen.method_text_from_field_access(self: Codegen, node: i32) -> str:
-    if node == 0 or self.pool.kind(node) != NodeKind.NK_FIELD_ACCESS:
-        return ""
-    let text = self.ident_text_from_node(node)
-    if text.len() == 0:
-        return ""
-    var dot = -1
-    for i in 0..text.len() as i32:
-        if text.byte_at(i as i64) == 46:
-            dot = i
-    if dot < 0 or dot + 1 >= text.len() as i32:
-        return ""
-    text.slice((dot + 1) as i64, text.len())
+    fn method_text_from_field_access(node: i32) -> str:
+        if node == 0 or self.pool.kind(node) != NodeKind.NK_FIELD_ACCESS:
+            return ""
+        let text = self.ident_text_from_node(node)
+        if text.len() == 0:
+            return ""
+        var dot = -1
+        for i in 0..text.len() as i32:
+            if text.byte_at(i as i64) == 46:
+                dot = i
+        if dot < 0 or dot + 1 >= text.len() as i32:
+            return ""
+        text.slice((dot + 1) as i64, text.len())
 
-fn Codegen.get_hashmap_new_fn_type(self: Codegen) -> i64:
-    let params: Vec[i64] = Vec.new()
-    params.push(wl_i64_type(self.context))
-    params.push(wl_i64_type(self.context))
-    wl_function_type(wl_ptr_type(self.context), vec_data_i64(&params), 2, 0)
+    fn get_hashmap_new_fn_type() -> i64:
+        let params: Vec[i64] = Vec.new()
+        params.push(wl_i64_type(self.context))
+        params.push(wl_i64_type(self.context))
+        wl_function_type(wl_ptr_type(self.context), vec_data_i64(&params), 2, 0)
 
-fn Codegen.ensure_hashmap_new_declared(self: Codegen) -> i64:
-    let existing = wl_get_named_function(self.llmod, "with_hashmap_new")
-    if existing != 0:
-        return existing
-    let fn_ty = self.get_hashmap_new_fn_type()
-    wl_add_function(self.llmod, "with_hashmap_new", fn_ty)
+    fn ensure_hashmap_new_declared() -> i64:
+        let existing = wl_get_named_function(self.llmod, "with_hashmap_new")
+        if existing != 0:
+            return existing
+        let fn_ty = self.get_hashmap_new_fn_type()
+        wl_add_function(self.llmod, "with_hashmap_new", fn_ty)
 
-fn Codegen.fn_decl_name_from_node(self: Codegen, node: i32) -> str:
-    let text = self.ident_text_from_node(node)
-    if text.len() < 3:
-        return ""
-    var i = 0
-    while i < text.len() as i32 and text.byte_at(i as i64) <= 32:
-        i = i + 1
-    if i + 1 >= text.len() as i32:
-        return ""
-    if text.byte_at(i as i64) != 102 or text.byte_at((i + 1) as i64) != 110:
-        return ""
-    i = i + 2
-    while i < text.len() as i32 and text.byte_at(i as i64) <= 32:
-        i = i + 1
-    let start = i
-    while i < text.len() as i32:
-        let ch = text.byte_at(i as i64)
-        let is_alpha = (ch >= 65 and ch <= 90) or (ch >= 97 and ch <= 122)
-        let is_digit = ch >= 48 and ch <= 57
-        if is_alpha or is_digit or ch == 95 or ch == 46:
+    fn fn_decl_name_from_node(node: i32) -> str:
+        let text = self.ident_text_from_node(node)
+        if text.len() < 3:
+            return ""
+        var i = 0
+        while i < text.len() as i32 and text.byte_at(i as i64) <= 32:
             i = i + 1
-            continue
-        break
-    if i <= start:
-        return ""
-    text.slice(start as i64, i as i64)
+        if i + 1 >= text.len() as i32:
+            return ""
+        if text.byte_at(i as i64) != 102 or text.byte_at((i + 1) as i64) != 110:
+            return ""
+        i = i + 2
+        while i < text.len() as i32 and text.byte_at(i as i64) <= 32:
+            i = i + 1
+        let start = i
+        while i < text.len() as i32:
+            let ch = text.byte_at(i as i64)
+            let is_alpha = (ch >= 65 and ch <= 90) or (ch >= 97 and ch <= 122)
+            let is_digit = ch >= 48 and ch <= 57
+            if is_alpha or is_digit or ch == 95 or ch == 46:
+                i = i + 1
+                continue
+            break
+        if i <= start:
+            return ""
+        text.slice(start as i64, i as i64)
 
-fn Codegen.let_binding_name_from_node(self: Codegen, node: i32) -> str:
-    let text = self.ident_text_from_node(node)
-    if text.len() < 4:
-        return ""
-    var i = 0
-    while i < text.len() as i32 and text.byte_at(i as i64) <= 32:
-        i = i + 1
-    if i + 2 >= text.len() as i32:
-        return ""
-    if text.byte_at(i as i64) != 108 or text.byte_at((i + 1) as i64) != 101 or text.byte_at((i + 2) as i64) != 116:
-        return ""
-    i = i + 3
-    while i < text.len() as i32 and text.byte_at(i as i64) <= 32:
-        i = i + 1
-    if i + 2 < text.len() as i32 and text.byte_at(i as i64) == 109 and text.byte_at((i + 1) as i64) == 117 and text.byte_at((i + 2) as i64) == 116:
+    fn let_binding_name_from_node(node: i32) -> str:
+        let text = self.ident_text_from_node(node)
+        if text.len() < 4:
+            return ""
+        var i = 0
+        while i < text.len() as i32 and text.byte_at(i as i64) <= 32:
+            i = i + 1
+        if i + 2 >= text.len() as i32:
+            return ""
+        if text.byte_at(i as i64) != 108 or text.byte_at((i + 1) as i64) != 101 or text.byte_at((i + 2) as i64) != 116:
+            return ""
         i = i + 3
         while i < text.len() as i32 and text.byte_at(i as i64) <= 32:
             i = i + 1
-    let start = i
-    while i < text.len() as i32:
-        let ch = text.byte_at(i as i64)
-        let is_alpha = (ch >= 65 and ch <= 90) or (ch >= 97 and ch <= 122)
-        let is_digit = ch >= 48 and ch <= 57
-        if is_alpha or is_digit or ch == 95:
-            i = i + 1
-            continue
-        break
-    if i <= start:
-        return ""
-    text.slice(start as i64, i as i64)
-
-fn Codegen.declare_function(self: Codegen, fn_node: i32):
-    self.declare_function_at(fn_node, self.find_decl_index(fn_node))
-
-fn Codegen.declare_function_at(self: Codegen, fn_node: i32, decl_index: i32):
-    let name_sym = self.sema.fn_decl_semantic_symbol_at(fn_node, self.pool.get_data0(fn_node), decl_index)
-    let raw_name_str = self.intern.resolve(name_sym)
-    let sema_name_str = self.sema_symbol_text(name_sym)
-    let name_str = if sema_name_str.len() > 0: sema_name_str else: raw_name_str
-    if name_sym == 0:
-        return
-    let parsed_name = if sema_name_str.len() == 0 and name_str.len() == 0: self.fn_decl_name_from_node(fn_node) else: ""
-    let alias_text =
-        if sema_name_str.len() > 0:
-            sema_name_str
-        else:
-            parsed_name
-    let alias_sym = if alias_text.len() > 0: self.intern.intern(alias_text) else: 0
-    let flags = self.pool.get_data2(fn_node)
-    let meta = self.pool.find_fn_meta(fn_node)
-    if meta < 0: return
-
-    // Check if method (has dot in name); for missing symbol text, infer owner
-    // from `self: Type` in param 0.
-    var method_owner_sym = 0
-    var method_key_sym: i32 = 0
-    for di in 0..name_str.len() as i32:
-        if name_str.byte_at(di as i64) == 46:
-            method_owner_sym = self.intern.intern(name_str.slice(0, di as i64))
-            let short_method_name = name_str.slice((di + 1) as i64, name_str.len() as i64)
-            if short_method_name.len() > 0:
-                let short_method_sym = self.intern.intern(short_method_name)
-                let mk_str = f"$m${method_owner_sym}|{short_method_sym}"
-                method_key_sym = self.intern.intern(mk_str)
+        if i + 2 < text.len() as i32 and text.byte_at(i as i64) == 109 and text.byte_at((i + 1) as i64) == 117 and text.byte_at((i + 2) as i64) == 116:
+            i = i + 3
+            while i < text.len() as i32 and text.byte_at(i as i64) <= 32:
+                i = i + 1
+        let start = i
+        while i < text.len() as i32:
+            let ch = text.byte_at(i as i64)
+            let is_alpha = (ch >= 65 and ch <= 90) or (ch >= 97 and ch <= 122)
+            let is_digit = ch >= 48 and ch <= 57
+            if is_alpha or is_digit or ch == 95:
+                i = i + 1
+                continue
             break
+        if i <= start:
+            return ""
+        text.slice(start as i64, i as i64)
 
-    // Methods owned by generic types are always compiled lazily against a
-    // concrete owner instantiation. Even "static" methods like Foo.wrap(x: T)
-    // or methods returning Self need the owner bindings before their LLVM
-    // signature can be resolved correctly.
-    if method_owner_sym != 0:
-        if self.generic_type_decl_node(method_owner_sym) != 0 and self.sema.fn_node_is_generic_template(fn_node, name_sym) != 0:
-            self.generic_struct_methods.insert(name_sym, fn_node)
+    mut fn declare_function(fn_node: i32):
+        self.declare_function_at(fn_node, self.find_decl_index(fn_node))
+
+    mut fn declare_function_at(fn_node: i32, decl_index: i32):
+        let name_sym = self.sema.fn_decl_semantic_symbol_at(fn_node, self.pool.get_data0(fn_node), decl_index)
+        let raw_name_str = self.intern.resolve(name_sym)
+        let sema_name_str = self.sema_symbol_text(name_sym)
+        let name_str = if sema_name_str.len() > 0: sema_name_str else: raw_name_str
+        if name_sym == 0:
+            return
+        let parsed_name = if sema_name_str.len() == 0 and name_str.len() == 0: self.fn_decl_name_from_node(fn_node) else: ""
+        let alias_text =
+            if sema_name_str.len() > 0:
+                sema_name_str
+            else:
+                parsed_name
+        let alias_sym = if alias_text.len() > 0: self.intern.intern(alias_text) else: 0
+        let flags = self.pool.get_data2(fn_node)
+        let meta = self.pool.find_fn_meta(fn_node)
+        if meta < 0: return
+
+        // Check if method (has dot in name); for missing symbol text, infer owner
+        // from `self: Type` in param 0.
+        var method_owner_sym = 0
+        var method_key_sym: i32 = 0
+        for di in 0..name_str.len() as i32:
+            if name_str.byte_at(di as i64) == 46:
+                method_owner_sym = self.intern.intern(name_str.slice(0, di as i64))
+                let short_method_name = name_str.slice((di + 1) as i64, name_str.len() as i64)
+                if short_method_name.len() > 0:
+                    let short_method_sym = self.intern.intern(short_method_name)
+                    let mk_str = f"$m${method_owner_sym}|{short_method_sym}"
+                    method_key_sym = self.intern.intern(mk_str)
+                break
+
+        // Methods owned by generic types are always compiled lazily against a
+        // concrete owner instantiation. Even "static" methods like Foo.wrap(x: T)
+        // or methods returning Self need the owner bindings before their LLVM
+        // signature can be resolved correctly.
+        if method_owner_sym != 0:
+            if self.generic_type_decl_node(method_owner_sym) != 0 and self.sema.fn_node_is_generic_template(fn_node, name_sym) != 0:
+                self.generic_struct_methods.insert(name_sym, fn_node)
+                return
+
+        if (flags / FnFlags.GEN) % 2 == 1:
+            let sig_idx = self.sema.get_sig(name_sym)
+            if sig_idx >= 0:
+                self.declare_function_from_sig(name_sym, sig_idx, 0)
             return
 
-    if (flags / FnFlags.GEN) % 2 == 1:
-        let sig_idx = self.sema.get_sig(name_sym)
-        if sig_idx >= 0:
-            self.declare_function_from_sig(name_sym, sig_idx, 0)
-        return
+        let ret_type_node = self.pool.fn_meta_ret(meta)
+        let param_start = self.pool.fn_meta_param_start(meta)
+        let param_count = self.pool.fn_meta_param_count(meta)
+        let sema_sig_idx = self.sema.get_sig(name_sym)
 
-    let ret_type_node = self.pool.fn_meta_ret(meta)
-    let param_start = self.pool.fn_meta_param_start(meta)
-    let param_count = self.pool.fn_meta_param_count(meta)
+        // Resolve param types
+        let param_types: Vec[i64] = Vec.new()
 
-    // Resolve param types
-    let param_types: Vec[i64] = Vec.new()
+        // Set method owner before resolving return type so Self can resolve
+        let saved_owner = self.current_method_owner_sym
+        if method_owner_sym != 0:
+            self.current_method_owner_sym = method_owner_sym
 
-    // Set method owner before resolving return type so Self can resolve
-    let saved_owner = self.current_method_owner_sym
-    if method_owner_sym != 0:
-        self.current_method_owner_sym = method_owner_sym
+        var ret_ty_raw: i64 = 0
+        if ret_type_node != 0:
+            ret_ty_raw = self.resolve_type(ret_type_node)
+        else if sema_sig_idx >= 0:
+            ret_ty_raw = self.sema_type_to_llvm(self.sema.sig_return_type(sema_sig_idx))
+        let ret_ty = if ret_ty_raw != 0: ret_ty_raw else: self.type_fallback()
 
-    var ret_ty_raw: i64 = 0
-    if ret_type_node != 0:
-        ret_ty_raw = self.resolve_type(ret_type_node)
-    else:
-        let sig_idx = self.sema.get_sig(name_sym)
-        if sig_idx >= 0:
-            ret_ty_raw = self.sema_type_to_llvm(self.sema.sig_return_type(sig_idx))
-    let ret_ty = if ret_ty_raw != 0: ret_ty_raw else: self.type_fallback()
+        // Check if this returns Result
+        if ret_type_node != 0 and self.is_result_return_type(ret_type_node):
+            self.fn_returns_result.insert(name_sym, 1)
+            let err_sym = self.result_err_symbol_from_return(ret_type_node)
+            if err_sym != 0:
+                self.fn_result_err_symbols.insert(name_sym, err_sym)
+            if self.is_result_unit_return(ret_type_node):
+                self.fn_result_unit_returns.insert(name_sym, 1)
 
-    // Check if this returns Result
-    if ret_type_node != 0 and self.is_result_return_type(ret_type_node):
-        self.fn_returns_result.insert(name_sym, 1)
-        let err_sym = self.result_err_symbol_from_return(ret_type_node)
-        if err_sym != 0:
-            self.fn_result_err_symbols.insert(name_sym, err_sym)
-        if self.is_result_unit_return(ret_type_node):
-            self.fn_result_unit_returns.insert(name_sym, 1)
+        var has_ref_param = false
+        var pi = 0
+        while pi < param_count:
+            let p_name = self.pool.fn_param_name(param_start, pi)
+            let p_type_node = self.pool.fn_param_type(param_start, pi)
+            // #D6: final Sema pass mode is authoritative for share-place. This
+            // branch must precede AST type fallbacks (including a missing type node)
+            // so declaration, caller marshalling, and callee binding cannot derive
+            // three different ABIs for the same signature.
+            if sema_sig_idx >= 0 and pi < self.sema.sig_get_param_count(sema_sig_idx) and
+               self.sema.sig_param_uses_value_ref_abi(sema_sig_idx, pi) != 0:
+                param_types.push(wl_ptr_type(self.context))
+                has_ref_param = true
+                self.record_ref_param_aliases(name_sym, alias_sym, method_key_sym, pi, param_count)
+                pi = pi + 1
+                continue
+            if p_type_node == 0:
+                param_types.push(self.type_fallback())
+                pi = pi + 1
+                continue
 
-    var has_ref_param = false
-    var pi = 0
-    while pi < param_count:
-        let p_name = self.pool.fn_param_name(param_start, pi)
-        let p_type_node = self.pool.fn_param_type(param_start, pi)
-        if p_type_node == 0:
-            param_types.push(self.type_fallback())
+            let p_kind = self.pool.kind(p_type_node)
+
+            // Method owner-type parameter: lower as pointer for struct types.
+            // Applies to self (pi==0) AND any other param of the same owner type.
+            if p_kind == NodeKind.NK_TYPE_NAMED:
+                let p_sym = self.pool.get_data0(p_type_node)
+                if method_owner_sym == 0 and p_name == self.sym_self and self.struct_type_map.get(p_sym).is_some():
+                    method_owner_sym = p_sym
+                if method_owner_sym != 0 and (p_sym == self.sym_Self or p_sym == method_owner_sym):
+                    // Only lower as pointer for struct/enum types; primitives and str pass by value.
+                    // str is in struct_type_map but has special value semantics (==, compare_str_eq).
+                    let is_str_owner = method_owner_sym == self.sym_str
+                    if not is_str_owner and (self.struct_type_map.get(method_owner_sym).is_some() or self.enum_type_map.get(method_owner_sym).is_some()):
+                        param_types.push(wl_ptr_type(self.context))
+                        has_ref_param = true
+                        self.record_ref_param_aliases(name_sym, alias_sym, method_key_sym, pi, param_count)
+                        pi = pi + 1
+                        continue
+
+            // fn type params → fat pointer
+            if p_kind == NodeKind.NK_TYPE_FN:
+                let ptr_ty = wl_ptr_type(self.context)
+                let fat: Vec[i64] = Vec.new()
+                fat.push(ptr_ty)
+                fat.push(ptr_ty)
+                param_types.push(wl_struct_type(self.context, vec_data_i64(&fat), 2, 0))
+                pi = pi + 1
+                continue
+            if p_kind == NodeKind.NK_TYPE_EXTERN_FN:
+                param_types.push(wl_ptr_type(self.context))
+                pi = pi + 1
+                continue
+
+            // dyn Trait params (plain or wrapped forms: &dyn, *dyn, Box[dyn]).
+            let trait_sym = self.dyn_trait_from_type_node(p_type_node)
+            if trait_sym != 0:
+                var dyn_ty = self.resolve_type(p_type_node)
+                if dyn_ty == 0:
+                    dyn_ty = self.type_fallback()
+                param_types.push(dyn_ty)
+                self.record_dyn_param(name_sym, pi, param_count, trait_sym)
+                if alias_sym != 0:
+                    self.record_dyn_param(alias_sym, pi, param_count, trait_sym)
+                if method_key_sym != 0:
+                    self.record_dyn_param(method_key_sym, pi, param_count, trait_sym)
+                pi = pi + 1
+                continue
+
+            // Reference params
+            if p_kind == NodeKind.NK_TYPE_REF:
+                var ref_ty = self.resolve_type(p_type_node)
+                if ref_ty == 0:
+                    ref_ty = wl_ptr_type(self.context)
+                param_types.push(ref_ty)
+                has_ref_param = true
+                self.record_ref_param_aliases(name_sym, alias_sym, method_key_sym, pi, param_count)
+                pi = pi + 1
+                continue
+
+            var p_ty = self.resolve_type(p_type_node)
+            if p_ty == 0:
+                p_ty = wl_i32_type(self.context)
+            if wl_get_type_kind(p_ty) == wl_void_type_kind():
+                p_ty = wl_i32_type(self.context)
+            param_types.push(p_ty)
             pi = pi + 1
-            continue
 
-        let p_kind = self.pool.kind(p_type_node)
-
-        // Method owner-type parameter: lower as pointer for struct types.
-        // Applies to self (pi==0) AND any other param of the same owner type.
-        if p_kind == NodeKind.NK_TYPE_NAMED:
-            let p_sym = self.pool.get_data0(p_type_node)
-            if method_owner_sym == 0 and p_name == self.sym_self and self.struct_type_map.get(p_sym).is_some():
-                method_owner_sym = p_sym
-            if method_owner_sym != 0 and (p_sym == self.sym_Self or p_sym == method_owner_sym):
-                // Only lower as pointer for struct/enum types; primitives and str pass by value.
-                // str is in struct_type_map but has special value semantics (==, compare_str_eq).
-                let is_str_owner = method_owner_sym == self.sym_str
-                if not is_str_owner and (self.struct_type_map.get(method_owner_sym).is_some() or self.enum_type_map.get(method_owner_sym).is_some()):
-                    param_types.push(wl_ptr_type(self.context))
-                    has_ref_param = true
-                    self.record_ref_param(name_sym, pi, param_count)
-                    if alias_sym != 0:
-                        self.record_ref_param(alias_sym, pi, param_count)
-                    if method_key_sym != 0:
-                        self.record_ref_param(method_key_sym, pi, param_count)
-                    pi = pi + 1
-                    continue
-
-        // fn type params → fat pointer
-        if p_kind == NodeKind.NK_TYPE_FN:
-            let ptr_ty = wl_ptr_type(self.context)
-            let fat: Vec[i64] = Vec.new()
-            fat.push(ptr_ty)
-            fat.push(ptr_ty)
-            param_types.push(wl_struct_type(self.context, vec_data_i64(&fat), 2, 0))
-            pi = pi + 1
-            continue
-        if p_kind == NodeKind.NK_TYPE_EXTERN_FN:
-            param_types.push(wl_ptr_type(self.context))
-            pi = pi + 1
-            continue
-
-        // dyn Trait params (plain or wrapped forms: &dyn, *dyn, Box[dyn]).
-        let trait_sym = self.dyn_trait_from_type_node(p_type_node)
-        if trait_sym != 0:
-            var dyn_ty = self.resolve_type(p_type_node)
-            if dyn_ty == 0:
-                dyn_ty = self.type_fallback()
-            param_types.push(dyn_ty)
-            self.record_dyn_param(name_sym, pi, param_count, trait_sym)
-            if alias_sym != 0:
-                self.record_dyn_param(alias_sym, pi, param_count, trait_sym)
-            if method_key_sym != 0:
-                self.record_dyn_param(method_key_sym, pi, param_count, trait_sym)
-            pi = pi + 1
-            continue
-
-        // Reference params
-        if p_kind == NodeKind.NK_TYPE_REF:
-            var ref_ty = self.resolve_type(p_type_node)
-            if ref_ty == 0:
-                ref_ty = wl_ptr_type(self.context)
-            param_types.push(ref_ty)
-            has_ref_param = true
-            self.record_ref_param(name_sym, pi, param_count)
-            if alias_sym != 0:
-                self.record_ref_param(alias_sym, pi, param_count)
-            if method_key_sym != 0:
-                self.record_ref_param(method_key_sym, pi, param_count)
-            pi = pi + 1
-            continue
-
-        var p_ty = self.resolve_type(p_type_node)
-        if p_ty == 0:
-            p_ty = wl_i32_type(self.context)
-        if wl_get_type_kind(p_ty) == wl_void_type_kind():
-            p_ty = wl_i32_type(self.context)
-        param_types.push(p_ty)
-        pi = pi + 1
-
-    let cc_name = self.fn_callconv_name(meta)
-    let uses_c_abi = self.fn_uses_c_abi(cc_name)
-    let actual_param_types: Vec[i64] = Vec.new()
-    let byval_types: Vec[i64] = Vec.new()
-    let direct_types: Vec[i64] = Vec.new()
-    let ptr_ty = wl_ptr_type(self.context)
-    var actual_ret_ty = ret_ty
-    var has_sret = 0
-    var sret_ty: i64 = 0
-    var byval_mask: i64 = 0
-    var direct_mask: i64 = 0
-    var direct_ret_ty: i64 = 0
-    if uses_c_abi:
-        if ret_ty != 0 and wl_get_type_kind(ret_ty) == wl_struct_type_kind():
-            let direct_ret_abi_ty = self.c_abi_direct_struct_return_type(ret_ty)
-            if direct_ret_abi_ty != 0:
-                direct_ret_ty = ret_ty
-                actual_ret_ty = direct_ret_abi_ty
-            else if codegen_c_abi_darwin_arm64() and self.c_abi_hfa_info(ret_ty) != 0:
-                actual_ret_ty = ret_ty
-            else if self.c_abi_needs_sret(ret_ty):
-                has_sret = 1
-                sret_ty = ret_ty
-                actual_ret_ty = wl_void_type(self.context)
-        if has_sret != 0:
+        let cc_name = self.fn_callconv_name(meta)
+        let uses_c_abi = self.fn_uses_c_abi(cc_name)
+        let actual_param_types: Vec[i64] = Vec.new()
+        let byval_types: Vec[i64] = Vec.new()
+        let direct_types: Vec[i64] = Vec.new()
+        let ptr_ty = wl_ptr_type(self.context)
+        var actual_ret_ty = ret_ty
+        var has_sret = 0
+        var sret_ty: i64 = 0
+        var byval_mask: i64 = 0
+        var direct_mask: i64 = 0
+        var direct_ret_ty: i64 = 0
+        if uses_c_abi:
+            if ret_ty != 0 and wl_get_type_kind(ret_ty) == wl_struct_type_kind():
+                let direct_ret_abi_ty = self.c_abi_direct_struct_return_type(ret_ty)
+                if direct_ret_abi_ty != 0:
+                    direct_ret_ty = ret_ty
+                    actual_ret_ty = direct_ret_abi_ty
+                else if codegen_c_abi_darwin_arm64() and self.c_abi_hfa_info(ret_ty) != 0:
+                    actual_ret_ty = ret_ty
+                else if self.c_abi_needs_sret(ret_ty):
+                    has_sret = 1
+                    sret_ty = ret_ty
+                    actual_ret_ty = wl_void_type(self.context)
+            if has_sret != 0:
+                actual_param_types.push(ptr_ty)
+            for abi_pi in 0..param_count:
+                let source_ty = param_types.get(abi_pi as i64)
+                if wl_get_type_kind(source_ty) == wl_struct_type_kind():
+                    let direct_param_ty = self.c_abi_direct_struct_param_type(source_ty)
+                    if direct_param_ty != 0:
+                        actual_param_types.push(direct_param_ty)
+                        direct_mask = direct_mask | ((1 as i64) << (abi_pi as u32))
+                        byval_types.push(0)
+                        direct_types.push(source_ty)
+                        continue
+                    if self.c_abi_needs_indirect_param(source_ty):
+                        actual_param_types.push(ptr_ty)
+                        byval_mask = byval_mask | ((1 as i64) << (abi_pi as u32))
+                        byval_types.push(source_ty)
+                        direct_types.push(0)
+                        continue
+                actual_param_types.push(source_ty)
+                byval_types.push(0)
+                direct_types.push(0)
+        else if self.internal_abi_needs_sret(ret_ty):
+            has_sret = 1
+            sret_ty = ret_ty
+            actual_ret_ty = wl_void_type(self.context)
             actual_param_types.push(ptr_ty)
-        for abi_pi in 0..param_count:
-            let source_ty = param_types.get(abi_pi as i64)
-            if wl_get_type_kind(source_ty) == wl_struct_type_kind():
-                let direct_param_ty = self.c_abi_direct_struct_param_type(source_ty)
-                if direct_param_ty != 0:
-                    actual_param_types.push(direct_param_ty)
-                    direct_mask = direct_mask | ((1 as i64) << (abi_pi as u32))
+            for abi_pi2 in 0..param_count:
+                let source_ty2 = param_types.get(abi_pi2 as i64)
+                if self.internal_abi_needs_indirect_param(source_ty2):
+                    actual_param_types.push(ptr_ty)
+                    byval_mask = byval_mask | ((1 as i64) << (abi_pi2 as u32))
+                    byval_types.push(source_ty2)
+                    direct_types.push(0)
+                else:
+                    actual_param_types.push(source_ty2)
                     byval_types.push(0)
-                    direct_types.push(source_ty)
-                    continue
-                if self.c_abi_needs_indirect_param(source_ty):
+                    direct_types.push(0)
+        else:
+            for abi_pi in 0..param_count:
+                let source_ty3 = param_types.get(abi_pi as i64)
+                if self.internal_abi_needs_indirect_param(source_ty3):
                     actual_param_types.push(ptr_ty)
                     byval_mask = byval_mask | ((1 as i64) << (abi_pi as u32))
-                    byval_types.push(source_ty)
+                    byval_types.push(source_ty3)
                     direct_types.push(0)
-                    continue
-            actual_param_types.push(source_ty)
-            byval_types.push(0)
-            direct_types.push(0)
-    else if self.internal_abi_needs_sret(ret_ty):
-        has_sret = 1
-        sret_ty = ret_ty
-        actual_ret_ty = wl_void_type(self.context)
-        actual_param_types.push(ptr_ty)
-        for abi_pi2 in 0..param_count:
-            let source_ty2 = param_types.get(abi_pi2 as i64)
-            if self.internal_abi_needs_indirect_param(source_ty2):
-                actual_param_types.push(ptr_ty)
-                byval_mask = byval_mask | ((1 as i64) << (abi_pi2 as u32))
-                byval_types.push(source_ty2)
-                direct_types.push(0)
+                else:
+                    actual_param_types.push(source_ty3)
+                    byval_types.push(0)
+                    direct_types.push(0)
+        let actual_param_count = actual_param_types.len() as i32
+        let is_variadic = (flags / FnFlags.VARIADIC) % 2
+        let fn_type = wl_function_type(actual_ret_ty, vec_data_i64(&actual_param_types), actual_param_count, is_variadic)
+
+        // Use "main" for @[entry] functions
+        var effective_name = if sema_name_str.len() > 0: sema_name_str else: self.function_symbol_name(name_sym)
+        if parsed_name.len() > 0:
+            effective_name = parsed_name
+        if (flags / FnFlags.ENTRY) % 2 == 1:
+            effective_name = "main"
+        else if self.module_object_mode != 0:
+            if not codegen_preserve_runtime_link_name(self.current_decl_source_file, effective_name) and
+                not (cc_name.len() > 9 and cc_name.slice(0, 9) == "c_export:"):
+                effective_name = self.current_decl_module_link_name(effective_name)
+
+        let function = wl_add_function(self.llmod, effective_name, fn_type)
+        if has_sret != 0:
+            wl_add_sret_attr(self.context, function, 0, sret_ty)
+        self.apply_c_abi_byval_attrs(function, byval_mask, byval_types, param_count, if has_sret != 0: 1 else: 0)
+        self.apply_noalias_param_attrs_with_offset(function, param_start, param_count, if has_sret != 0: 1 else: 0)
+
+        // Whole-program codegen internalizes non-prelude functions because imported
+        // modules are duplicated into the current AST. In module-object mode we must
+        // keep owner definitions externally linkable and let importers reference them.
+        if self.module_object_mode == 0:
+            let is_prelude = self.current_decl_source_file.contains("lib/std/")
+            if effective_name != "main" and not is_prelude and
+                not codegen_preserve_runtime_link_name(self.current_decl_source_file, effective_name):
+                wl_set_linkage(function, wl_internal_linkage())
+
+        // @[weak] — set weak linkage (LLVMWeakAnyLinkage = 5)
+        // Must be checked before c_export which also sets linkage.
+        let is_weak = self.pool.state.fn_weak_flags.contains(fn_node)
+        if is_weak:
+            wl_set_linkage(function, 5)
+
+        // @[c_export] overrides internal linkage to external for C/linker visibility
+        if cc_name.len() > 0:
+            if cc_name.len() > 9 and cc_name.slice(0, 9) == "c_export:":
+                if is_weak:
+                    wl_set_linkage(function, 5)  // LLVMWeakAnyLinkage
+                else:
+                    wl_set_linkage(function, 0)
+                let export_name = cc_name.slice(9, cc_name.len() as i64)
+                if export_name.len() > 0 and export_name != effective_name:
+                    wl_set_value_name(function, export_name)
+                wl_set_call_conv(function, wl_cc_c())
             else:
-                actual_param_types.push(source_ty2)
-                byval_types.push(0)
-                direct_types.push(0)
-    else:
-        for abi_pi in 0..param_count:
-            let source_ty3 = param_types.get(abi_pi as i64)
-            if self.internal_abi_needs_indirect_param(source_ty3):
-                actual_param_types.push(ptr_ty)
-                byval_mask = byval_mask | ((1 as i64) << (abi_pi as u32))
-                byval_types.push(source_ty3)
-                direct_types.push(0)
-            else:
-                actual_param_types.push(source_ty3)
-                byval_types.push(0)
-                direct_types.push(0)
-    let actual_param_count = actual_param_types.len() as i32
-    let is_variadic = (flags / FnFlags.VARIADIC) % 2
-    let fn_type = wl_function_type(actual_ret_ty, vec_data_i64(&actual_param_types), actual_param_count, is_variadic)
+                let cc_id = self.resolve_callconv(cc_name)
+                if cc_id >= 0:
+                    wl_set_call_conv(function, cc_id)
 
-    // Use "main" for @[entry] functions
-    var effective_name = if sema_name_str.len() > 0: sema_name_str else: self.function_symbol_name(name_sym)
-    if parsed_name.len() > 0:
-        effective_name = parsed_name
-    if (flags / FnFlags.ENTRY) % 2 == 1:
-        effective_name = "main"
-    else if self.module_object_mode != 0:
-        if not codegen_preserve_runtime_link_name(self.current_decl_source_file, effective_name) and
-            not (cc_name.len() > 9 and cc_name.slice(0, 9) == "c_export:"):
-            effective_name = self.current_decl_module_link_name(effective_name)
+        // Apply attributes
+        if (flags / FnFlags.INLINE) % 2 == 1:
+            wl_add_fn_attr(self.context, function, "alwaysinline")
+        if (flags / FnFlags.NOINLINE) % 2 == 1:
+            wl_add_fn_attr(self.context, function, "noinline")
 
-    let function = wl_add_function(self.llmod, effective_name, fn_type)
-    if has_sret != 0:
-        wl_add_sret_attr(self.context, function, 0, sret_ty)
-    self.apply_c_abi_byval_attrs(function, byval_mask, byval_types, param_count, if has_sret != 0: 1 else: 0)
-    self.apply_noalias_param_attrs_with_offset(function, param_start, param_count, if has_sret != 0: 1 else: 0)
+        if has_sret != 0 or byval_mask != 0 or direct_mask != 0 or direct_ret_ty != 0:
+            self.record_c_abi_transform(name_sym, has_sret, sret_ty, byval_mask, vec_copy_i64(&byval_types), direct_mask, vec_copy_i64(&direct_types), direct_ret_ty)
+            if alias_sym != 0:
+                self.record_c_abi_transform(alias_sym, has_sret, sret_ty, byval_mask, vec_copy_i64(&byval_types), direct_mask, vec_copy_i64(&direct_types), direct_ret_ty)
+            if method_key_sym != 0:
+                self.record_c_abi_transform(method_key_sym, has_sret, sret_ty, byval_mask, byval_types, direct_mask, direct_types, direct_ret_ty)
 
-    // Whole-program codegen internalizes non-prelude functions because imported
-    // modules are duplicated into the current AST. In module-object mode we must
-    // keep owner definitions externally linkable and let importers reference them.
-    if self.module_object_mode == 0:
-        let is_prelude = self.current_decl_source_file.contains("lib/std/")
-        if effective_name != "main" and not is_prelude and
-            not codegen_preserve_runtime_link_name(self.current_decl_source_file, effective_name):
-            wl_set_linkage(function, wl_internal_linkage())
-
-    // @[weak] — set weak linkage (LLVMWeakAnyLinkage = 5)
-    // Must be checked before c_export which also sets linkage.
-    let is_weak = self.pool.state.fn_weak_flags.contains(fn_node)
-    if is_weak:
-        wl_set_linkage(function, 5)
-
-    // @[c_export] overrides internal linkage to external for C/linker visibility
-    if cc_name.len() > 0:
-        if cc_name.len() > 9 and cc_name.slice(0, 9) == "c_export:":
-            if is_weak:
-                wl_set_linkage(function, 5)  // LLVMWeakAnyLinkage
-            else:
-                wl_set_linkage(function, 0)
-            let export_name = cc_name.slice(9, cc_name.len() as i64)
-            if export_name.len() > 0 and export_name != effective_name:
-                wl_set_value_name(function, export_name)
-            wl_set_call_conv(function, wl_cc_c())
-        else:
-            let cc_id = self.resolve_callconv(cc_name)
-            if cc_id >= 0:
-                wl_set_call_conv(function, cc_id)
-
-    // Apply attributes
-    if (flags / FnFlags.INLINE) % 2 == 1:
-        wl_add_fn_attr(self.context, function, "alwaysinline")
-    if (flags / FnFlags.NOINLINE) % 2 == 1:
-        wl_add_fn_attr(self.context, function, "noinline")
-
-    if has_sret != 0 or byval_mask != 0 or direct_mask != 0 or direct_ret_ty != 0:
-        self.record_c_abi_transform(name_sym, has_sret, sret_ty, byval_mask, vec_copy_i64(&byval_types), direct_mask, vec_copy_i64(&direct_types), direct_ret_ty)
+        self.fn_values.insert(name_sym, function)
+        self.fn_fn_types.insert(name_sym, fn_type)
         if alias_sym != 0:
-            self.record_c_abi_transform(alias_sym, has_sret, sret_ty, byval_mask, vec_copy_i64(&byval_types), direct_mask, vec_copy_i64(&direct_types), direct_ret_ty)
+            self.fn_values.insert(alias_sym, function)
+            self.fn_fn_types.insert(alias_sym, fn_type)
         if method_key_sym != 0:
-            self.record_c_abi_transform(method_key_sym, has_sret, sret_ty, byval_mask, byval_types, direct_mask, direct_types, direct_ret_ty)
+            self.fn_values.insert(method_key_sym, function)
+            self.fn_fn_types.insert(method_key_sym, fn_type)
 
-    self.fn_values.insert(name_sym, function)
-    self.fn_fn_types.insert(name_sym, fn_type)
-    if alias_sym != 0:
-        self.fn_values.insert(alias_sym, function)
-        self.fn_fn_types.insert(alias_sym, fn_type)
-    if method_key_sym != 0:
-        self.fn_values.insert(method_key_sym, function)
-        self.fn_fn_types.insert(method_key_sym, fn_type)
-
-    self.current_method_owner_sym = saved_owner
+        self.current_method_owner_sym = saved_owner
 
 // #D6: PassMode — the per-parameter ABI classification, the SINGLE source of
 // truth. `arg_pass_mode` computes it; both the callee prologue
@@ -4079,229 +4305,237 @@ const PM_DIRECT: i32 = 0
 const PM_INDIRECT: i32 = 1
 const PM_INDIRECT_PLACE: i32 = 2
 
-fn Codegen.arg_pass_mode(self: Codegen, sig_idx: i32, pi: i32) -> i32:
-    if self.sema.sig_param_uses_value_ref_abi(sig_idx, pi) != 0:
-        return PM_INDIRECT_PLACE
-    var p_ty = self.sema_type_to_llvm(self.sema.sig_param_type(sig_idx, pi))
-    if p_ty == 0:
-        p_ty = self.type_fallback()
-    if wl_get_type_kind(p_ty) == wl_void_type_kind():
-        p_ty = wl_i32_type(self.context)
-    if self.internal_abi_needs_indirect_param(p_ty):
-        return PM_INDIRECT
-    PM_DIRECT
-
-fn Codegen.declare_function_from_sig(self: Codegen, fn_sym: i32, sig_idx: i32, force_internal: i32):
-    if fn_sym == 0 or sig_idx < 0:
-        return
-    let cg_sym = self.codegen_sym_for_sema_sym(fn_sym)
-    let sema_name = self.sema_symbol_text(fn_sym)
-    var effective_name =
-        if sema_name.len() > 0:
-            sema_name
-        else:
-            self.function_symbol_name(cg_sym)
-    if self.module_object_mode != 0 and force_internal == 0 and
-        not codegen_preserve_runtime_link_name(self.current_decl_source_file, effective_name):
-        effective_name = self.current_decl_module_link_name(effective_name)
-
-    var ret_ty = self.sema_type_to_llvm(self.sema.sig_return_type(sig_idx))
-    if ret_ty == 0:
-        ret_ty = self.type_fallback()
-    let param_count = self.sema.sig_get_param_count(sig_idx)
-    let param_types: Vec[i64] = Vec.new()
-    for pi in 0..param_count:
+impl Codegen:
+    mut fn arg_pass_mode(sig_idx: i32, pi: i32) -> i32:
+        if self.sema.sig_param_uses_value_ref_abi(sig_idx, pi) != 0:
+            return PM_INDIRECT_PLACE
         var p_ty = self.sema_type_to_llvm(self.sema.sig_param_type(sig_idx, pi))
         if p_ty == 0:
             p_ty = self.type_fallback()
         if wl_get_type_kind(p_ty) == wl_void_type_kind():
             p_ty = wl_i32_type(self.context)
-        // #D6: the prologue reads the single ABI classifier — an IndirectPlace
-        // param is a pointer to the caller's place (value_ref_abi / share-place).
-        if self.arg_pass_mode(sig_idx, pi) == PM_INDIRECT_PLACE:
-            p_ty = wl_ptr_type(self.context)
-            self.record_ref_param(cg_sym, pi, param_count)
-            if cg_sym != fn_sym:
-                self.record_ref_param(fn_sym, pi, param_count)
-        param_types.push(p_ty)
+        if self.internal_abi_needs_indirect_param(p_ty):
+            return PM_INDIRECT
+        PM_DIRECT
 
-    var actual_ret_ty = ret_ty
-    var has_sret = 0
-    var sret_ty: i64 = 0
-    var byval_mask: i64 = 0
-    let byval_types: Vec[i64] = Vec.new()
-    let direct_types: Vec[i64] = Vec.new()
-    let actual_param_types: Vec[i64] = Vec.new()
-    if self.internal_abi_needs_sret(ret_ty):
-        has_sret = 1
-        sret_ty = ret_ty
-        actual_ret_ty = wl_void_type(self.context)
-        actual_param_types.push(wl_ptr_type(self.context))
-    for api in 0..param_count:
-        let source_ty = param_types.get(api as i64)
-        // #D6: byval indirection is the Indirect pass mode (callee-owned copy).
-        if self.arg_pass_mode(sig_idx, api) == PM_INDIRECT:
-            actual_param_types.push(wl_ptr_type(self.context))
-            byval_mask = byval_mask | ((1 as i64) << (api as u32))
-            byval_types.push(source_ty)
-            direct_types.push(0)
-        else:
-            actual_param_types.push(source_ty)
-            byval_types.push(0)
-            direct_types.push(0)
-
-    let fn_type = wl_function_type(actual_ret_ty, vec_data_i64(&actual_param_types), actual_param_types.len() as i32, self.sema.sig_is_variadic(sig_idx))
-    let existing = wl_get_named_function(self.llmod, effective_name)
-    let function = if existing != 0: existing else: wl_add_function(self.llmod, effective_name, fn_type)
-    if has_sret != 0:
-        wl_add_sret_attr(self.context, function, 0, sret_ty)
-    if has_sret != 0 or byval_mask != 0:
-        self.record_c_abi_transform(cg_sym, has_sret, sret_ty, byval_mask, vec_copy_i64(&byval_types), 0, vec_copy_i64(&direct_types), 0)
-        if cg_sym != fn_sym:
-            self.record_c_abi_transform(fn_sym, has_sret, sret_ty, byval_mask, byval_types, 0, direct_types, 0)
-    if force_internal != 0:
-        wl_set_linkage(function, wl_internal_linkage())
-    else if self.module_object_mode == 0:
-        if effective_name != "main" and not self.current_decl_source_file.contains("lib/std/") and
+    mut fn declare_function_from_sig(fn_sym: i32, sig_idx: i32, force_internal: i32):
+        if fn_sym == 0 or sig_idx < 0:
+            return
+        let cg_sym = self.codegen_sym_for_sema_sym(fn_sym)
+        let sema_name = self.sema_symbol_text(fn_sym)
+        var effective_name =
+            if sema_name.len() > 0:
+                sema_name
+            else:
+                self.function_symbol_name(cg_sym)
+        if self.module_object_mode != 0 and force_internal == 0 and
             not codegen_preserve_runtime_link_name(self.current_decl_source_file, effective_name):
+            effective_name = self.current_decl_module_link_name(effective_name)
+
+        var ret_ty = self.sema_type_to_llvm(self.sema.sig_return_type(sig_idx))
+        if ret_ty == 0:
+            ret_ty = self.type_fallback()
+        let param_count = self.sema.sig_get_param_count(sig_idx)
+        let param_types: Vec[i64] = Vec.new()
+        for pi in 0..param_count:
+            var p_ty = self.sema_type_to_llvm(self.sema.sig_param_type(sig_idx, pi))
+            if p_ty == 0:
+                p_ty = self.type_fallback()
+            if wl_get_type_kind(p_ty) == wl_void_type_kind():
+                p_ty = wl_i32_type(self.context)
+            // #D6: the prologue reads the single ABI classifier — an IndirectPlace
+            // param is a pointer to the caller's place (value_ref_abi / share-place).
+            if self.arg_pass_mode(sig_idx, pi) == PM_INDIRECT_PLACE:
+                p_ty = wl_ptr_type(self.context)
+                self.record_ref_param(cg_sym, pi, param_count)
+                if cg_sym != fn_sym:
+                    self.record_ref_param(fn_sym, pi, param_count)
+            param_types.push(p_ty)
+
+        var actual_ret_ty = ret_ty
+        var has_sret = 0
+        var sret_ty: i64 = 0
+        var byval_mask: i64 = 0
+        let byval_types: Vec[i64] = Vec.new()
+        let direct_types: Vec[i64] = Vec.new()
+        let actual_param_types: Vec[i64] = Vec.new()
+        if self.internal_abi_needs_sret(ret_ty):
+            has_sret = 1
+            sret_ty = ret_ty
+            actual_ret_ty = wl_void_type(self.context)
+            actual_param_types.push(wl_ptr_type(self.context))
+        for api in 0..param_count:
+            let source_ty = param_types.get(api as i64)
+            // #D6: byval indirection is the Indirect pass mode (callee-owned copy).
+            if self.arg_pass_mode(sig_idx, api) == PM_INDIRECT:
+                actual_param_types.push(wl_ptr_type(self.context))
+                byval_mask = byval_mask | ((1 as i64) << (api as u32))
+                byval_types.push(source_ty)
+                direct_types.push(0)
+            else:
+                actual_param_types.push(source_ty)
+                byval_types.push(0)
+                direct_types.push(0)
+
+        let fn_type = wl_function_type(actual_ret_ty, vec_data_i64(&actual_param_types), actual_param_types.len() as i32, self.sema.sig_is_variadic(sig_idx))
+        let existing = wl_get_named_function(self.llmod, effective_name)
+        let function = if existing != 0: existing else: wl_add_function(self.llmod, effective_name, fn_type)
+        if has_sret != 0:
+            wl_add_sret_attr(self.context, function, 0, sret_ty)
+        if has_sret != 0 or byval_mask != 0:
+            self.record_c_abi_transform(cg_sym, has_sret, sret_ty, byval_mask, vec_copy_i64(&byval_types), 0, vec_copy_i64(&direct_types), 0)
+            if cg_sym != fn_sym:
+                self.record_c_abi_transform(fn_sym, has_sret, sret_ty, byval_mask, byval_types, 0, direct_types, 0)
+        if force_internal != 0:
             wl_set_linkage(function, wl_internal_linkage())
+        else if self.module_object_mode == 0:
+            if effective_name != "main" and not self.current_decl_source_file.contains("lib/std/") and
+                not codegen_preserve_runtime_link_name(self.current_decl_source_file, effective_name):
+                wl_set_linkage(function, wl_internal_linkage())
 
-    self.fn_values.insert(cg_sym, function)
-    self.fn_fn_types.insert(cg_sym, fn_type)
-    if cg_sym != fn_sym:
-        self.fn_values.insert(fn_sym, function)
-        self.fn_fn_types.insert(fn_sym, fn_type)
+        self.fn_values.insert(cg_sym, function)
+        self.fn_fn_types.insert(cg_sym, fn_type)
+        if cg_sym != fn_sym:
+            self.fn_values.insert(fn_sym, function)
+            self.fn_fn_types.insert(fn_sym, fn_type)
 
-fn Codegen.declare_generator_next_functions(self: Codegen):
-    for si in 0..self.sema.sig_names.len() as i32:
-        let fn_sym = self.sema.sig_names.get(si as i64)
-        if not self.sema.generator_next_fn_syms.contains(fn_sym):
-            continue
-        self.declare_function_from_sig(fn_sym, si, 1)
-
-fn Codegen.find_sema_sig_for_mir_body_sym(self: Codegen, body_sym: i32) -> (i32, i32):
-    let body_name = self.function_symbol_name(body_sym)
-    if body_name.len() == 0:
-        return (0, -1)
-    for si in 0..self.sema.sig_names.len() as i32:
-        let sig_sym = self.sema.sig_names.get(si as i64)
-        if self.sema_symbol_text(sig_sym) == body_name:
-            return (sig_sym, si)
-    (0, -1)
-
-fn Codegen.mir_body_is_generated_function_clause(self: Codegen, body_sym: i32) -> bool:
-    let body_name = self.function_symbol_name(body_sym)
-    if body_name.contains("$clause$"):
-        return true
-    for gi in 0..self.sema.fn_clause_group_count():
-        if self.sema_symbol_text(self.sema.fn_clause_group_name(gi)) == body_name:
-            return true
-    false
-
-fn Codegen.declare_mir_only_functions(self: Codegen):
-    for bi in 0..self.mir_input.body_fn_syms.len() as i32:
-        let body_sym = self.mir_input.body_fn_syms.get(bi as i64)
-        if body_sym == 0:
-            continue
-        if not self.mir_body_is_generated_function_clause(body_sym):
-            continue
-        if self.fn_values.get(body_sym).is_some():
-            continue
-        let sig_pair = self.find_sema_sig_for_mir_body_sym(body_sym)
-        let sig_sym = sig_pair.0
-        let sig_idx = sig_pair.1
-        if sig_sym != 0 and sig_idx >= 0:
-            self.declare_function_from_sig(sig_sym, sig_idx, 1)
-
-fn Codegen.gen_mir_only_functions(self: Codegen):
-    for bi in 0..self.mir_input.body_fn_syms.len() as i32:
-        let body_sym = self.mir_input.body_fn_syms.get(bi as i64)
-        if body_sym == 0:
-            continue
-        if not self.mir_body_is_generated_function_clause(body_sym):
-            continue
-        if self.generated_mir_body_syms.contains(body_sym):
-            continue
-        let body = self.mir_input.bodies.get(bi as i64)
-        if body.lowering_failed != 0 or body.block_count() == 0:
-            continue
-        self.gen_function_mir(0, body)
-
-fn Codegen.is_method_on_generic_struct(self: Codegen, name_sym: i32) -> bool:
-    if name_sym <= 0:
-        return false
-    let raw_name = self.intern.resolve(name_sym)
-    let name_str = if raw_name.len() > 0: raw_name else: self.sema_symbol_text(name_sym)
-    if name_str.len() == 0:
-        return false
-    for di in 0..name_str.len() as i32:
-        if name_str.byte_at(di as i64) == 46:
-            let owner_sym = self.intern.intern(name_str.slice(0, di as i64))
-            return self.generic_type_decl_node(owner_sym) != 0
-    false
-
-fn Codegen.is_ref_param(self: Codegen, fn_sym: i32, param_idx: i32) -> bool:
-    let start_opt = self.fn_ref_param_starts.get(fn_sym)
-    if not start_opt.is_some():
-        return false
-    let start = start_opt.unwrap()
-    let slot = start + param_idx
-    if slot < 0 or slot >= self.fn_ref_param_data.len() as i32:
-        return false
-    self.fn_ref_param_data.get(slot as i64) != 0
-
-fn Codegen.record_ref_param(self: Codegen, fn_sym: i32, idx: i32, count: i32):
-    if not self.fn_ref_param_starts.get(fn_sym).is_some():
-        let start = self.fn_ref_param_data.len() as i32
-        self.fn_ref_param_starts.insert(fn_sym, start)
-        for j in 0..count:
-            self.fn_ref_param_data.push(0)
-    let base = self.fn_ref_param_starts.get(fn_sym).unwrap()
-    self.fn_ref_param_data.set_i32((base + idx) as i64, 1)
-
-fn Codegen.apply_noalias_param_attrs(self: Codegen, function: i64, param_start: i32, param_count: i32):
-    self.apply_noalias_param_attrs_with_offset(function, param_start, param_count, 0)
-
-fn Codegen.apply_noalias_param_attrs_with_offset(self: Codegen, function: i64, param_start: i32, param_count: i32, param_offset: i32):
-    if function == 0 or param_start < 0 or param_count <= 0:
-        return
-    let fn_type = wl_global_get_value_type(function)
-    for pi in 0..param_count:
-        let actual_idx = pi + param_offset
-        var param_ty = if fn_type != 0: wl_get_fn_param_type(fn_type, actual_idx) else: 0
-        if param_ty == 0:
-            let param = wl_get_param(function, actual_idx)
-            if param == 0:
+    mut fn declare_generator_next_functions():
+        for si in 0..self.sema.sig_names.len() as i32:
+            let fn_sym = self.sema.sig_names.get(si as i64)
+            if not self.sema.generator_next_fn_syms.contains(fn_sym):
                 continue
-            param_ty = wl_type_of(param)
-        if wl_get_type_kind(param_ty) != wl_pointer_type_kind():
-            continue
-        let flags = self.pool.fn_param_flags(param_start, pi)
-        if fn_param_is_noalias(flags) != 0:
-            wl_add_param_attr(self.context, function, actual_idx, "noalias")
+            self.declare_function_from_sig(fn_sym, si, 1)
 
-fn Codegen.record_dyn_param(self: Codegen, fn_sym: i32, idx: i32, count: i32, trait_sym: i32):
-    if not self.fn_dyn_param_starts.get(fn_sym).is_some():
-        let start = self.fn_dyn_param_data.len() as i32
-        self.fn_dyn_param_starts.insert(fn_sym, start)
-        for j in 0..count:
-            self.fn_dyn_param_data.push(0)
-    let base = self.fn_dyn_param_starts.get(fn_sym).unwrap()
-    self.fn_dyn_param_data.set_i32((base + idx) as i64, trait_sym)
+    fn find_sema_sig_for_mir_body_sym(body_sym: i32) -> (i32, i32):
+        let body_name = self.function_symbol_name(body_sym)
+        if body_name.len() == 0:
+            return (0, -1)
+        for si in 0..self.sema.sig_names.len() as i32:
+            let sig_sym = self.sema.sig_names.get(si as i64)
+            if self.sema_symbol_text(sig_sym) == body_name:
+                return (sig_sym, si)
+        (0, -1)
 
-fn Codegen.fn_callconv_name(self: Codegen, meta: i32) -> str:
-    if meta < 0:
-        return ""
-    let cc_sym = self.pool.fn_meta_tp_start(meta)
-    if cc_sym == 0:
-        return ""
-    let cc_name = self.intern.resolve(cc_sym)
-    if cc_name.len() >= 2 and cc_name.byte_at(0) == 34 and cc_name.byte_at(cc_name.len() - 1) == 34:
-        return cc_name.slice(1, cc_name.len() - 1)
-    cc_name
+    fn mir_body_is_generated_function_clause(body_sym: i32) -> bool:
+        let body_name = self.function_symbol_name(body_sym)
+        if body_name.contains("$clause$"):
+            return true
+        for gi in 0..self.sema.fn_clause_group_count():
+            if self.sema_symbol_text(self.sema.fn_clause_group_name(gi)) == body_name:
+                return true
+        false
 
-fn Codegen.fn_uses_c_abi(self: Codegen, cc_name: str) -> bool:
-    cc_name == "c" or (cc_name.len() > 9 and cc_name.slice(0, 9) == "c_export:")
+    mut fn declare_mir_only_functions():
+        for bi in 0..self.mir_input.body_fn_syms.len() as i32:
+            let body_sym = self.mir_input.body_fn_syms.get(bi as i64)
+            if body_sym == 0:
+                continue
+            if not self.mir_body_is_generated_function_clause(body_sym):
+                continue
+            if self.fn_values.get(body_sym).is_some():
+                continue
+            let sig_pair = self.find_sema_sig_for_mir_body_sym(body_sym)
+            let sig_sym = sig_pair.0
+            let sig_idx = sig_pair.1
+            if sig_sym != 0 and sig_idx >= 0:
+                self.declare_function_from_sig(sig_sym, sig_idx, 1)
+
+    mut fn gen_mir_only_functions():
+        for bi in 0..self.mir_input.body_fn_syms.len() as i32:
+            let body_sym = self.mir_input.body_fn_syms.get(bi as i64)
+            if body_sym == 0:
+                continue
+            if not self.mir_body_is_generated_function_clause(body_sym):
+                continue
+            if self.generated_mir_body_syms.contains(body_sym):
+                continue
+            let body = self.mir_input.bodies.get(bi as i64)
+            if body.lowering_failed != 0 or body.block_count() == 0:
+                continue
+            self.gen_function_mir(0, body)
+
+    fn is_method_on_generic_struct(name_sym: i32) -> bool:
+        if name_sym <= 0:
+            return false
+        let raw_name = self.intern.resolve(name_sym)
+        let name_str = if raw_name.len() > 0: raw_name else: self.sema_symbol_text(name_sym)
+        if name_str.len() == 0:
+            return false
+        for di in 0..name_str.len() as i32:
+            if name_str.byte_at(di as i64) == 46:
+                let owner_sym = self.intern.intern(name_str.slice(0, di as i64))
+                return self.generic_type_decl_node(owner_sym) != 0
+        false
+
+    fn is_ref_param(fn_sym: i32, param_idx: i32) -> bool:
+        let start_opt = self.fn_ref_param_starts.get(fn_sym)
+        if not start_opt.is_some():
+            return false
+        let start = start_opt.unwrap()
+        let slot = start + param_idx
+        if slot < 0 or slot >= self.fn_ref_param_data.len() as i32:
+            return false
+        self.fn_ref_param_data.get(slot as i64) != 0
+
+    fn record_ref_param(fn_sym: i32, idx: i32, count: i32):
+        if not self.fn_ref_param_starts.get(fn_sym).is_some():
+            let start = self.fn_ref_param_data.len() as i32
+            self.fn_ref_param_starts.insert(fn_sym, start)
+            for j in 0..count:
+                self.fn_ref_param_data.push(0)
+        let base = self.fn_ref_param_starts.get(fn_sym).unwrap()
+        self.fn_ref_param_data.set_i32((base + idx) as i64, 1)
+
+    fn record_ref_param_aliases(fn_sym: i32, alias_sym: i32, method_key_sym: i32, idx: i32, count: i32):
+        self.record_ref_param(fn_sym, idx, count)
+        if alias_sym != 0:
+            self.record_ref_param(alias_sym, idx, count)
+        if method_key_sym != 0:
+            self.record_ref_param(method_key_sym, idx, count)
+
+    fn apply_noalias_param_attrs(function: i64, param_start: i32, param_count: i32):
+        self.apply_noalias_param_attrs_with_offset(function, param_start, param_count, 0)
+
+    fn apply_noalias_param_attrs_with_offset(function: i64, param_start: i32, param_count: i32, param_offset: i32):
+        if function == 0 or param_start < 0 or param_count <= 0:
+            return
+        let fn_type = wl_global_get_value_type(function)
+        for pi in 0..param_count:
+            let actual_idx = pi + param_offset
+            var param_ty = if fn_type != 0: wl_get_fn_param_type(fn_type, actual_idx) else: 0
+            if param_ty == 0:
+                let param = wl_get_param(function, actual_idx)
+                if param == 0:
+                    continue
+                param_ty = wl_type_of(param)
+            if wl_get_type_kind(param_ty) != wl_pointer_type_kind():
+                continue
+            let flags = self.pool.fn_param_flags(param_start, pi)
+            if fn_param_is_noalias(flags) != 0:
+                wl_add_param_attr(self.context, function, actual_idx, "noalias")
+
+    fn record_dyn_param(fn_sym: i32, idx: i32, count: i32, trait_sym: i32):
+        if not self.fn_dyn_param_starts.get(fn_sym).is_some():
+            let start = self.fn_dyn_param_data.len() as i32
+            self.fn_dyn_param_starts.insert(fn_sym, start)
+            for j in 0..count:
+                self.fn_dyn_param_data.push(0)
+        let base = self.fn_dyn_param_starts.get(fn_sym).unwrap()
+        self.fn_dyn_param_data.set_i32((base + idx) as i64, trait_sym)
+
+    fn fn_callconv_name(meta: i32) -> str:
+        if meta < 0:
+            return ""
+        let cc_sym = self.pool.fn_meta_tp_start(meta)
+        if cc_sym == 0:
+            return ""
+        let cc_name = self.intern.resolve(cc_sym)
+        if cc_name.len() >= 2 and cc_name.byte_at(0) == 34 and cc_name.byte_at(cc_name.len() - 1) == 34:
+            return cc_name.slice(1, cc_name.len() - 1)
+        cc_name
+
+    fn fn_uses_c_abi(cc_name: str) -> bool:
+        cc_name == "c" or (cc_name.len() > 9 and cc_name.slice(0, 9) == "c_export:")
 
 fn codegen_extern_uses_internal_abi(name: str, cc_name: str) -> bool:
     if cc_name.len() > 0:
@@ -4323,1679 +4557,1363 @@ fn codegen_windows_x86_64() -> bool:
     let arch = with_sysinfo_arch()
     os == "Windows" and arch == "x86_64"
 
-fn Codegen.internal_abi_needs_sret(self: Codegen, ret_ty: i64) -> bool:
-    if not codegen_windows_x86_64():
-        return false
-    if ret_ty == 0:
-        return false
-    let kind = wl_get_type_kind(ret_ty)
-    if kind != wl_struct_type_kind() and kind != wl_array_type_kind():
-        return false
-    self.abi_size_of(ret_ty) > 8
-
-fn Codegen.internal_abi_needs_indirect_param(self: Codegen, param_ty: i64) -> bool:
-    if not codegen_windows_x86_64():
-        return false
-    if param_ty == 0:
-        return false
-    let kind = wl_get_type_kind(param_ty)
-    if kind != wl_struct_type_kind() and kind != wl_array_type_kind():
-        return false
-    self.abi_size_of(param_ty) > 8
-
-fn Codegen.c_abi_needs_sret(self: Codegen, ret_ty: i64) -> bool:
-    if ret_ty == 0:
-        return false
-    if wl_get_type_kind(ret_ty) != wl_struct_type_kind():
-        return false
-    if codegen_windows_x86_64():
-        return self.c_abi_direct_struct_return_type(ret_ty) == 0
-    self.abi_size_of(ret_ty) > 16
-
-fn Codegen.c_abi_needs_indirect_param(self: Codegen, param_ty: i64) -> bool:
-    if param_ty == 0:
-        return false
-    if wl_get_type_kind(param_ty) != wl_struct_type_kind():
-        return false
-    if codegen_windows_x86_64():
-        return self.c_abi_direct_struct_param_type(param_ty) == 0
-    self.abi_size_of(param_ty) > 16
-
-fn Codegen.c_abi_integer_aggregate_ok(self: Codegen, ty: i64) -> bool:
-    if ty == 0:
-        return false
-    let kind = wl_get_type_kind(ty)
-    if kind == wl_integer_type_kind() or kind == wl_pointer_type_kind():
-        return true
-    if kind == wl_array_type_kind():
-        return self.c_abi_integer_aggregate_ok(wl_get_element_type(ty))
-    if kind == wl_struct_type_kind():
-        let field_count = wl_count_struct_elem_types(ty)
-        if field_count <= 0:
+impl Codegen:
+    mut fn internal_abi_needs_sret(ret_ty: i64) -> bool:
+        if not codegen_windows_x86_64():
             return false
-        for fi in 0..field_count:
-            if not self.c_abi_integer_aggregate_ok(wl_struct_get_type_at(ty, fi)):
+        if ret_ty == 0:
+            return false
+        let kind = wl_get_type_kind(ret_ty)
+        if kind != wl_struct_type_kind() and kind != wl_array_type_kind():
+            return false
+        self.abi_size_of(ret_ty) > 8
+
+    mut fn internal_abi_needs_indirect_param(param_ty: i64) -> bool:
+        if not codegen_windows_x86_64():
+            return false
+        if param_ty == 0:
+            return false
+        let kind = wl_get_type_kind(param_ty)
+        if kind != wl_struct_type_kind() and kind != wl_array_type_kind():
+            return false
+        self.abi_size_of(param_ty) > 8
+
+    mut fn c_abi_needs_sret(ret_ty: i64) -> bool:
+        if ret_ty == 0:
+            return false
+        if wl_get_type_kind(ret_ty) != wl_struct_type_kind():
+            return false
+        if codegen_windows_x86_64():
+            return self.c_abi_direct_struct_return_type(ret_ty) == 0
+        self.abi_size_of(ret_ty) > 16
+
+    mut fn c_abi_needs_indirect_param(param_ty: i64) -> bool:
+        if param_ty == 0:
+            return false
+        if wl_get_type_kind(param_ty) != wl_struct_type_kind():
+            return false
+        if codegen_windows_x86_64():
+            return self.c_abi_direct_struct_param_type(param_ty) == 0
+        self.abi_size_of(param_ty) > 16
+
+    fn c_abi_integer_aggregate_ok(ty: i64) -> bool:
+        if ty == 0:
+            return false
+        let kind = wl_get_type_kind(ty)
+        if kind == wl_integer_type_kind() or kind == wl_pointer_type_kind():
+            return true
+        if kind == wl_array_type_kind():
+            return self.c_abi_integer_aggregate_ok(wl_get_element_type(ty))
+        if kind == wl_struct_type_kind():
+            let field_count = wl_count_struct_elem_types(ty)
+            if field_count <= 0:
                 return false
-        return true
-    false
+            for fi in 0..field_count:
+                if not self.c_abi_integer_aggregate_ok(wl_struct_get_type_at(ty, fi)):
+                    return false
+            return true
+        false
 
-fn Codegen.c_abi_hfa_accumulate(self: Codegen, ty: i64, state: i32) -> i32:
-    if ty == 0 or state < 0:
-        return -1
-    let kind = wl_get_type_kind(ty)
-    if kind == wl_float_type_kind() or kind == wl_double_type_kind():
-        let scalar_kind = if kind == wl_float_type_kind(): 1 else: 2
-        if state == 0:
-            return scalar_kind * 16 + 1
-        let prev_kind = state / 16
-        let prev_count = state % 16
-        if prev_kind != scalar_kind or prev_count >= 4:
+    fn c_abi_hfa_accumulate(ty: i64, state: i32) -> i32:
+        if ty == 0 or state < 0:
             return -1
-        return prev_kind * 16 + prev_count + 1
-    if kind == wl_array_type_kind():
-        let elem = wl_get_element_type(ty)
-        var out = state
-        let count = wl_get_array_length(ty) as i32
-        for _i in 0..count:
-            out = self.c_abi_hfa_accumulate(elem, out)
-            if out < 0:
+        let kind = wl_get_type_kind(ty)
+        if kind == wl_float_type_kind() or kind == wl_double_type_kind():
+            let scalar_kind = if kind == wl_float_type_kind(): 1 else: 2
+            if state == 0:
+                return scalar_kind * 16 + 1
+            let prev_kind = state / 16
+            let prev_count = state % 16
+            if prev_kind != scalar_kind or prev_count >= 4:
                 return -1
-        return out
-    if kind == wl_struct_type_kind():
-        var out2 = state
-        let field_count = wl_count_struct_elem_types(ty)
-        for fi in 0..field_count:
-            out2 = self.c_abi_hfa_accumulate(wl_struct_get_type_at(ty, fi), out2)
-            if out2 < 0:
-                return -1
-        return out2
-    -1
+            return prev_kind * 16 + prev_count + 1
+        if kind == wl_array_type_kind():
+            let elem = wl_get_element_type(ty)
+            var out = state
+            let count = wl_get_array_length(ty) as i32
+            for _i in 0..count:
+                out = self.c_abi_hfa_accumulate(elem, out)
+                if out < 0:
+                    return -1
+            return out
+        if kind == wl_struct_type_kind():
+            var out2 = state
+            let field_count = wl_count_struct_elem_types(ty)
+            for fi in 0..field_count:
+                out2 = self.c_abi_hfa_accumulate(wl_struct_get_type_at(ty, fi), out2)
+                if out2 < 0:
+                    return -1
+            return out2
+        -1
 
-fn Codegen.c_abi_hfa_info(self: Codegen, ty: i64) -> i32:
-    if ty == 0 or wl_get_type_kind(ty) != wl_struct_type_kind():
-        return 0
-    let info = self.c_abi_hfa_accumulate(ty, 0)
-    if info <= 0:
-        return 0
-    let count = info % 16
-    if count <= 0 or count > 4:
-        return 0
-    info
+    fn c_abi_hfa_info(ty: i64) -> i32:
+        if ty == 0 or wl_get_type_kind(ty) != wl_struct_type_kind():
+            return 0
+        let info = self.c_abi_hfa_accumulate(ty, 0)
+        if info <= 0:
+            return 0
+        let count = info % 16
+        if count <= 0 or count > 4:
+            return 0
+        info
 
-fn Codegen.c_abi_hfa_type(self: Codegen, info: i32) -> i64:
-    let kind = info / 16
-    let count = info % 16
-    if count <= 0:
-        return 0
-    let elem_ty = if kind == 1: wl_f32_type(self.context) else: wl_f64_type(self.context)
-    wl_array_type(elem_ty, count as i64)
+    fn c_abi_hfa_type(info: i32) -> i64:
+        let kind = info / 16
+        let count = info % 16
+        if count <= 0:
+            return 0
+        let elem_ty = if kind == 1: wl_f32_type(self.context) else: wl_f64_type(self.context)
+        wl_array_type(elem_ty, count as i64)
 
-fn Codegen.c_abi_direct_struct_param_type(self: Codegen, ty: i64) -> i64:
-    if ty == 0 or wl_get_type_kind(ty) != wl_struct_type_kind():
-        return 0
-    if self.is_str_type(ty):
-        return 0
-    if codegen_windows_x86_64():
+    mut fn c_abi_direct_struct_param_type(ty: i64) -> i64:
+        if ty == 0 or wl_get_type_kind(ty) != wl_struct_type_kind():
+            return 0
+        if self.is_str_type(ty):
+            return 0
+        if codegen_windows_x86_64():
+            let size = self.abi_size_of(ty)
+            if (size == 1 or size == 2 or size == 4 or size == 8) and self.c_abi_integer_aggregate_ok(ty):
+                return wl_int_type_n(self.context, (size * 8) as i32)
+            return 0
+        if not codegen_c_abi_darwin_arm64():
+            return 0
+        let hfa = self.c_abi_hfa_info(ty)
+        if hfa != 0:
+            return self.c_abi_hfa_type(hfa)
         let size = self.abi_size_of(ty)
-        if (size == 1 or size == 2 or size == 4 or size == 8) and self.c_abi_integer_aggregate_ok(ty):
-            return wl_int_type_n(self.context, (size * 8) as i32)
-        return 0
-    if not codegen_c_abi_darwin_arm64():
-        return 0
-    let hfa = self.c_abi_hfa_info(ty)
-    if hfa != 0:
-        return self.c_abi_hfa_type(hfa)
-    let size = self.abi_size_of(ty)
-    if size <= 0 or size > 16:
-        return 0
-    if not self.c_abi_integer_aggregate_ok(ty):
-        return 0
-    if size <= 8:
-        return wl_i64_type(self.context)
-    wl_array_type(wl_i64_type(self.context), 2)
+        if size <= 0 or size > 16:
+            return 0
+        if not self.c_abi_integer_aggregate_ok(ty):
+            return 0
+        if size <= 8:
+            return wl_i64_type(self.context)
+        wl_array_type(wl_i64_type(self.context), 2)
 
-fn Codegen.c_abi_direct_struct_return_type(self: Codegen, ty: i64) -> i64:
-    if ty == 0 or wl_get_type_kind(ty) != wl_struct_type_kind():
-        return 0
-    if self.is_str_type(ty):
-        return 0
-    if codegen_windows_x86_64():
+    mut fn c_abi_direct_struct_return_type(ty: i64) -> i64:
+        if ty == 0 or wl_get_type_kind(ty) != wl_struct_type_kind():
+            return 0
+        if self.is_str_type(ty):
+            return 0
+        if codegen_windows_x86_64():
+            let size = self.abi_size_of(ty)
+            if (size == 1 or size == 2 or size == 4 or size == 8) and self.c_abi_integer_aggregate_ok(ty):
+                return wl_int_type_n(self.context, (size * 8) as i32)
+            return 0
+        if not codegen_c_abi_darwin_arm64():
+            return 0
+        if self.c_abi_hfa_info(ty) != 0:
+            return 0
         let size = self.abi_size_of(ty)
-        if (size == 1 or size == 2 or size == 4 or size == 8) and self.c_abi_integer_aggregate_ok(ty):
+        if size <= 0 or size > 16:
+            return 0
+        if not self.c_abi_integer_aggregate_ok(ty):
+            return 0
+        if size <= 8:
             return wl_int_type_n(self.context, (size * 8) as i32)
-        return 0
-    if not codegen_c_abi_darwin_arm64():
-        return 0
-    if self.c_abi_hfa_info(ty) != 0:
-        return 0
-    let size = self.abi_size_of(ty)
-    if size <= 0 or size > 16:
-        return 0
-    if not self.c_abi_integer_aggregate_ok(ty):
-        return 0
-    if size <= 8:
-        return wl_int_type_n(self.context, (size * 8) as i32)
-    wl_array_type(wl_i64_type(self.context), 2)
+        wl_array_type(wl_i64_type(self.context), 2)
 
-fn Codegen.ensure_llvm_memcpy_declared(self: Codegen) -> i64:
-    let mc_sym = self.intern.intern("llvm.memcpy.p0.p0.i64")
-    let cached = self.fn_values.get(mc_sym)
-    if cached.is_some():
-        return cached.unwrap() as i64
-    let params: Vec[i64] = Vec.new()
-    params.push(wl_ptr_type(self.context))
-    params.push(wl_ptr_type(self.context))
-    params.push(wl_i64_type(self.context))
-    params.push(wl_i1_type(self.context))
-    let fn_ty = wl_function_type(wl_void_type(self.context), vec_data_i64(&params), 4, 0)
-    let fn_val = wl_add_function(self.llmod, "llvm.memcpy.p0.p0.i64", fn_ty)
-    self.fn_values.insert(mc_sym, fn_val)
-    self.fn_fn_types.insert(mc_sym, fn_ty)
-    fn_val
+    fn ensure_llvm_memcpy_declared() -> i64:
+        let mc_sym = self.intern.intern("llvm.memcpy.p0.p0.i64")
+        let cached = self.fn_values.get(mc_sym)
+        if cached.is_some():
+            return cached.unwrap() as i64
+        let params: Vec[i64] = Vec.new()
+        params.push(wl_ptr_type(self.context))
+        params.push(wl_ptr_type(self.context))
+        params.push(wl_i64_type(self.context))
+        params.push(wl_i1_type(self.context))
+        let fn_ty = wl_function_type(wl_void_type(self.context), vec_data_i64(&params), 4, 0)
+        let fn_val = wl_add_function(self.llmod, "llvm.memcpy.p0.p0.i64", fn_ty)
+        self.fn_values.insert(mc_sym, fn_val)
+        self.fn_fn_types.insert(mc_sym, fn_ty)
+        fn_val
 
-fn Codegen.emit_llvm_memcpy(self: Codegen, dst: i64, src: i64, byte_count: i64):
-    let fn_val = self.ensure_llvm_memcpy_declared()
-    let fn_ty = wl_global_get_value_type(fn_val)
-    let args: Vec[i64] = Vec.new()
-    args.push(dst)
-    args.push(src)
-    args.push(wl_const_int(wl_i64_type(self.context), byte_count, 0))
-    args.push(wl_const_int(wl_i1_type(self.context), 0, 0))
-    let _ = wl_build_call(self.builder, fn_ty, fn_val, vec_data_i64(&args), 4)
+    fn emit_llvm_memcpy(dst: i64, src: i64, byte_count: i64):
+        let fn_val = self.ensure_llvm_memcpy_declared()
+        let fn_ty = wl_global_get_value_type(fn_val)
+        let args: Vec[i64] = Vec.new()
+        args.push(dst)
+        args.push(src)
+        args.push(wl_const_int(wl_i64_type(self.context), byte_count, 0))
+        args.push(wl_const_int(wl_i1_type(self.context), 0, 0))
+        let _ = wl_build_call(self.builder, fn_ty, fn_val, vec_data_i64(&args), 4)
 
-fn Codegen.c_abi_pack_direct_value(self: Codegen, value: i64, abi_ty: i64) -> i64:
-    if value == 0 or abi_ty == 0:
-        return value
-    if wl_type_of(value) == abi_ty:
-        return value
-    let source_ty = wl_type_of(value)
-    let source_slot = self.create_entry_alloca(source_ty)
-    wl_build_store(self.builder, value, source_slot)
-    let abi_slot = self.create_entry_alloca(abi_ty)
-    wl_build_store(self.builder, wl_const_null(abi_ty), abi_slot)
-    self.emit_llvm_memcpy(abi_slot, source_slot, self.abi_size_of(source_ty))
-    wl_build_load(self.builder, abi_ty, abi_slot)
+    mut fn c_abi_pack_direct_value(value: i64, abi_ty: i64) -> i64:
+        if value == 0 or abi_ty == 0:
+            return value
+        if wl_type_of(value) == abi_ty:
+            return value
+        let source_ty = wl_type_of(value)
+        let source_slot = self.create_entry_alloca(source_ty)
+        wl_build_store(self.builder, value, source_slot)
+        let abi_slot = self.create_entry_alloca(abi_ty)
+        wl_build_store(self.builder, wl_const_null(abi_ty), abi_slot)
+        self.emit_llvm_memcpy(abi_slot, source_slot, self.abi_size_of(source_ty))
+        wl_build_load(self.builder, abi_ty, abi_slot)
 
-fn Codegen.c_abi_unpack_direct_value(self: Codegen, value: i64, original_ty: i64) -> i64:
-    if value == 0 or original_ty == 0:
-        return value
-    if wl_type_of(value) == original_ty:
-        return value
-    let abi_ty = wl_type_of(value)
-    let abi_slot = self.create_entry_alloca(abi_ty)
-    wl_build_store(self.builder, value, abi_slot)
-    let source_slot = self.create_entry_alloca(original_ty)
-    wl_build_store(self.builder, wl_const_null(original_ty), source_slot)
-    self.emit_llvm_memcpy(source_slot, abi_slot, self.abi_size_of(original_ty))
-    wl_build_load(self.builder, original_ty, source_slot)
+    mut fn c_abi_unpack_direct_value(value: i64, original_ty: i64) -> i64:
+        if value == 0 or original_ty == 0:
+            return value
+        if wl_type_of(value) == original_ty:
+            return value
+        let abi_ty = wl_type_of(value)
+        let abi_slot = self.create_entry_alloca(abi_ty)
+        wl_build_store(self.builder, value, abi_slot)
+        let source_slot = self.create_entry_alloca(original_ty)
+        wl_build_store(self.builder, wl_const_null(original_ty), source_slot)
+        self.emit_llvm_memcpy(source_slot, abi_slot, self.abi_size_of(original_ty))
+        wl_build_load(self.builder, original_ty, source_slot)
 
-fn Codegen.record_c_abi_transform(self: Codegen, fn_sym: i32, has_sret: i32, sret_ty: i64, byval_mask: i64, byval_types: Vec[i64], direct_mask: i64, direct_types: Vec[i64], direct_ret_ty: i64):
-    if fn_sym == 0:
-        return
-    if has_sret == 0 and byval_mask == 0 and direct_mask == 0 and direct_ret_ty == 0:
-        return
-    self.extern_fn_has_sret.insert(fn_sym, has_sret)
-    self.extern_fn_byval_params.insert(fn_sym, byval_mask)
-    self.extern_fn_byval_types.insert(fn_sym, byval_types)
-    self.extern_fn_direct_params.insert(fn_sym, direct_mask)
-    self.extern_fn_direct_param_types.insert(fn_sym, direct_types)
-    if has_sret != 0:
-        self.extern_fn_sret_type.insert(fn_sym, sret_ty)
-    if direct_ret_ty != 0:
-        self.extern_fn_direct_ret_type.insert(fn_sym, direct_ret_ty)
+    fn record_c_abi_transform(fn_sym: i32, has_sret: i32, sret_ty: i64, byval_mask: i64, byval_types: Vec[i64], direct_mask: i64, direct_types: Vec[i64], direct_ret_ty: i64):
+        if fn_sym == 0:
+            return
+        if has_sret == 0 and byval_mask == 0 and direct_mask == 0 and direct_ret_ty == 0:
+            return
+        self.extern_fn_has_sret.insert(fn_sym, has_sret)
+        self.extern_fn_byval_params.insert(fn_sym, byval_mask)
+        self.extern_fn_byval_types.insert(fn_sym, byval_types)
+        self.extern_fn_direct_params.insert(fn_sym, direct_mask)
+        self.extern_fn_direct_param_types.insert(fn_sym, direct_types)
+        if has_sret != 0:
+            self.extern_fn_sret_type.insert(fn_sym, sret_ty)
+        if direct_ret_ty != 0:
+            self.extern_fn_direct_ret_type.insert(fn_sym, direct_ret_ty)
 
-fn Codegen.apply_c_abi_byval_attrs(self: Codegen, function: i64, byval_mask: i64, byval_types: &Vec[i64], param_count: i32, param_offset: i32):
-    if function == 0 or byval_mask == 0:
-        return
-    if not codegen_c_abi_needs_byval_attr():
-        return
-    for pi in 0..param_count:
-        if (byval_mask & ((1 as i64) << (pi as u32))) == 0:
-            continue
-        if pi >= byval_types.len() as i32:
-            continue
-        let byval_ty = byval_types.get(pi as i64)
-        if byval_ty == 0:
-            continue
-        wl_add_param_byval_attr(self.context, function, pi + param_offset, byval_ty)
+    fn apply_c_abi_byval_attrs(function: i64, byval_mask: i64, byval_types: &Vec[i64], param_count: i32, param_offset: i32):
+        if function == 0 or byval_mask == 0:
+            return
+        if not codegen_c_abi_needs_byval_attr():
+            return
+        for pi in 0..param_count:
+            if (byval_mask & ((1 as i64) << (pi as u32))) == 0:
+                continue
+            if pi >= byval_types.len() as i32:
+                continue
+            let byval_ty = byval_types.get(pi as i64)
+            if byval_ty == 0:
+                continue
+            wl_add_param_byval_attr(self.context, function, pi + param_offset, byval_ty)
 
-fn Codegen.apply_c_abi_call_attrs(self: Codegen, call_val: i64, has_sret: i32, sret_ty: i64, byval_mask: i64, byval_types: &Vec[i64], original_arg_count: i32, arg_prefix_count: i32):
-    if call_val == 0:
-        return
-    var byval_offset = arg_prefix_count
-    if has_sret != 0 and sret_ty != 0:
-        wl_add_call_sret_attr(self.context, call_val, arg_prefix_count, sret_ty)
-        byval_offset = byval_offset + 1
-    if byval_mask == 0:
-        return
-    if not codegen_c_abi_needs_byval_attr():
-        return
-    for ai in 0..original_arg_count:
-        if (byval_mask & ((1 as i64) << (ai as u32))) == 0:
-            continue
-        if ai >= byval_types.len() as i32:
-            continue
-        let byval_ty = byval_types.get(ai as i64)
-        if byval_ty == 0:
-            continue
-        wl_add_call_param_byval_attr(self.context, call_val, byval_offset + ai, byval_ty)
+    fn apply_c_abi_call_attrs(call_val: i64, has_sret: i32, sret_ty: i64, byval_mask: i64, byval_types: &Vec[i64], original_arg_count: i32, arg_prefix_count: i32):
+        if call_val == 0:
+            return
+        var byval_offset = arg_prefix_count
+        if has_sret != 0 and sret_ty != 0:
+            wl_add_call_sret_attr(self.context, call_val, arg_prefix_count, sret_ty)
+            byval_offset = byval_offset + 1
+        if byval_mask == 0:
+            return
+        if not codegen_c_abi_needs_byval_attr():
+            return
+        for ai in 0..original_arg_count:
+            if (byval_mask & ((1 as i64) << (ai as u32))) == 0:
+                continue
+            if ai >= byval_types.len() as i32:
+                continue
+            let byval_ty = byval_types.get(ai as i64)
+            if byval_ty == 0:
+                continue
+            wl_add_call_param_byval_attr(self.context, call_val, byval_offset + ai, byval_ty)
 
-// ── Declare extern fn ─────────────────────────────────────────────
+    // ── Declare extern fn ─────────────────────────────────────────────
 
-fn Codegen.declare_extern_fn(self: Codegen, ext_node: i32):
-    let name_sym = self.pool.get_data0(ext_node)
+    mut fn declare_extern_fn(ext_node: i32):
+        let name_sym = self.pool.get_data0(ext_node)
 
-    let ext_flags = self.pool.get_data2(ext_node)
-    let is_variadic = ext_flags % 2
+        let ext_flags = self.pool.get_data2(ext_node)
+        let is_variadic = ext_flags % 2
 
-    let meta = self.pool.find_fn_meta(ext_node)
-    if meta < 0: return
+        let meta = self.pool.find_fn_meta(ext_node)
+        if meta < 0: return
 
-    let ret_type_node = self.pool.fn_meta_ret(meta)
-    let param_start = self.pool.fn_meta_param_start(meta)
-    let param_count = self.pool.fn_meta_param_count(meta)
+        let ret_type_node = self.pool.fn_meta_ret(meta)
+        let param_start = self.pool.fn_meta_param_start(meta)
+        let param_count = self.pool.fn_meta_param_count(meta)
 
-    let ret_ty = self.resolve_type(ret_type_node)
-    let name_str = self.intern.resolve(name_sym)
-    let cc_name = self.fn_callconv_name(meta)
-    let uses_internal_abi = codegen_extern_uses_internal_abi(name_str, cc_name)
+        let ret_ty = self.resolve_type(ret_type_node)
+        let name_str = self.intern.resolve(name_sym)
+        let cc_name = self.fn_callconv_name(meta)
+        let uses_internal_abi = codegen_extern_uses_internal_abi(name_str, cc_name)
 
-    // Resolve original param types
-    let orig_param_types: Vec[i64] = Vec.new()
-    for pi in 0..param_count:
-        let p_type_node = self.pool.fn_param_type(param_start, pi)
-        orig_param_types.push(self.resolve_type(p_type_node))
+        // Resolve original param types
+        let orig_param_types: Vec[i64] = Vec.new()
+        for pi in 0..param_count:
+            let p_type_node = self.pool.fn_param_type(param_start, pi)
+            orig_param_types.push(self.resolve_type(p_type_node))
 
-    // ABI transformation for C interop on aarch64:
-    // - Struct params > 16 bytes → ptr (caller passes pointer to copy)
-    // - Struct returns > 16 bytes → void return + hidden sret ptr first param
-    let ptr_ty = wl_ptr_type(self.context)
-    var has_sret = 0
-    var sret_ty: i64 = 0
-    var byval_mask: i64 = 0
-    let byval_types: Vec[i64] = Vec.new()
-    var direct_mask: i64 = 0
-    let direct_types: Vec[i64] = Vec.new()
-    var direct_ret_ty: i64 = 0
+        // ABI transformation for C interop on aarch64:
+        // - Struct params > 16 bytes → ptr (caller passes pointer to copy)
+        // - Struct returns > 16 bytes → void return + hidden sret ptr first param
+        let ptr_ty = wl_ptr_type(self.context)
+        var has_sret = 0
+        var sret_ty: i64 = 0
+        var byval_mask: i64 = 0
+        let byval_types: Vec[i64] = Vec.new()
+        var direct_mask: i64 = 0
+        let direct_types: Vec[i64] = Vec.new()
+        var direct_ret_ty: i64 = 0
 
-    // Check return type: direct C ABI aggregate, C sret, or internal With sret.
-    var actual_ret_ty = ret_ty
-    if uses_internal_abi:
-        if self.internal_abi_needs_sret(ret_ty):
-            has_sret = 1
-            sret_ty = ret_ty
-            actual_ret_ty = wl_void_type(self.context)
-    else if ret_ty != 0 and wl_get_type_kind(ret_ty) == wl_struct_type_kind():
-        let direct_ret_abi_ty = self.c_abi_direct_struct_return_type(ret_ty)
-        if direct_ret_abi_ty != 0:
-            direct_ret_ty = ret_ty
-            actual_ret_ty = direct_ret_abi_ty
-        else if codegen_c_abi_darwin_arm64() and self.c_abi_hfa_info(ret_ty) != 0:
-            actual_ret_ty = ret_ty
-        else if self.c_abi_needs_sret(ret_ty):
-            has_sret = 1
-            sret_ty = ret_ty
-            actual_ret_ty = wl_void_type(self.context)
-
-    // Build final param list with ABI transformations
-    let param_types: Vec[i64] = Vec.new()
-    if has_sret != 0:
-        param_types.push(ptr_ty)  // hidden sret param at index 0
-
-    for pi in 0..param_count:
-        let orig_ty = orig_param_types.get(pi as i64)
+        // Check return type: direct C ABI aggregate, C sret, or internal With sret.
+        var actual_ret_ty = ret_ty
         if uses_internal_abi:
-            if self.internal_abi_needs_indirect_param(orig_ty):
-                param_types.push(ptr_ty)
-                byval_mask = byval_mask | ((1 as i64) << (pi as u32))
-                byval_types.push(orig_ty)
-                direct_types.push(0)
-                continue
-        else if wl_get_type_kind(orig_ty) == wl_struct_type_kind():
-            let direct_param_ty = self.c_abi_direct_struct_param_type(orig_ty)
-            if direct_param_ty != 0:
-                param_types.push(direct_param_ty)
-                direct_mask = direct_mask | ((1 as i64) << (pi as u32))
-                byval_types.push(0)
-                direct_types.push(orig_ty)
-                continue
-            if self.c_abi_needs_indirect_param(orig_ty):
-                param_types.push(ptr_ty)
-                byval_mask = byval_mask | ((1 as i64) << (pi as u32))
-                byval_types.push(orig_ty)
-                direct_types.push(0)
-                continue
-        param_types.push(orig_ty)
-        byval_types.push(0)
-        direct_types.push(0)
+            if self.internal_abi_needs_sret(ret_ty):
+                has_sret = 1
+                sret_ty = ret_ty
+                actual_ret_ty = wl_void_type(self.context)
+        else if ret_ty != 0 and wl_get_type_kind(ret_ty) == wl_struct_type_kind():
+            let direct_ret_abi_ty = self.c_abi_direct_struct_return_type(ret_ty)
+            if direct_ret_abi_ty != 0:
+                direct_ret_ty = ret_ty
+                actual_ret_ty = direct_ret_abi_ty
+            else if codegen_c_abi_darwin_arm64() and self.c_abi_hfa_info(ret_ty) != 0:
+                actual_ret_ty = ret_ty
+            else if self.c_abi_needs_sret(ret_ty):
+                has_sret = 1
+                sret_ty = ret_ty
+                actual_ret_ty = wl_void_type(self.context)
 
-    let actual_param_count = param_types.len() as i32
-    let fn_type = wl_function_type(actual_ret_ty, vec_data_i64(&param_types), actual_param_count, is_variadic)
+        // Build final param list with ABI transformations
+        let param_types: Vec[i64] = Vec.new()
+        if has_sret != 0:
+            param_types.push(ptr_ty)  // hidden sret param at index 0
 
-    // @[link_name("symbol")] overrides the C symbol this extern links against
-    // (stored as a "link_name:" callconv prefix). Otherwise canonicalize the
-    // With name. Lets a generated wrapper take the public name while the raw
-    // binding is renamed but still resolves to the real C symbol.
-    var link_name = self.canonical_extern_name(name_str)
-    if cc_name.len() > 10 and cc_name.slice(0, 10) == "link_name:":
-        link_name = cc_name.slice(10, cc_name.len() as i64)
+        for pi in 0..param_count:
+            let orig_ty = orig_param_types.get(pi as i64)
+            if uses_internal_abi:
+                if self.internal_abi_needs_indirect_param(orig_ty):
+                    param_types.push(ptr_ty)
+                    byval_mask = byval_mask | ((1 as i64) << (pi as u32))
+                    byval_types.push(orig_ty)
+                    direct_types.push(0)
+                    continue
+            else if wl_get_type_kind(orig_ty) == wl_struct_type_kind():
+                let direct_param_ty = self.c_abi_direct_struct_param_type(orig_ty)
+                if direct_param_ty != 0:
+                    param_types.push(direct_param_ty)
+                    direct_mask = direct_mask | ((1 as i64) << (pi as u32))
+                    byval_types.push(0)
+                    direct_types.push(orig_ty)
+                    continue
+                if self.c_abi_needs_indirect_param(orig_ty):
+                    param_types.push(ptr_ty)
+                    byval_mask = byval_mask | ((1 as i64) << (pi as u32))
+                    byval_types.push(orig_ty)
+                    direct_types.push(0)
+                    continue
+            param_types.push(orig_ty)
+            byval_types.push(0)
+            direct_types.push(0)
 
-    // Check if already declared
-    let existing = wl_get_named_function(self.llmod, link_name)
-    var function = existing
-    if existing == 0:
-        function = wl_add_function(self.llmod, link_name, fn_type)
+        let actual_param_count = param_types.len() as i32
+        let fn_type = wl_function_type(actual_ret_ty, vec_data_i64(&param_types), actual_param_count, is_variadic)
 
-    if has_sret != 0:
-        wl_add_sret_attr(self.context, function, 0, sret_ty)
-    self.apply_c_abi_byval_attrs(function, byval_mask, byval_types, param_count, if has_sret != 0: 1 else: 0)
-
-    // Record ABI transformations for call sites
-    if has_sret != 0 or byval_mask != 0 or direct_mask != 0 or direct_ret_ty != 0:
-        self.record_c_abi_transform(name_sym, has_sret, sret_ty, byval_mask, vec_copy_i64(&byval_types), direct_mask, vec_copy_i64(&direct_types), direct_ret_ty)
-
-    self.apply_noalias_param_attrs_with_offset(function, param_start, param_count, if has_sret != 0: 1 else: 0)
-
-    // Apply calling convention or c_export if specified
-    if cc_name.len() > 0:
+        // @[link_name("symbol")] overrides the C symbol this extern links against
+        // (stored as a "link_name:" callconv prefix). Otherwise canonicalize the
+        // With name. Lets a generated wrapper take the public name while the raw
+        // binding is renamed but still resolves to the real C symbol.
+        var link_name = self.canonical_extern_name(name_str)
         if cc_name.len() > 10 and cc_name.slice(0, 10) == "link_name:":
-            // @[link_name(...)] — symbol already applied above; keep C ABI.
-            0
-        else if cc_name.len() > 9 and cc_name.slice(0, 9) == "c_export:":
-            // @[c_export("name")] — set external linkage for C visibility
-            // External linkage = 0 in LLVM (default for non-internal functions)
-            wl_set_linkage(function, 0)
-        else:
-            let cc_id = self.resolve_callconv(cc_name)
-            if cc_id >= 0:
-                wl_set_call_conv(function, cc_id)
+            link_name = cc_name.slice(10, cc_name.len() as i64)
 
-    // (weak linkage applied earlier, near function creation)
+        // Check if already declared
+        let existing = wl_get_named_function(self.llmod, link_name)
+        var function = existing
+        if existing == 0:
+            function = wl_add_function(self.llmod, link_name, fn_type)
 
-    let actual_fn_type = wl_global_get_value_type(function)
-    self.fn_values.insert(name_sym, function)
-    self.fn_fn_types.insert(name_sym, actual_fn_type)
+        if has_sret != 0:
+            wl_add_sret_attr(self.context, function, 0, sret_ty)
+        self.apply_c_abi_byval_attrs(function, byval_mask, byval_types, param_count, if has_sret != 0: 1 else: 0)
 
-    // Also register canonical name if different
-    if link_name != name_str:
-        let canonical_sym = self.intern.intern(link_name)
-        if not self.fn_values.get(canonical_sym).is_some():
-            self.fn_values.insert(canonical_sym, function)
-            self.fn_fn_types.insert(canonical_sym, actual_fn_type)
-            self.record_c_abi_transform(canonical_sym, has_sret, sret_ty, byval_mask, byval_types, direct_mask, direct_types, direct_ret_ty)
+        // Record ABI transformations for call sites
+        if has_sret != 0 or byval_mask != 0 or direct_mask != 0 or direct_ret_ty != 0:
+            self.record_c_abi_transform(name_sym, has_sret, sret_ty, byval_mask, vec_copy_i64(&byval_types), direct_mask, vec_copy_i64(&direct_types), direct_ret_ty)
 
-fn Codegen.resolve_callconv(self: Codegen, name: str) -> i32:
-    if name == "c": return wl_cc_c()
-    if name == "stdcall": return wl_cc_x86_stdcall()
-    if name == "fastcall": return wl_cc_x86_fastcall()
-    if name == "thiscall": return wl_cc_x86_thiscall()
-    if name == "win64": return wl_cc_win64()
-    if name == "vectorcall": return wl_cc_x86_fastcall()
-    if name == "aarch64_vfabi": return wl_cc_aarch64_vfabi()
-    if name == "fast": return wl_cc_fast()
-    -1
+        self.apply_noalias_param_attrs_with_offset(function, param_start, param_count, if has_sret != 0: 1 else: 0)
 
-fn Codegen.declare_extern_var(self: Codegen, node: i32):
-    // NodeKind.NK_EXTERN_VAR: d0=name(sym), d1=type_node, d2=flags(bit0=mut)
-    let name_sym = self.pool.get_data0(node)
-    let type_node = self.pool.get_data1(node)
-    let flags = self.pool.get_data2(node)
-    let is_mut = flags % 2
-
-    let var_ty = self.resolve_type(type_node)
-    if var_ty == 0:
-        return
-    let name_str = self.intern.resolve(name_sym)
-    let link_name = self.canonical_extern_name(name_str)
-
-    let existing = wl_get_named_global(self.llmod, link_name)
-    var gv = existing
-    if existing == 0:
-        gv = wl_add_global(self.llmod, var_ty, link_name)
-    // External linkage is the default — no need to set it
-    if is_mut == 0:
-        wl_set_global_constant(gv, 1)
-    self.module_constants.insert(name_sym, gv)
-
-fn Codegen.canonical_extern_name(self: Codegen, name: str) -> str:
-    // c_import may suffix C symbols as "name.<n>" — strip the suffix for linking.
-    var dot_pos = -1
-    for i in 0..name.len() as i32:
-        if name.byte_at(i as i64) == 46:
-            dot_pos = i
-    if dot_pos > 0 and dot_pos + 1 < name.len() as i32:
-        var all_digits = true
-        var j = dot_pos + 1
-        while j < name.len() as i32:
-            let ch = name.byte_at(j as i64)
-            if ch < 48 or ch > 57:
-                all_digits = false
-                break
-            j = j + 1
-        if all_digits:
-            return name.slice(0, dot_pos as i64)
-    name
-
-// ── Detect drop functions ─────────────────────────────────────────
-
-fn Codegen.detect_drop_functions(self: Codegen):
-    for i in 0..self.pool.decl_count():
-        let decl = self.pool.get_decl(i)
-        if self.pool.kind(decl) != NodeKind.NK_IMPL_DECL:
-            continue
-        if not self.codegen_symbols_match(self.pool.get_data2(decl), self.sema.syms.drop):
-            continue
-        let type_sym = self.sema_sym_to_codegen_sym(self.pool.get_data0(decl))
-        if type_sym == 0:
-            continue
-        if self.sema.type_symbol_is_std_box(type_sym) == 0 and not self.struct_type_map.get(type_sym).is_some() and not self.enum_type_map.get(type_sym).is_some():
-            continue
-        let drop_decl = self.impl_decl_method_named(decl as i32, "drop")
-        if drop_decl == 0:
-            continue
-        let fn_text = self.fn_decl_semantic_text(drop_decl)
-        if fn_text.len() == 0:
-            continue
-        let fn_sym = self.intern.intern(fn_text)
-        let fv = self.fn_values.get(fn_sym)
-        let ft = self.fn_fn_types.get(fn_sym)
-        if fv.is_some() and ft.is_some():
-            self.drop_fn_values.insert(type_sym, fv.unwrap() as i64)
-            self.drop_fn_types.insert(type_sym, ft.unwrap() as i64)
-
-// ── Result return type helpers ────────────────────────────────────
-
-fn Codegen.is_result_return_type(self: Codegen, ret_node: i32) -> bool:
-    if ret_node == 0: return false
-    if self.pool.kind(ret_node) != NodeKind.NK_TYPE_GENERIC: return false
-    let name_sym = self.pool.get_data0(ret_node)
-    let arg_count = self.pool.get_data2(ret_node)
-    if arg_count != 2: return false
-    name_sym == self.sym_result
-
-fn Codegen.result_err_symbol_from_return(self: Codegen, ret_node: i32) -> i32:
-    if not self.is_result_return_type(ret_node): return 0
-    let extra_start = self.pool.get_data1(ret_node)
-    let err_node = self.pool.get_extra(extra_start + 1)
-    if self.pool.kind(err_node) == NodeKind.NK_TYPE_NAMED:
-        return self.pool.get_data0(err_node)
-    0
-
-fn Codegen.is_result_unit_return(self: Codegen, ret_node: i32) -> bool:
-    if not self.is_result_return_type(ret_node): return false
-    let extra_start = self.pool.get_data1(ret_node)
-    let ok_node = self.pool.get_extra(extra_start)
-    if self.pool.kind(ok_node) == NodeKind.NK_TYPE_NAMED:
-        return self.pool.get_data0(ok_node) == self.sym_unit
-    false
-
-// ── Option/Result type construction ───────────────────────────────
-
-fn Codegen.get_or_create_option_type(self: Codegen, sema_tid: i32, payload_ty: i64) -> i64:
-    // Optional pointers are represented as the pointer itself: null = None.
-    if payload_ty != 0 and wl_get_type_kind(payload_ty) == wl_pointer_type_kind():
-        return payload_ty
-
-    let cache_key = if sema_tid > 0: sema_tid as i64 else: payload_ty
-    let cached = self.option_cache_map.get(cache_key)
-    if cached.is_some():
-        return cached.unwrap()
-
-    // Option[T] = { i32 tag, T payload }
-    let body: Vec[i64] = Vec.new()
-    body.push(wl_i32_type(self.context))
-    if payload_ty != 0 and wl_get_type_kind(payload_ty) != wl_void_type_kind():
-        body.push(payload_ty)
-    let opt_type = wl_struct_type(self.context, vec_data_i64(&body), body.len() as i32, 0)
-    self.option_cache_map.insert(cache_key, opt_type)
-    opt_type
-
-fn Codegen.get_or_create_result_type(self: Codegen, sema_tid: i32, ok_ty: i64, err_ty: i64) -> i64:
-    let cache_key = if sema_tid > 0: f"{sema_tid}" else: f"{ok_ty}:{err_ty}"
-    let cached = self.result_cache_map.get(cache_key)
-    if cached.is_some():
-        return cached.unwrap()
-
-    let ok_size = self.abi_size_of(ok_ty)
-    let err_size = self.abi_size_of(err_ty)
-    var max_size = ok_size
-    if err_size > max_size: max_size = err_size
-
-    let body: Vec[i64] = Vec.new()
-    body.push(wl_i32_type(self.context))
-    if max_size > 0:
-        body.push(wl_array_type(wl_i8_type(self.context), max_size))
-    let res_type = wl_struct_type(self.context, vec_data_i64(&body), body.len() as i32, 0)
-    self.result_cache_map.insert(cache_key, res_type)
-    res_type
-
-fn Codegen.get_or_create_context_error_type(self: Codegen, source_ty: i64) -> i64:
-    // ContextError[E] = { message: str, source: E }
-    let body: Vec[i64] = Vec.new()
-    let str_sym = self.intern.intern("str")
-    let st_opt = self.struct_type_map.get(str_sym)
-    if st_opt.is_some():
-        let str_ty = self.struct_llvm_types.get(st_opt.unwrap() as i64)
-        body.push(str_ty)
-    else:
-        body.push(self.type_fallback())
-    body.push(source_ty)
-    wl_struct_type(self.context, vec_data_i64(&body), 2, 0)
-
-// ── Vec/HashMap/HashSet type construction ─────────────────────────
-
-fn Codegen.deterministic_type_tag(self: Codegen, ty: i64) -> str:
-    let kind = wl_get_type_kind(ty)
-    if kind == wl_integer_type_kind():
-        return f"i{wl_get_int_type_width(ty)}"
-    if kind == wl_float_type_kind() or kind == wl_double_type_kind():
-        return "f64"
-    if kind == wl_pointer_type_kind():
-        return "ptr"
-    if kind == wl_struct_type_kind():
-        let sn = wl_get_struct_name(ty)
-        if sn.len() > 0:
-            return sn
-        return f"s{wl_count_struct_elem_types(ty)}"
-    f"t{ty}"
-
-fn Codegen.collection_wrapper_name_1(self: Codegen, prefix: str, t0: i64) -> str:
-    prefix ++ "." ++ self.deterministic_type_tag(t0)
-
-fn Codegen.collection_wrapper_name_2(self: Codegen, prefix: str, t0: i64, t1: i64) -> str:
-    prefix ++ "." ++ self.deterministic_type_tag(t0) ++ "." ++ self.deterministic_type_tag(t1)
-
-fn Codegen.get_or_create_vec_type(self: Codegen, sema_tid: i32, elem_ty: i64) -> i64:
-    // Use sema type ID as cache key when available (preserves generic identity).
-    // Fall back to LLVM element type pointer for MIR intrinsic contexts where
-    // sema type is not available (sema_tid == 0).
-    let cache_key = if sema_tid > 0: sema_tid as i64 else: elem_ty
-    let cached = self.vec_cache_map.get(cache_key)
-    if cached.is_some():
-        return cached.unwrap()
-    // Vec[T] = { ptr, i64, i64 } — ptr, len, cap (elem_size at runtime)
-    let body: Vec[i64] = Vec.new()
-    body.push(wl_ptr_type(self.context))
-    body.push(wl_i64_type(self.context))
-    body.push(wl_i64_type(self.context))
-    body.push(wl_i64_type(self.context))
-    let name = self.collection_wrapper_name_1("__with.Vec", elem_ty)
-    let vec_ty = wl_struct_create_named(self.context, name)
-    wl_struct_set_body(vec_ty, vec_data_i64(&body), 4, 0)
-    self.cache_vec_type(sema_tid, elem_ty, vec_ty)
-    vec_ty
-
-fn Codegen.cache_vec_type(self: Codegen, sema_tid: i32, elem_ty: i64, vec_ty: i64) -> i64:
-    let cache_key = if sema_tid > 0: sema_tid as i64 else: elem_ty
-    let cached = self.vec_cache_map.get(cache_key)
-    if cached.is_some():
-        return cached.unwrap()
-    self.vec_cache_map.insert(cache_key, vec_ty)
-    self.vec_is_vec.insert(vec_ty, 1)
-    vec_ty
-
-fn Codegen.get_or_create_hashmap_type(self: Codegen, sema_tid: i32, key_ty: i64, val_ty: i64) -> i64:
-    let hash = if sema_tid > 0: sema_tid as i64 else: (key_ty *% 65537) +% val_ty
-    let cached = self.hm_cache_map.get(hash)
-    if cached.is_some():
-        let existing = cached.unwrap() as i64
-        if self.hm_is_hm.contains(existing):
-            return existing
-    // HashMap is opaque { ptr }
-    let body: Vec[i64] = Vec.new()
-    body.push(wl_ptr_type(self.context))
-    let name = self.collection_wrapper_name_2("__with.HashMap", key_ty, val_ty)
-    let hm_ty = wl_struct_create_named(self.context, name)
-    wl_struct_set_body(hm_ty, vec_data_i64(&body), 1, 0)
-    self.cache_hashmap_type(sema_tid, key_ty, val_ty, hm_ty)
-    hm_ty
-
-fn Codegen.cache_hashmap_type(self: Codegen, sema_tid: i32, key_ty: i64, val_ty: i64, hm_ty: i64) -> i64:
-    let hash = if sema_tid > 0: sema_tid as i64 else: (key_ty *% 65537) +% val_ty
-    let cached = self.hm_cache_map.get(hash)
-    if cached.is_some():
-        let existing = cached.unwrap()
-        if self.hm_is_hm.contains(existing):
-            return existing
-    if self.hm_is_hm.contains(hm_ty):
-        self.hm_cache_map.insert(hash, hm_ty)
-        return hm_ty
-    self.hm_is_hm.insert(hm_ty, 1)
-    self.hm_cache_map.insert(hash, hm_ty)
-    hm_ty
-
-fn Codegen.get_or_create_hashset_type(self: Codegen, sema_tid: i32, elem_ty: i64) -> i64:
-    let cache_key = if sema_tid > 0: sema_tid as i64 else: elem_ty
-    let cached = self.hs_cache_map.get(cache_key)
-    if cached.is_some():
-        return cached.unwrap()
-    let body: Vec[i64] = Vec.new()
-    body.push(wl_ptr_type(self.context))
-    let name = self.collection_wrapper_name_1("__with.HashSet", elem_ty)
-    let hs_ty = wl_struct_create_named(self.context, name)
-    wl_struct_set_body(hs_ty, vec_data_i64(&body), 1, 0)
-    self.hs_cache_map.insert(cache_key, hs_ty)
-    hs_ty
-
-fn Codegen.get_or_create_slotmap_type(self: Codegen, sema_tid: i32, elem_ty: i64) -> i64:
-    let cache_key = if sema_tid > 0: sema_tid as i64 else: elem_ty
-    let cached = self.slotmap_cache_map.get(cache_key)
-    if cached.is_some():
-        return cached.unwrap()
-    let body: Vec[i64] = Vec.new()
-    body.push(wl_ptr_type(self.context))
-    let name = self.collection_wrapper_name_1("__with.SlotMap", elem_ty)
-    let sm_ty = wl_struct_create_named(self.context, name)
-    wl_struct_set_body(sm_ty, vec_data_i64(&body), 1, 0)
-    self.slotmap_cache_map.insert(cache_key, sm_ty)
-    sm_ty
-
-// ── Monomorphize struct (stub) ────────────────────────────────────
-
-fn Codegen.monomorphize_struct(self: Codegen, name_sym: i32, extra_start: i32, arg_count: i32) -> i64:
-    let gs_opt = self.generic_structs.get(name_sym)
-    if not gs_opt.is_some():
-        return 0
-    let type_node = gs_opt.unwrap()
-    let tp_count = self.type_decl_tp_count(type_node)
-    if tp_count <= 0:
-        let st_opt = self.struct_type_map.get(name_sym)
-        if st_opt.is_some():
-            return self.struct_llvm_types.get(st_opt.unwrap() as i64)
-        return 0
-
-    let tp_syms: Vec[i32] = Vec.new()
-    var tp_pos = self.type_decl_tp_start(type_node)
-    for ti in 0..tp_count:
-        let tp_sym = self.pool.get_extra(tp_pos)
-        tp_syms.push(tp_sym)
-        let bound_count = self.pool.get_extra(tp_pos + 1)
-        tp_pos = tp_pos + 2 + bound_count
-
-    let arg_types: Vec[i64] = Vec.new()
-    let arg_sema_types: Vec[i32] = Vec.new()
-    if arg_count > 0:
-        for ai in 0..arg_count:
-            let arg_node = self.pool.get_extra(extra_start + ai)
-            let arg_ty = self.resolve_type(arg_node)
-            let arg_sema = self.type_expr_to_sema_type(arg_node)
-            if arg_ty != 0:
-                arg_types.push(arg_ty)
+        // Apply calling convention or c_export if specified
+        if cc_name.len() > 0:
+            if cc_name.len() > 10 and cc_name.slice(0, 10) == "link_name:":
+                // @[link_name(...)] — symbol already applied above; keep C ABI.
+                0
+            else if cc_name.len() > 9 and cc_name.slice(0, 9) == "c_export:":
+                // @[c_export("name")] — set external linkage for C visibility
+                // External linkage = 0 in LLVM (default for non-internal functions)
+                wl_set_linkage(function, 0)
             else:
-                arg_types.push(wl_i32_type(self.context))
-            if arg_sema != 0:
-                arg_sema_types.push(arg_sema)
-            else:
-                arg_sema_types.push(self.llvm_type_to_sema_type(arg_types.get(ai as i64)))
-    else:
-        for ti in 0..tp_count:
-            let tp_sym = tp_syms.get(ti as i64)
-            var bound_ty: i64 = 0
-            for bi in 0..self.type_bindings_len:
-                if self.type_binding_syms.get(bi as i64) == tp_sym:
-                    bound_ty = self.type_binding_types.get(bi as i64)
+                let cc_id = self.resolve_callconv(cc_name)
+                if cc_id >= 0:
+                    wl_set_call_conv(function, cc_id)
+
+        // (weak linkage applied earlier, near function creation)
+
+        let actual_fn_type = wl_global_get_value_type(function)
+        self.fn_values.insert(name_sym, function)
+        self.fn_fn_types.insert(name_sym, actual_fn_type)
+
+        // Also register canonical name if different
+        if link_name != name_str:
+            let canonical_sym = self.intern.intern(link_name)
+            if not self.fn_values.get(canonical_sym).is_some():
+                self.fn_values.insert(canonical_sym, function)
+                self.fn_fn_types.insert(canonical_sym, actual_fn_type)
+                self.record_c_abi_transform(canonical_sym, has_sret, sret_ty, byval_mask, byval_types, direct_mask, direct_types, direct_ret_ty)
+
+    fn resolve_callconv(name: str) -> i32:
+        if name == "c": return wl_cc_c()
+        if name == "stdcall": return wl_cc_x86_stdcall()
+        if name == "fastcall": return wl_cc_x86_fastcall()
+        if name == "thiscall": return wl_cc_x86_thiscall()
+        if name == "win64": return wl_cc_win64()
+        if name == "vectorcall": return wl_cc_x86_fastcall()
+        if name == "aarch64_vfabi": return wl_cc_aarch64_vfabi()
+        if name == "fast": return wl_cc_fast()
+        -1
+
+    mut fn declare_extern_var(node: i32):
+        // NodeKind.NK_EXTERN_VAR: d0=name(sym), d1=type_node, d2=flags(bit0=mut)
+        let name_sym = self.pool.get_data0(node)
+        let type_node = self.pool.get_data1(node)
+        let flags = self.pool.get_data2(node)
+        let is_mut = flags % 2
+
+        let var_ty = self.resolve_type(type_node)
+        if var_ty == 0:
+            return
+        let name_str = self.intern.resolve(name_sym)
+        let link_name = self.canonical_extern_name(name_str)
+
+        let existing = wl_get_named_global(self.llmod, link_name)
+        var gv = existing
+        if existing == 0:
+            gv = wl_add_global(self.llmod, var_ty, link_name)
+        // External linkage is the default — no need to set it
+        if is_mut == 0:
+            wl_set_global_constant(gv, 1)
+        self.module_constants.insert(name_sym, gv)
+
+    fn canonical_extern_name(name: str) -> str:
+        // c_import may suffix C symbols as "name.<n>" — strip the suffix for linking.
+        var dot_pos = -1
+        for i in 0..name.len() as i32:
+            if name.byte_at(i as i64) == 46:
+                dot_pos = i
+        if dot_pos > 0 and dot_pos + 1 < name.len() as i32:
+            var all_digits = true
+            var j = dot_pos + 1
+            while j < name.len() as i32:
+                let ch = name.byte_at(j as i64)
+                if ch < 48 or ch > 57:
+                    all_digits = false
                     break
-            if bound_ty == 0:
-                bound_ty = self.type_fallback()
-            arg_types.push(bound_ty)
-            arg_sema_types.push(self.llvm_type_to_sema_type(bound_ty))
-    while arg_types.len() as i32 < tp_count:
-        let fallback_ty = self.type_fallback()
-        arg_types.push(fallback_ty)
-        arg_sema_types.push(self.llvm_type_to_sema_type(fallback_ty))
+                j = j + 1
+            if all_digits:
+                return name.slice(0, dot_pos as i64)
+        name
 
-    let base_name = self.intern.resolve(name_sym)
-    var mangled = base_name
-    for ti in 0..tp_count:
-        let arg_ty = arg_types.get(ti as i64)
-        mangled = mangled ++ "__" ++ self.llvm_type_mangle(arg_ty)
-    let mono_sym = self.intern.intern(mangled)
+    // ── Detect drop functions ─────────────────────────────────────────
 
-    let mono_idx_opt = self.struct_type_map.get(mono_sym)
-    if mono_idx_opt.is_some():
-        return self.struct_llvm_types.get(mono_idx_opt.unwrap() as i64)
+    fn detect_drop_functions():
+        for i in 0..self.pool.decl_count():
+            let decl = self.pool.get_decl(i)
+            if self.pool.kind(decl) != NodeKind.NK_IMPL_DECL:
+                continue
+            if not self.codegen_symbols_match(self.pool.get_data2(decl), self.sema.syms.drop):
+                continue
+            let type_sym = self.sema_sym_to_codegen_sym(self.pool.get_data0(decl))
+            if type_sym == 0:
+                continue
+            if self.sema.type_symbol_is_std_box(type_sym) == 0 and not self.struct_type_map.get(type_sym).is_some() and not self.enum_type_map.get(type_sym).is_some():
+                continue
+            let drop_decl = self.impl_decl_method_named(decl as i32, "drop")
+            if drop_decl == 0:
+                continue
+            let fn_text = self.fn_decl_semantic_text(drop_decl)
+            if fn_text.len() == 0:
+                continue
+            let fn_sym = self.intern.intern(fn_text)
+            let fv = self.fn_values.get(fn_sym)
+            let ft = self.fn_fn_types.get(fn_sym)
+            if fv.is_some() and ft.is_some():
+                self.drop_fn_values.insert(type_sym, fv.unwrap() as i64)
+                self.drop_fn_types.insert(type_sym, ft.unwrap() as i64)
 
-    self.predeclare_struct_type(mono_sym)
-    self.mono_struct_base.insert(mono_sym, name_sym)
-    let tp_flat_start = self.mono_struct_tp_flat_syms.len() as i32
-    for ti in 0..tp_count:
-        self.mono_struct_tp_flat_syms.push(tp_syms.get(ti as i64))
-        self.mono_struct_tp_flat_types.push(arg_types.get(ti as i64))
-        self.mono_struct_tp_flat_sema_types.push(arg_sema_types.get(ti as i64))
-    self.mono_struct_tp_starts.insert(mono_sym, tp_flat_start)
-    self.mono_struct_tp_counts.insert(mono_sym, tp_count)
-    let mono_idx = self.struct_type_map.get(mono_sym).unwrap()
-    let mono_ty = self.struct_llvm_types.get(mono_idx as i64)
+    // ── Result return type helpers ────────────────────────────────────
 
-    let saved_bind_syms = self.type_binding_syms
-    let saved_bind_tys = self.type_binding_types
-    let saved_bind_len = self.type_bindings_len
-    let fresh_bind_syms: Vec[i32] = Vec.new()
-    let fresh_bind_tys: Vec[i64] = Vec.new()
-    self.type_binding_syms = fresh_bind_syms
-    self.type_binding_types = fresh_bind_tys
-    self.type_bindings_len = 0
-    for ti in 0..tp_count:
-        self.type_binding_syms.push(tp_syms.get(ti as i64))
-        self.type_binding_types.push(arg_types.get(ti as i64))
-        self.type_bindings_len = self.type_bindings_len + 1
+    fn is_result_return_type(ret_node: i32) -> bool:
+        if ret_node == 0: return false
+        if self.pool.kind(ret_node) != NodeKind.NK_TYPE_GENERIC: return false
+        let name_sym = self.pool.get_data0(ret_node)
+        let arg_count = self.pool.get_data2(ret_node)
+        if arg_count != 2: return false
+        name_sym == self.sym_result
 
-    let decl_extra_start = self.pool.get_data1(type_node)
-    let field_count = self.pool.get_extra(decl_extra_start)
-    self.struct_field_starts.set_i32(mono_idx as i64, self.struct_field_names.len() as i32)
-    self.struct_field_counts.set_i32(mono_idx as i64, field_count)
+    fn result_err_symbol_from_return(ret_node: i32) -> i32:
+        if not self.is_result_return_type(ret_node): return 0
+        let extra_start = self.pool.get_data1(ret_node)
+        let err_node = self.pool.get_extra(extra_start + 1)
+        if self.pool.kind(err_node) == NodeKind.NK_TYPE_NAMED:
+            return self.pool.get_data0(err_node)
+        0
 
-    let ft_vec: Vec[i64] = Vec.new()
-    var invalid_layout = 0
-    for fi in 0..field_count:
-        let offset = decl_extra_start + 1 + fi * 3
-        let f_name = self.pool.get_extra(offset)
-        let f_type_node = self.pool.get_extra(offset + 1)
-        let f_default = self.pool.get_extra(offset + 2)
-        var f_ty = self.resolve_type(f_type_node)
-        self.debug_type_layout_field(mangled, fi, f_name, f_type_node, f_ty)
-        if f_ty == 0:
-            with_eprint("error: unresolved type for field '" ++ self.intern.resolve(f_name) ++ "' in struct '" ++ base_name ++ "'")
-            invalid_layout = 1
-            self.had_error = 1
-            f_ty = self.type_fallback()
-        self.struct_field_names.push(f_name)
-        self.struct_field_types.push(f_ty)
-        self.struct_field_type_nodes.push(f_type_node)
-        self.struct_field_defaults.push(f_default)
-        ft_vec.push(f_ty)
+    fn is_result_unit_return(ret_node: i32) -> bool:
+        if not self.is_result_return_type(ret_node): return false
+        let extra_start = self.pool.get_data1(ret_node)
+        let ok_node = self.pool.get_extra(extra_start)
+        if self.pool.kind(ok_node) == NodeKind.NK_TYPE_NAMED:
+            return self.pool.get_data0(ok_node) == self.sym_unit
+        false
 
-    // Push identity field index mapping (generic structs don't have alignment)
-    for fi in 0..field_count:
-        self.struct_llvm_field_indices.push(fi)
+    // ── Option/Result type construction ───────────────────────────────
 
-    if invalid_layout == 0:
-        wl_struct_set_body(mono_ty, vec_data_i64(&ft_vec), field_count, 0)
+    fn get_or_create_option_type(sema_tid: i32, payload_ty: i64) -> i64:
+        // Optional pointers are represented as the pointer itself: null = None.
+        if payload_ty != 0 and wl_get_type_kind(payload_ty) == wl_pointer_type_kind():
+            return payload_ty
 
-    self.type_binding_syms = saved_bind_syms
-    self.type_binding_types = saved_bind_tys
-    self.type_bindings_len = saved_bind_len
+        let cache_key = if sema_tid > 0: sema_tid as i64 else: payload_ty
+        let cached = self.option_cache_map.get(cache_key)
+        if cached.is_some():
+            return cached.unwrap()
 
-    mono_ty
+        // Option[T] = { i32 tag, T payload }
+        let body: Vec[i64] = Vec.new()
+        body.push(wl_i32_type(self.context))
+        if payload_ty != 0 and wl_get_type_kind(payload_ty) != wl_void_type_kind():
+            body.push(payload_ty)
+        let opt_type = wl_struct_type(self.context, vec_data_i64(&body), body.len() as i32, 0)
+        self.option_cache_map.insert(cache_key, opt_type)
+        opt_type
+
+    mut fn get_or_create_result_type(sema_tid: i32, ok_ty: i64, err_ty: i64) -> i64:
+        let cache_key = if sema_tid > 0: f"{sema_tid}" else: f"{ok_ty}:{err_ty}"
+        let cached = self.result_cache_map.get(cache_key)
+        if cached.is_some():
+            return cached.unwrap()
+
+        let ok_size = self.abi_size_of(ok_ty)
+        let err_size = self.abi_size_of(err_ty)
+        var max_size = ok_size
+        if err_size > max_size: max_size = err_size
+
+        let body: Vec[i64] = Vec.new()
+        body.push(wl_i32_type(self.context))
+        if max_size > 0:
+            body.push(wl_array_type(wl_i8_type(self.context), max_size))
+        let res_type = wl_struct_type(self.context, vec_data_i64(&body), body.len() as i32, 0)
+        self.result_cache_map.insert(cache_key, res_type)
+        res_type
+
+    mut fn get_or_create_context_error_type(source_ty: i64) -> i64:
+        // ContextError[E] = { message: str, source: E }
+        let body: Vec[i64] = Vec.new()
+        let str_sym = self.intern.intern("str")
+        let st_opt = self.struct_type_map.get(str_sym)
+        if st_opt.is_some():
+            let str_ty = self.struct_llvm_types.get(st_opt.unwrap() as i64)
+            body.push(str_ty)
+        else:
+            body.push(self.type_fallback())
+        body.push(source_ty)
+        wl_struct_type(self.context, vec_data_i64(&body), 2, 0)
+
+    // ── Vec/HashMap/HashSet type construction ─────────────────────────
+
+    fn deterministic_type_tag(ty: i64) -> str:
+        let kind = wl_get_type_kind(ty)
+        if kind == wl_integer_type_kind():
+            return f"i{wl_get_int_type_width(ty)}"
+        if kind == wl_float_type_kind() or kind == wl_double_type_kind():
+            return "f64"
+        if kind == wl_pointer_type_kind():
+            return "ptr"
+        if kind == wl_struct_type_kind():
+            let sn = wl_get_struct_name(ty)
+            if sn.len() > 0:
+                return sn
+            return f"s{wl_count_struct_elem_types(ty)}"
+        f"t{ty}"
+
+    fn collection_wrapper_name_1(prefix: str, t0: i64) -> str:
+        prefix ++ "." ++ self.deterministic_type_tag(t0)
+
+    fn collection_wrapper_name_2(prefix: str, t0: i64, t1: i64) -> str:
+        prefix ++ "." ++ self.deterministic_type_tag(t0) ++ "." ++ self.deterministic_type_tag(t1)
+
+    fn get_or_create_vec_type(sema_tid: i32, elem_ty: i64) -> i64:
+        // Use sema type ID as cache key when available (preserves generic identity).
+        // Fall back to LLVM element type pointer for MIR intrinsic contexts where
+        // sema type is not available (sema_tid == 0).
+        let cache_key = if sema_tid > 0: sema_tid as i64 else: elem_ty
+        let cached = self.vec_cache_map.get(cache_key)
+        if cached.is_some():
+            return cached.unwrap()
+        // Vec[T] = { ptr, i64, i64 } — ptr, len, cap (elem_size at runtime)
+        let body: Vec[i64] = Vec.new()
+        body.push(wl_ptr_type(self.context))
+        body.push(wl_i64_type(self.context))
+        body.push(wl_i64_type(self.context))
+        body.push(wl_i64_type(self.context))
+        let name = self.collection_wrapper_name_1("__with.Vec", elem_ty)
+        let vec_ty = wl_struct_create_named(self.context, name)
+        wl_struct_set_body(vec_ty, vec_data_i64(&body), 4, 0)
+        self.cache_vec_type(sema_tid, elem_ty, vec_ty)
+        vec_ty
+
+    fn cache_vec_type(sema_tid: i32, elem_ty: i64, vec_ty: i64) -> i64:
+        let cache_key = if sema_tid > 0: sema_tid as i64 else: elem_ty
+        let cached = self.vec_cache_map.get(cache_key)
+        if cached.is_some():
+            return cached.unwrap()
+        self.vec_cache_map.insert(cache_key, vec_ty)
+        self.vec_is_vec.insert(vec_ty, 1)
+        vec_ty
+
+    fn get_or_create_hashmap_type(sema_tid: i32, key_ty: i64, val_ty: i64) -> i64:
+        let hash = if sema_tid > 0: sema_tid as i64 else: (key_ty *% 65537) +% val_ty
+        let cached = self.hm_cache_map.get(hash)
+        if cached.is_some():
+            let existing = cached.unwrap() as i64
+            if self.hm_is_hm.contains(existing):
+                return existing
+        // HashMap is opaque { ptr }
+        let body: Vec[i64] = Vec.new()
+        body.push(wl_ptr_type(self.context))
+        let name = self.collection_wrapper_name_2("__with.HashMap", key_ty, val_ty)
+        let hm_ty = wl_struct_create_named(self.context, name)
+        wl_struct_set_body(hm_ty, vec_data_i64(&body), 1, 0)
+        self.cache_hashmap_type(sema_tid, key_ty, val_ty, hm_ty)
+        hm_ty
+
+    fn cache_hashmap_type(sema_tid: i32, key_ty: i64, val_ty: i64, hm_ty: i64) -> i64:
+        let hash = if sema_tid > 0: sema_tid as i64 else: (key_ty *% 65537) +% val_ty
+        let cached = self.hm_cache_map.get(hash)
+        if cached.is_some():
+            let existing = cached.unwrap()
+            if self.hm_is_hm.contains(existing):
+                return existing
+        if self.hm_is_hm.contains(hm_ty):
+            self.hm_cache_map.insert(hash, hm_ty)
+            return hm_ty
+        self.hm_is_hm.insert(hm_ty, 1)
+        self.hm_cache_map.insert(hash, hm_ty)
+        hm_ty
+
+    fn get_or_create_hashset_type(sema_tid: i32, elem_ty: i64) -> i64:
+        let cache_key = if sema_tid > 0: sema_tid as i64 else: elem_ty
+        let cached = self.hs_cache_map.get(cache_key)
+        if cached.is_some():
+            return cached.unwrap()
+        let body: Vec[i64] = Vec.new()
+        body.push(wl_ptr_type(self.context))
+        let name = self.collection_wrapper_name_1("__with.HashSet", elem_ty)
+        let hs_ty = wl_struct_create_named(self.context, name)
+        wl_struct_set_body(hs_ty, vec_data_i64(&body), 1, 0)
+        self.hs_cache_map.insert(cache_key, hs_ty)
+        hs_ty
+
+    fn get_or_create_slotmap_type(sema_tid: i32, elem_ty: i64) -> i64:
+        let cache_key = if sema_tid > 0: sema_tid as i64 else: elem_ty
+        let cached = self.slotmap_cache_map.get(cache_key)
+        if cached.is_some():
+            return cached.unwrap()
+        let body: Vec[i64] = Vec.new()
+        body.push(wl_ptr_type(self.context))
+        let name = self.collection_wrapper_name_1("__with.SlotMap", elem_ty)
+        let sm_ty = wl_struct_create_named(self.context, name)
+        wl_struct_set_body(sm_ty, vec_data_i64(&body), 1, 0)
+        self.slotmap_cache_map.insert(cache_key, sm_ty)
+        sm_ty
+
+    // ── Monomorphize struct (stub) ────────────────────────────────────
+
+    mut fn monomorphize_struct(name_sym: i32, extra_start: i32, arg_count: i32) -> i64:
+        let gs_opt = self.generic_structs.get(name_sym)
+        if not gs_opt.is_some():
+            return 0
+        let type_node = gs_opt.unwrap()
+        let tp_count = self.type_decl_tp_count(type_node)
+        if tp_count <= 0:
+            let st_opt = self.struct_type_map.get(name_sym)
+            if st_opt.is_some():
+                return self.struct_llvm_types.get(st_opt.unwrap() as i64)
+            return 0
+
+        let tp_syms: Vec[i32] = Vec.new()
+        var tp_pos = self.type_decl_tp_start(type_node)
+        for ti in 0..tp_count:
+            let tp_sym = self.pool.get_extra(tp_pos)
+            tp_syms.push(tp_sym)
+            let bound_count = self.pool.get_extra(tp_pos + 1)
+            tp_pos = tp_pos + 2 + bound_count
+
+        let arg_types: Vec[i64] = Vec.new()
+        let arg_sema_types: Vec[i32] = Vec.new()
+        if arg_count > 0:
+            for ai in 0..arg_count:
+                let arg_node = self.pool.get_extra(extra_start + ai)
+                let arg_ty = self.resolve_type(arg_node)
+                let arg_sema = self.type_expr_to_sema_type(arg_node)
+                if arg_ty != 0:
+                    arg_types.push(arg_ty)
+                else:
+                    arg_types.push(wl_i32_type(self.context))
+                if arg_sema != 0:
+                    arg_sema_types.push(arg_sema)
+                else:
+                    arg_sema_types.push(self.llvm_type_to_sema_type(arg_types.get(ai as i64)))
+        else:
+            for ti in 0..tp_count:
+                let tp_sym = tp_syms.get(ti as i64)
+                var bound_ty: i64 = 0
+                for bi in 0..self.type_bindings_len:
+                    if self.type_binding_syms.get(bi as i64) == tp_sym:
+                        bound_ty = self.type_binding_types.get(bi as i64)
+                        break
+                if bound_ty == 0:
+                    bound_ty = self.type_fallback()
+                arg_types.push(bound_ty)
+                arg_sema_types.push(self.llvm_type_to_sema_type(bound_ty))
+        while arg_types.len() as i32 < tp_count:
+            let fallback_ty = self.type_fallback()
+            arg_types.push(fallback_ty)
+            arg_sema_types.push(self.llvm_type_to_sema_type(fallback_ty))
+
+        let base_name = self.intern.resolve(name_sym)
+        var mangled = base_name
+        for ti in 0..tp_count:
+            let arg_ty = arg_types.get(ti as i64)
+            mangled = mangled ++ "__" ++ self.llvm_type_mangle(arg_ty)
+        let mono_sym = self.intern.intern(mangled)
+
+        let mono_idx_opt = self.struct_type_map.get(mono_sym)
+        if mono_idx_opt.is_some():
+            return self.struct_llvm_types.get(mono_idx_opt.unwrap() as i64)
+
+        self.predeclare_struct_type(mono_sym)
+        self.mono_struct_base.insert(mono_sym, name_sym)
+        let tp_flat_start = self.mono_struct_tp_flat_syms.len() as i32
+        for ti in 0..tp_count:
+            self.mono_struct_tp_flat_syms.push(tp_syms.get(ti as i64))
+            self.mono_struct_tp_flat_types.push(arg_types.get(ti as i64))
+            self.mono_struct_tp_flat_sema_types.push(arg_sema_types.get(ti as i64))
+        self.mono_struct_tp_starts.insert(mono_sym, tp_flat_start)
+        self.mono_struct_tp_counts.insert(mono_sym, tp_count)
+        let mono_idx = self.struct_type_map.get(mono_sym).unwrap()
+        let mono_ty = self.struct_llvm_types.get(mono_idx as i64)
+
+        let saved_bind_syms = self.type_binding_syms
+        let saved_bind_tys = self.type_binding_types
+        let saved_bind_len = self.type_bindings_len
+        let fresh_bind_syms: Vec[i32] = Vec.new()
+        let fresh_bind_tys: Vec[i64] = Vec.new()
+        self.type_binding_syms = fresh_bind_syms
+        self.type_binding_types = fresh_bind_tys
+        self.type_bindings_len = 0
+        for ti in 0..tp_count:
+            self.type_binding_syms.push(tp_syms.get(ti as i64))
+            self.type_binding_types.push(arg_types.get(ti as i64))
+            self.type_bindings_len = self.type_bindings_len + 1
+
+        let decl_extra_start = self.pool.get_data1(type_node)
+        let field_count = self.pool.get_extra(decl_extra_start)
+        self.struct_field_starts.set_i32(mono_idx as i64, self.struct_field_names.len() as i32)
+        self.struct_field_counts.set_i32(mono_idx as i64, field_count)
+
+        let ft_vec: Vec[i64] = Vec.new()
+        var invalid_layout = 0
+        for fi in 0..field_count:
+            let offset = decl_extra_start + 1 + fi * 3
+            let f_name = self.pool.get_extra(offset)
+            let f_type_node = self.pool.get_extra(offset + 1)
+            let f_default = self.pool.get_extra(offset + 2)
+            var f_ty = self.resolve_type(f_type_node)
+            self.debug_type_layout_field(mangled, fi, f_name, f_type_node, f_ty)
+            if f_ty == 0:
+                with_eprint("error: unresolved type for field '" ++ self.intern.resolve(f_name) ++ "' in struct '" ++ base_name ++ "'")
+                invalid_layout = 1
+                self.had_error = 1
+                f_ty = self.type_fallback()
+            self.struct_field_names.push(f_name)
+            self.struct_field_types.push(f_ty)
+            self.struct_field_type_nodes.push(f_type_node)
+            self.struct_field_defaults.push(f_default)
+            ft_vec.push(f_ty)
+
+        // Push identity field index mapping (generic structs don't have alignment)
+        for fi in 0..field_count:
+            self.struct_llvm_field_indices.push(fi)
+
+        if invalid_layout == 0:
+            wl_struct_set_body(mono_ty, vec_data_i64(&ft_vec), field_count, 0)
+
+        self.type_binding_syms = saved_bind_syms
+        self.type_binding_types = saved_bind_tys
+        self.type_bindings_len = saved_bind_len
+
+        mono_ty
 
 // ── Monomorphize generic struct method ───────────────────────────
 // Compiles a method body with the struct's type params bound to concrete types.
 // Called lazily when the method is first invoked on a monomorphized struct.
 
-type CodegenSemaGenericSubstState {
-    syms: Vec[i32],
-    tys: Vec[i32],
+type ConcreteMirFunction {
+    sym: i32,
+    value: i64,
+    fn_type: i64,
+    sig: i32,
 }
 
-fn Codegen.install_sema_generic_substs(self: Codegen, tp_syms: &Vec[i32], tp_sema_tys: &Vec[i32]) -> CodegenSemaGenericSubstState:
-    let state = CodegenSemaGenericSubstState { self.sema.generic_subst_param_syms, self.sema.generic_subst_type_ids }
-    self.sema.generic_subst_param_syms = Vec.new()
-    self.sema.generic_subst_type_ids = Vec.new()
-    for ti in 0..tp_syms.len() as i32:
-        let tp_sym = tp_syms.get(ti as i64)
-        let tp_sema_ty = tp_sema_tys.get(ti as i64)
-        if tp_sym == 0 or tp_sema_ty == 0:
-            continue
-        self.sema.put_generic_subst(tp_sym, tp_sema_ty, 0)
-        let tp_text = self.sema.pool_resolve_symbol(tp_sym)
-        let canonical_tp_sym = if tp_text.len() > 0: self.sema.pool_lookup_symbol(tp_text) else: 0
-        if canonical_tp_sym != 0 and canonical_tp_sym != tp_sym:
-            self.sema.put_generic_subst(canonical_tp_sym, tp_sema_ty, 0)
-    state
+impl Codegen:
+    fn invalid_concrete_mir_function() -> ConcreteMirFunction:
+        ConcreteMirFunction { sym: 0, value: 0, fn_type: 0, sig: -1 }
 
-fn Codegen.restore_sema_generic_substs(self: Codegen, state: CodegenSemaGenericSubstState):
-    self.sema.generic_subst_param_syms = state.syms
-    self.sema.generic_subst_type_ids = state.tys
+    mut fn ensure_concrete_mir_function(call_node: i32, recorded_sig: i32, recorded_mono_sym: i32, fallback_sym: i32, label: str) -> ConcreteMirFunction:
+        var sema_sym = fallback_sym
+        var sig_idx = if sema_sym != 0: self.sema.get_sig(sema_sym) else: -1
+        if recorded_mono_sym != 0:
+            sema_sym = recorded_mono_sym
+        if recorded_sig >= 0:
+            sig_idx = recorded_sig
+        else if call_node != 0:
+            let recorded_sym = self.sema.resolved_call_mono_syms.get(call_node)
+            let fallback_recorded_sig = self.sema.resolved_call_sigs.get(call_node)
+            if recorded_sym.is_some():
+                sema_sym = recorded_sym.unwrap()
+            if fallback_recorded_sig.is_some():
+                sig_idx = fallback_recorded_sig.unwrap()
+        if sema_sym == 0 or sig_idx < 0:
+            with_eprint(f"error: missing concrete semantic specialization for {label}")
+            self.had_error = 1
+            return self.invalid_concrete_mir_function()
 
-fn Codegen.monomorphize_struct_method_core(self: Codegen, mono_type_sym: i32, method_name: str, decl: i32, obj: i64, obj_ptr: i64, obj_node: i32, obj_ty: i64, args_start: i32, arg_count: i32, call_node: i32, pre_args: Vec[i64]) -> i64:
-    let tp_start_opt = self.mono_struct_tp_starts.get(mono_type_sym)
-    if not tp_start_opt.is_some():
-        with_eprint("error: no type param bindings for monomorphized struct")
-        self.had_error = 1
-        return wl_get_undef(wl_i32_type(self.context))
-    let tp_flat_start = tp_start_opt.unwrap()
-    let tp_count = self.mono_struct_tp_counts.get(mono_type_sym).unwrap()
+        let mono_sym = self.codegen_sym_for_sema_sym(sema_sym)
+        let cached_value = self.fn_values.get(mono_sym)
+        let cached_type = self.fn_fn_types.get(mono_sym)
+        if cached_value.is_some() and cached_type.is_some():
+            return ConcreteMirFunction { sym: mono_sym, value: cached_value.unwrap() as i64, fn_type: cached_type.unwrap() as i64, sig: sig_idx }
 
-    let mono_type_name = self.intern.resolve(mono_type_sym)
-    let mangled = mono_type_name ++ "." ++ method_name
-    let mono_sym = self.intern.intern(mangled)
+        let body_idx = self.mir_input.find_body(sema_sym)
+        if body_idx < 0:
+            with_eprint(f"error: concrete specialization MIR was not lowered before freeze for {label}")
+            self.had_error = 1
+            return self.invalid_concrete_mir_function()
+        let body = self.mir_input.bodies.get(body_idx as i64)
+        let param_count = self.sema.sig_get_param_count(sig_idx)
+        let ret_sema = self.sema.sig_return_type(sig_idx)
+        let ret_ty = if ret_sema != 0: self.sema_type_to_llvm(ret_sema) else: wl_void_type(self.context)
+        var actual_ret_ty = ret_ty
+        var has_sret = 0
+        var byval_mask: i64 = 0
+        let byval_types: Vec[i64] = Vec.new()
+        let direct_types: Vec[i64] = Vec.new()
+        let actual_params: Vec[i64] = Vec.new()
+        if self.internal_abi_needs_sret(ret_ty):
+            has_sret = 1
+            actual_ret_ty = wl_void_type(self.context)
+            actual_params.push(wl_ptr_type(self.context))
+        for pi in 0..param_count:
+            let param_sema = self.sema.sig_param_type(sig_idx, pi)
+            let param_ty = self.sema_type_to_llvm(param_sema)
+            if self.sema.sig_param_uses_value_ref_abi(sig_idx, pi) != 0:
+                actual_params.push(wl_ptr_type(self.context))
+                byval_types.push(0)
+                direct_types.push(0)
+            else if self.internal_abi_needs_indirect_param(param_ty):
+                actual_params.push(wl_ptr_type(self.context))
+                byval_mask = byval_mask | ((1 as i64) << (pi as u32))
+                byval_types.push(param_ty)
+                direct_types.push(0)
+            else:
+                actual_params.push(param_ty)
+                byval_types.push(0)
+                direct_types.push(0)
 
-    // Check cache — method already monomorphized for this struct instantiation
-    let cached_fv = self.fn_values.get(mono_sym)
-    let cached_ft = self.fn_fn_types.get(mono_sym)
-    if cached_fv.is_some() and cached_ft.is_some():
+        let fn_type = wl_function_type(actual_ret_ty, vec_data_i64(&actual_params), actual_params.len() as i32, 0)
+        let name = self.intern.resolve(mono_sym)
+        let function = wl_add_function(self.llmod, name, fn_type)
+        if has_sret != 0:
+            wl_add_sret_attr(self.context, function, 0, ret_ty)
+        if has_sret != 0 or byval_mask != 0:
+            self.record_c_abi_transform(mono_sym, has_sret, ret_ty, byval_mask, byval_types, 0, direct_types, 0)
+        for pi in 0..param_count:
+            if self.sema.sig_param_uses_value_ref_abi(sig_idx, pi) != 0:
+                self.record_ref_param(mono_sym, pi, param_count)
+        let specialization = self.sema.concrete_specialization_by_sym.get(sema_sym)
+        if specialization.is_some():
+            let fn_node = self.sema.concrete_specialization_nodes.get(specialization.unwrap() as i64)
+            let meta = self.pool.find_fn_meta(fn_node)
+            if meta >= 0:
+                self.apply_noalias_param_attrs_with_offset(function, self.pool.fn_meta_param_start(meta), param_count, if has_sret != 0: 1 else: 0)
+        self.fn_values.insert(mono_sym, function)
+        self.fn_fn_types.insert(mono_sym, fn_type)
+        self.gen_function_mir_mono(mono_sym, 0, body)
+        ConcreteMirFunction { sym: mono_sym, value: function, fn_type, sig: sig_idx }
+
+    mut fn monomorphize_struct_method_core(mono_type_sym: i32, method_name: str, _decl: i32, obj: i64, obj_ptr: i64, obj_node: i32, obj_ty: i64, args_start: i32, arg_count: i32, call_node: i32, concrete_sig: i32, concrete_sym: i32, pre_args: Vec[i64]) -> i64:
+        let fallback = self.intern.intern(self.intern.resolve(mono_type_sym) ++ "." ++ method_name)
+        let concrete = self.ensure_concrete_mir_function(call_node, concrete_sig, concrete_sym, fallback, "method " ++ method_name)
+        if concrete.sym == 0:
+            return wl_get_undef(wl_i32_type(self.context))
         let args: Vec[i64] = Vec.new()
-        let is_ref = self.fn_ref_param_starts.get(mono_sym).is_some()
-        if is_ref:
+        if self.is_ref_param(concrete.sym, 0):
             args.push(if obj_ptr != 0: obj_ptr else: self.get_mutable_receiver_ptr(obj_node, obj, obj_ty))
         else:
             args.push(obj)
         for ai in 0..arg_count:
             args.push(pre_args.get(ai as i64))
-        return self.build_call_fn_value(mono_sym, cached_fv.unwrap() as i64, cached_ft.unwrap() as i64, args_start, 1, args, arg_count + 1, "method " ++ mangled, call_node)
+        self.build_call_fn_value(concrete.sym, concrete.value, concrete.fn_type, args_start, 1, args, arg_count + 1, "method " ++ method_name, call_node)
 
-    // Set up type bindings from the monomorphized struct
-    let saved_bind_syms = self.type_binding_syms
-    let saved_bind_tys = self.type_binding_types
-    let saved_bind_len = self.type_bindings_len
-    let fresh_bind_syms: Vec[i32] = Vec.new()
-    let fresh_bind_tys: Vec[i64] = Vec.new()
-    self.type_binding_syms = fresh_bind_syms
-    self.type_binding_types = fresh_bind_tys
-    self.type_bindings_len = 0
-    for ti in 0..tp_count:
-        self.type_binding_syms.push(self.mono_struct_tp_flat_syms.get((tp_flat_start + ti) as i64))
-        self.type_binding_types.push(self.mono_struct_tp_flat_types.get((tp_flat_start + ti) as i64))
-        self.type_bindings_len = self.type_bindings_len + 1
+    mut fn monomorphize_struct_static_method_core(mono_type_sym: i32, method_name: str, _decl: i32, args_start: i32, arg_count: i32, call_node: i32, concrete_sig: i32, concrete_sym: i32, pre_args: Vec[i64]) -> i64:
+        let fallback = self.intern.intern(self.intern.resolve(mono_type_sym) ++ "." ++ method_name)
+        let concrete = self.ensure_concrete_mir_function(call_node, concrete_sig, concrete_sym, fallback, "static method " ++ method_name)
+        if concrete.sym == 0:
+            return wl_get_undef(wl_i32_type(self.context))
+        self.build_call_fn_value(concrete.sym, concrete.value, concrete.fn_type, args_start, 0, pre_args, arg_count, "method " ++ method_name, call_node)
 
-    let saved_owner = self.current_method_owner_sym
-    if decl <= 0 or decl >= self.pool.node_count() or self.pool.kind(decl) != NodeKind.NK_FN_DECL:
-        let decl_kind = if decl > 0 and decl < self.pool.node_count(): self.pool.kind(decl) else: -1
-        with_eprint(f"error: invalid generic method declaration for '{method_name}' on '{self.intern.resolve(mono_type_sym)}' (decl={decl}, kind={decl_kind})")
-        self.had_error = 1
-        self.type_binding_syms = saved_bind_syms
-        self.type_binding_types = saved_bind_tys
-        self.type_bindings_len = saved_bind_len
-        self.current_method_owner_sym = saved_owner
-        return wl_get_undef(wl_i32_type(self.context))
+    // ── Build Option Some/None ────────────────────────────────────────
 
-    let meta = self.pool.find_fn_meta(decl)
-    if meta < 0:
-        with_eprint(f"error: missing function metadata for generic method '{method_name}' on '{self.intern.resolve(mono_type_sym)}' (decl={decl})")
-        self.had_error = 1
-        self.type_binding_syms = saved_bind_syms
-        self.type_binding_types = saved_bind_tys
-        self.type_bindings_len = saved_bind_len
-        self.current_method_owner_sym = saved_owner
-        return wl_get_undef(wl_i32_type(self.context))
-    let ret_type_node = self.pool.fn_meta_ret(meta)
-    let param_start = self.pool.fn_meta_param_start(meta)
-    let param_count = self.pool.fn_meta_param_count(meta)
-    let body_node = self.pool.get_data1(decl)
-    self.current_method_owner_sym = mono_type_sym
+    mut fn build_option_some(payload: i64, opt_type: i64) -> i64:
+        if wl_get_type_kind(opt_type) == wl_pointer_type_kind():
+            return self.coerce_value_to_type(payload, opt_type)
+        let alloca = self.create_entry_alloca(opt_type)
+        // Fully initialize to avoid undef/poison in padding bytes.
+        wl_build_store(self.builder, self.build_default_value(opt_type), alloca)
+        // Store tag = 0 (Some)
+        let tag_ptr = wl_build_struct_gep(self.builder, opt_type, alloca, 0)
+        wl_build_store(self.builder, wl_const_int(wl_i32_type(self.context), 0, 0), tag_ptr)
+        // Store payload
+        let elem_count = wl_count_struct_elem_types(opt_type)
+        if elem_count > 1:
+            let payload_ptr = wl_build_struct_gep(self.builder, opt_type, alloca, 1)
+            let payload_ty = wl_struct_get_type_at(opt_type, 1)
+            let payload_val = if payload_ty != 0: self.coerce_value_to_type(payload, payload_ty) else: payload
+            wl_build_store(self.builder, payload_val, payload_ptr)
+        wl_build_load(self.builder, opt_type, alloca)
 
-    // Build Sema type substitutions before resolving the LLVM signature.
-    // Generic method return/param types can mention T/Self just like the body.
-    let sm_tp_syms: Vec[i32] = Vec.new()
-    let sm_tp_sema_tys: Vec[i32] = Vec.new()
-    for ti in 0..tp_count:
-        let tp_sym = self.mono_struct_tp_flat_syms.get((tp_flat_start + ti) as i64)
-        let tp_text = self.intern.resolve(tp_sym)
-        let sema_tp_sym = if tp_text.len() > 0: self.sema.pool_lookup_symbol(tp_text) else: 0
-        sm_tp_syms.push(if sema_tp_sym != 0: sema_tp_sym else: tp_sym)
-        var tp_sema = 0
-        if tp_flat_start + ti < self.mono_struct_tp_flat_sema_types.len() as i32:
-            tp_sema = self.mono_struct_tp_flat_sema_types.get((tp_flat_start + ti) as i64)
-        if tp_sema == 0:
-            let tp_llvm = self.mono_struct_tp_flat_types.get((tp_flat_start + ti) as i64)
-            tp_sema = self.llvm_type_to_sema_type(tp_llvm)
-        sm_tp_sema_tys.push(tp_sema)
-    let concrete_self_ty = self.mono_struct_sema_type(mono_type_sym)
-    if concrete_self_ty != 0:
-        sm_tp_syms.push(self.sema.syms.self_type)
-        sm_tp_sema_tys.push(concrete_self_ty)
-    let saved_sig_sema_substs = self.install_sema_generic_substs(sm_tp_syms, sm_tp_sema_tys)
+    fn build_option_none(opt_type: i64) -> i64:
+        if wl_get_type_kind(opt_type) == wl_pointer_type_kind():
+            return wl_const_null(opt_type)
+        let alloca = self.create_entry_alloca(opt_type)
+        wl_build_store(self.builder, self.build_default_value(opt_type), alloca)
+        let tag_ptr = wl_build_struct_gep(self.builder, opt_type, alloca, 0)
+        wl_build_store(self.builder, wl_const_int(wl_i32_type(self.context), 1, 0), tag_ptr)
+        wl_build_load(self.builder, opt_type, alloca)
 
-    // Resolve param and return types with type bindings active
-    let mono_param_types: Vec[i64] = Vec.new()
-    var has_ref_self = false
-    for pi in 0..param_count:
-        let p_type_node = self.pool.fn_param_type(param_start, pi)
-        if p_type_node != 0:
-            var p_ty = self.resolve_type(p_type_node)
-            if p_ty == 0:
-                p_ty = self.type_fallback()
-            // Methods pass struct self as pointer
-            if pi == 0:
-                let p_flags = self.pool.fn_param_flags(param_start, pi)
-                if fn_param_is_mut_self(p_flags) != 0 or fn_param_is_ref_self(p_flags) != 0:
-                    has_ref_self = true
-                    p_ty = wl_ptr_type(self.context)
-                else:
-                    let p_kind = self.pool.kind(p_type_node)
-                    if p_kind == NodeKind.NK_TYPE_GENERIC or p_kind == NodeKind.NK_TYPE_NAMED:
-                        let p_name_sym = self.pool.get_data0(p_type_node)
-                        let st_opt = self.struct_type_map.get(p_name_sym)
-                        if not st_opt.is_some():
-                            // Check for monomorphized struct
-                            let base = self.mono_struct_base.get(p_name_sym)
-                            if not base.is_some():
-                                // It's a generic self param — use the monomorphized struct type as pointer
-                                has_ref_self = true
-                                p_ty = wl_ptr_type(self.context)
-                        else:
-                            has_ref_self = true
-                            p_ty = wl_ptr_type(self.context)
-            mono_param_types.push(p_ty)
-        else:
-            mono_param_types.push(self.type_fallback())
+    fn build_result_ok(val: i64, res_type: i64) -> i64:
+        let alloca = self.create_entry_alloca(res_type)
+        wl_build_store(self.builder, self.build_default_value(res_type), alloca)
+        let tag_ptr = wl_build_struct_gep(self.builder, res_type, alloca, 0)
+        wl_build_store(self.builder, wl_const_int(wl_i32_type(self.context), 0, 0), tag_ptr)
+        let elem_count = wl_count_struct_elem_types(res_type)
+        if elem_count > 1:
+            let payload_ptr = wl_build_struct_gep(self.builder, res_type, alloca, 1)
+            let cast_ptr = wl_build_bitcast(self.builder, payload_ptr, wl_ptr_type(self.context))
+            wl_build_store(self.builder, val, cast_ptr)
+        wl_build_load(self.builder, res_type, alloca)
 
-    var mono_ret_ty_raw: i64 = 0
-    if ret_type_node != 0:
-        mono_ret_ty_raw = self.resolve_type(ret_type_node)
-    else if call_node == 0 and method_name == "drop":
-        mono_ret_ty_raw = wl_void_type(self.context)
-    else:
-        let call_ret_sema = self.sema_type_of_node(call_node)
-        if call_ret_sema > 0:
-            mono_ret_ty_raw = self.sema_type_to_llvm(call_ret_sema)
-    let mono_ret_ty = if mono_ret_ty_raw != 0: mono_ret_ty_raw else: self.type_fallback()
+    fn build_result_err(val: i64, res_type: i64) -> i64:
+        let alloca = self.create_entry_alloca(res_type)
+        wl_build_store(self.builder, self.build_default_value(res_type), alloca)
+        let tag_ptr = wl_build_struct_gep(self.builder, res_type, alloca, 0)
+        wl_build_store(self.builder, wl_const_int(wl_i32_type(self.context), 1, 0), tag_ptr)
+        let elem_count = wl_count_struct_elem_types(res_type)
+        if elem_count > 1:
+            let payload_ptr = wl_build_struct_gep(self.builder, res_type, alloca, 1)
+            let cast_ptr = wl_build_bitcast(self.builder, payload_ptr, wl_ptr_type(self.context))
+            wl_build_store(self.builder, val, cast_ptr)
+        wl_build_load(self.builder, res_type, alloca)
 
-    var mono_actual_ret_ty = mono_ret_ty
-    var mono_has_sret = 0
-    var mono_byval_mask: i64 = 0
-    let mono_byval_types: Vec[i64] = Vec.new()
-    let mono_direct_types: Vec[i64] = Vec.new()
-    let mono_actual_params: Vec[i64] = Vec.new()
-    if self.internal_abi_needs_sret(mono_ret_ty):
-        mono_has_sret = 1
-        mono_actual_ret_ty = wl_void_type(self.context)
-        mono_actual_params.push(wl_ptr_type(self.context))
-    for mpi in 0..param_count:
-        let source_ty = mono_param_types.get(mpi as i64)
-        if self.internal_abi_needs_indirect_param(source_ty):
-            mono_actual_params.push(wl_ptr_type(self.context))
-            mono_byval_mask = mono_byval_mask | ((1 as i64) << (mpi as u32))
-            mono_byval_types.push(source_ty)
-            mono_direct_types.push(0)
-        else:
-            mono_actual_params.push(source_ty)
-            mono_byval_types.push(0)
-            mono_direct_types.push(0)
-
-    let mono_ft = wl_function_type(mono_actual_ret_ty, vec_data_i64(&mono_actual_params), mono_actual_params.len() as i32, 0)
-    let mono_fn = wl_add_function(self.llmod, mangled, mono_ft)
-    if mono_has_sret != 0:
-        wl_add_sret_attr(self.context, mono_fn, 0, mono_ret_ty)
-    if mono_has_sret != 0 or mono_byval_mask != 0:
-        self.record_c_abi_transform(mono_sym, mono_has_sret, mono_ret_ty, mono_byval_mask, mono_byval_types, 0, mono_direct_types, 0)
-    self.apply_noalias_param_attrs_with_offset(mono_fn, param_start, param_count, if mono_has_sret != 0: 1 else: 0)
-    self.fn_values.insert(mono_sym, mono_fn)
-    self.fn_fn_types.insert(mono_sym, mono_ft)
-    if has_ref_self:
-        self.record_ref_param(mono_sym, 0, param_count)
-
-    let alias_base_sym = self.mono_struct_base.get(mono_type_sym).unwrap()
-    let alias_base_text = self.intern.resolve(alias_base_sym)
-    let alias_sema_base = if alias_base_text.len() > 0: self.sema.pool_lookup_symbol(alias_base_text) else: 0
-    var alias_named_had = 0
-    var alias_named_old = 0
-    var alias_decl_had = 0
-    var alias_decl_old = 0
-    if alias_sema_base != 0 and alias_sema_base != alias_base_sym:
-        if self.sema.named_types.contains(alias_base_sym):
-            alias_named_had = 1
-            alias_named_old = self.sema.named_types.get(alias_base_sym).unwrap()
-        if self.sema.type_decl_nodes.contains(alias_base_sym):
-            alias_decl_had = 1
-            alias_decl_old = self.sema.type_decl_nodes.get(alias_base_sym).unwrap()
-        if self.sema.named_types.contains(alias_sema_base):
-            self.sema.named_types.insert(alias_base_sym, self.sema.named_types.get(alias_sema_base).unwrap())
-        if self.sema.type_decl_nodes.contains(alias_sema_base):
-            self.sema.type_decl_nodes.insert(alias_base_sym, self.sema.type_decl_nodes.get(alias_sema_base).unwrap())
-
-    // 1. Type-check body with concrete types
-    let param_concrete_tys: Vec[i32] = Vec.new()
-    let sig_idx = self.sema.check_fn_body_concrete(decl, sm_tp_syms, sm_tp_sema_tys, mono_sym, param_concrete_tys)
-
-    let saved_sema_named: Vec[i32] = Vec.new()
-    let saved_sema_had: Vec[i32] = Vec.new()
-    for ti2 in 0..sm_tp_syms.len() as i32:
-        let tp_sym2 = sm_tp_syms.get(ti2 as i64)
-        if self.sema.named_types.contains(tp_sym2):
-            saved_sema_had.push(1)
-            saved_sema_named.push(self.sema.named_types.get(tp_sym2).unwrap())
-        else:
-            saved_sema_had.push(0)
-            saved_sema_named.push(0)
-        self.sema.named_types.insert(tp_sym2, sm_tp_sema_tys.get(ti2 as i64))
-
-    // 2. Lower to MIR in the method's defining module. Imported generic
-    // methods may mention private helper types in their body; lowering them
-    // from the caller's module corrupts those type references.
-    let saved_lower_file_id = self.sema.local_file_id
-    let saved_lower_module_path = self.sema.current_module_path
-    let saved_lower_module_has_ci = self.sema.current_module_has_ci
-    let lower_di = self.sema.find_decl_index(decl)
-    if lower_di >= 0:
-        self.sema.update_decl_source_context(lower_di)
-    var mir_builder = MirBuilder.init(self.sema, self.pool, self.intern, mono_sym)
-    let mir_body = lower_fn_with_sig(move mir_builder, decl, sig_idx)
-
-    // 3. Codegen via MIR (saves/restores all codegen state internally)
-    self.gen_function_mir_mono(mono_sym, decl, mir_body)
-    self.sema.local_file_id = saved_lower_file_id
-    self.sema.current_module_path = saved_lower_module_path
-    self.sema.current_module_has_ci = saved_lower_module_has_ci
-    self.restore_sema_generic_substs(saved_sig_sema_substs)
-
-    if alias_sema_base != 0 and alias_sema_base != alias_base_sym:
-        if alias_named_had != 0:
-            self.sema.named_types.insert(alias_base_sym, alias_named_old)
-        else:
-            self.sema.named_types.remove(alias_base_sym)
-        if alias_decl_had != 0:
-            self.sema.type_decl_nodes.insert(alias_base_sym, alias_decl_old)
-        else:
-            self.sema.type_decl_nodes.remove(alias_base_sym)
-
-    for ti3 in 0..sm_tp_syms.len() as i32:
-        let tp_sym3 = sm_tp_syms.get(ti3 as i64)
-        if saved_sema_had.get(ti3 as i64) == 1:
-            self.sema.named_types.insert(tp_sym3, saved_sema_named.get(ti3 as i64))
-        else:
-            self.sema.named_types.remove(tp_sym3)
-
-    self.type_binding_syms = saved_bind_syms
-    self.type_binding_types = saved_bind_tys
-    self.type_bindings_len = saved_bind_len
-    self.current_method_owner_sym = saved_owner
-
-    // Now call the monomorphized method
-    let call_args: Vec[i64] = Vec.new()
-    if has_ref_self:
-        call_args.push(if obj_ptr != 0: obj_ptr else: self.get_mutable_receiver_ptr(obj_node, obj, obj_ty))
-    else:
-        call_args.push(obj)
-    for ai in 0..arg_count:
-        call_args.push(pre_args.get(ai as i64))
-    self.build_call_fn_value(mono_sym, mono_fn, mono_ft, args_start, 1, call_args, arg_count + 1, "method " ++ mangled, call_node)
-
-fn Codegen.monomorphize_struct_static_method_core(self: Codegen, mono_type_sym: i32, method_name: str, decl: i32, args_start: i32, arg_count: i32, call_node: i32, pre_args: Vec[i64]) -> i64:
-    let tp_start_opt = self.mono_struct_tp_starts.get(mono_type_sym)
-    if not tp_start_opt.is_some():
-        with_eprint("error: no type param bindings for monomorphized struct")
-        self.had_error = 1
-        return wl_get_undef(wl_i32_type(self.context))
-    let tp_flat_start = tp_start_opt.unwrap()
-    let tp_count = self.mono_struct_tp_counts.get(mono_type_sym).unwrap()
-
-    let mono_type_name = self.intern.resolve(mono_type_sym)
-    let mangled = mono_type_name ++ "." ++ method_name
-    let mono_sym = self.intern.intern(mangled)
-
-    let cached_fv = self.fn_values.get(mono_sym)
-    let cached_ft = self.fn_fn_types.get(mono_sym)
-    if cached_fv.is_some() and cached_ft.is_some():
-        return self.build_call_fn_value(mono_sym, cached_fv.unwrap() as i64, cached_ft.unwrap() as i64, args_start, 0, pre_args, arg_count, "method " ++ mangled, call_node)
-
-    let saved_bind_syms = self.type_binding_syms
-    let saved_bind_tys = self.type_binding_types
-    let saved_bind_len = self.type_bindings_len
-    let saved_owner = self.current_method_owner_sym
-    let fresh_bind_syms: Vec[i32] = Vec.new()
-    let fresh_bind_tys: Vec[i64] = Vec.new()
-    self.type_binding_syms = fresh_bind_syms
-    self.type_binding_types = fresh_bind_tys
-    self.type_bindings_len = 0
-    self.current_method_owner_sym = mono_type_sym
-    for ti in 0..tp_count:
-        self.type_binding_syms.push(self.mono_struct_tp_flat_syms.get((tp_flat_start + ti) as i64))
-        self.type_binding_types.push(self.mono_struct_tp_flat_types.get((tp_flat_start + ti) as i64))
-        self.type_bindings_len = self.type_bindings_len + 1
-
-    let meta = self.pool.find_fn_meta(decl)
-    let ret_type_node = self.pool.fn_meta_ret(meta)
-    let param_start = self.pool.fn_meta_param_start(meta)
-    let param_count = self.pool.fn_meta_param_count(meta)
-
-    let sm_tp_syms: Vec[i32] = Vec.new()
-    let sm_tp_sema_tys: Vec[i32] = Vec.new()
-    for ti in 0..tp_count:
-        let tp_sym = self.mono_struct_tp_flat_syms.get((tp_flat_start + ti) as i64)
-        let tp_text = self.intern.resolve(tp_sym)
-        let sema_tp_sym = if tp_text.len() > 0: self.sema.pool_lookup_symbol(tp_text) else: 0
-        sm_tp_syms.push(if sema_tp_sym != 0: sema_tp_sym else: tp_sym)
-        var tp_sema = 0
-        if tp_flat_start + ti < self.mono_struct_tp_flat_sema_types.len() as i32:
-            tp_sema = self.mono_struct_tp_flat_sema_types.get((tp_flat_start + ti) as i64)
-        if tp_sema == 0:
-            let tp_llvm = self.mono_struct_tp_flat_types.get((tp_flat_start + ti) as i64)
-            tp_sema = self.llvm_type_to_sema_type(tp_llvm)
-        sm_tp_sema_tys.push(tp_sema)
-    let concrete_self_ty = self.mono_struct_sema_type(mono_type_sym)
-    if concrete_self_ty != 0:
-        sm_tp_syms.push(self.sema.syms.self_type)
-        sm_tp_sema_tys.push(concrete_self_ty)
-    let saved_sig_sema_substs = self.install_sema_generic_substs(sm_tp_syms, sm_tp_sema_tys)
-
-    let mono_param_types: Vec[i64] = Vec.new()
-    for pi in 0..param_count:
-        let p_type_node = self.pool.fn_param_type(param_start, pi)
-        if p_type_node != 0:
-            var p_ty = self.resolve_type(p_type_node)
-            if p_ty == 0:
-                p_ty = self.type_fallback()
-            mono_param_types.push(p_ty)
-        else:
-            mono_param_types.push(self.type_fallback())
-
-    var mono_ret_ty_raw: i64 = 0
-    if ret_type_node != 0:
-        mono_ret_ty_raw = self.resolve_type(ret_type_node)
-    else:
-        let call_ret_sema = self.sema_type_of_node(call_node)
-        if call_ret_sema > 0:
-            mono_ret_ty_raw = self.sema_type_to_llvm(call_ret_sema)
-    let mono_ret_ty = if mono_ret_ty_raw != 0: mono_ret_ty_raw else: self.type_fallback()
-
-    var mono_actual_ret_ty = mono_ret_ty
-    var mono_has_sret = 0
-    var mono_byval_mask: i64 = 0
-    let mono_byval_types: Vec[i64] = Vec.new()
-    let mono_direct_types: Vec[i64] = Vec.new()
-    let mono_actual_params: Vec[i64] = Vec.new()
-    if self.internal_abi_needs_sret(mono_ret_ty):
-        mono_has_sret = 1
-        mono_actual_ret_ty = wl_void_type(self.context)
-        mono_actual_params.push(wl_ptr_type(self.context))
-    for mpi in 0..param_count:
-        let source_ty = mono_param_types.get(mpi as i64)
-        if self.internal_abi_needs_indirect_param(source_ty):
-            mono_actual_params.push(wl_ptr_type(self.context))
-            mono_byval_mask = mono_byval_mask | ((1 as i64) << (mpi as u32))
-            mono_byval_types.push(source_ty)
-            mono_direct_types.push(0)
-        else:
-            mono_actual_params.push(source_ty)
-            mono_byval_types.push(0)
-            mono_direct_types.push(0)
-
-    let mono_ft = wl_function_type(mono_actual_ret_ty, vec_data_i64(&mono_actual_params), mono_actual_params.len() as i32, 0)
-    let mono_fn = wl_add_function(self.llmod, mangled, mono_ft)
-    if mono_has_sret != 0:
-        wl_add_sret_attr(self.context, mono_fn, 0, mono_ret_ty)
-    if mono_has_sret != 0 or mono_byval_mask != 0:
-        self.record_c_abi_transform(mono_sym, mono_has_sret, mono_ret_ty, mono_byval_mask, mono_byval_types, 0, mono_direct_types, 0)
-    self.apply_noalias_param_attrs_with_offset(mono_fn, param_start, param_count, if mono_has_sret != 0: 1 else: 0)
-    self.fn_values.insert(mono_sym, mono_fn)
-    self.fn_fn_types.insert(mono_sym, mono_ft)
-
-    let param_concrete_tys: Vec[i32] = Vec.new()
-    let sig_idx = self.sema.check_fn_body_concrete(decl, sm_tp_syms, sm_tp_sema_tys, mono_sym, param_concrete_tys)
-    let saved_sema_named: Vec[i32] = Vec.new()
-    let saved_sema_had: Vec[i32] = Vec.new()
-    for ti2 in 0..sm_tp_syms.len() as i32:
-        let tp_sym2 = sm_tp_syms.get(ti2 as i64)
-        if self.sema.named_types.contains(tp_sym2):
-            saved_sema_had.push(1)
-            saved_sema_named.push(self.sema.named_types.get(tp_sym2).unwrap())
-        else:
-            saved_sema_had.push(0)
-            saved_sema_named.push(0)
-        self.sema.named_types.insert(tp_sym2, sm_tp_sema_tys.get(ti2 as i64))
-
-    let saved_lower_file_id = self.sema.local_file_id
-    let saved_lower_module_path = self.sema.current_module_path
-    let saved_lower_module_has_ci = self.sema.current_module_has_ci
-    let lower_di = self.sema.find_decl_index(decl)
-    if lower_di >= 0:
-        self.sema.update_decl_source_context(lower_di)
-    var mir_builder = MirBuilder.init(self.sema, self.pool, self.intern, mono_sym)
-    let mir_body = lower_fn_with_sig(move mir_builder, decl, sig_idx)
-    self.gen_function_mir_mono(mono_sym, decl, mir_body)
-    self.sema.local_file_id = saved_lower_file_id
-    self.sema.current_module_path = saved_lower_module_path
-    self.sema.current_module_has_ci = saved_lower_module_has_ci
-    self.restore_sema_generic_substs(saved_sig_sema_substs)
-
-    for ti3 in 0..sm_tp_syms.len() as i32:
-        let tp_sym3 = sm_tp_syms.get(ti3 as i64)
-        if saved_sema_had.get(ti3 as i64) == 1:
-            self.sema.named_types.insert(tp_sym3, saved_sema_named.get(ti3 as i64))
-        else:
-            self.sema.named_types.remove(tp_sym3)
-
-    self.type_binding_syms = saved_bind_syms
-    self.type_binding_types = saved_bind_tys
-    self.type_bindings_len = saved_bind_len
-    self.current_method_owner_sym = saved_owner
-
-    self.build_call_fn_value(mono_sym, mono_fn, mono_ft, args_start, 0, pre_args, arg_count, "method " ++ mangled, call_node)
-
-// ── Build Option Some/None ────────────────────────────────────────
-
-fn Codegen.build_option_some(self: Codegen, payload: i64, opt_type: i64) -> i64:
-    if wl_get_type_kind(opt_type) == wl_pointer_type_kind():
-        return self.coerce_value_to_type(payload, opt_type)
-    let alloca = self.create_entry_alloca(opt_type)
-    // Fully initialize to avoid undef/poison in padding bytes.
-    wl_build_store(self.builder, self.build_default_value(opt_type), alloca)
-    // Store tag = 0 (Some)
-    let tag_ptr = wl_build_struct_gep(self.builder, opt_type, alloca, 0)
-    wl_build_store(self.builder, wl_const_int(wl_i32_type(self.context), 0, 0), tag_ptr)
-    // Store payload
-    let elem_count = wl_count_struct_elem_types(opt_type)
-    if elem_count > 1:
-        let payload_ptr = wl_build_struct_gep(self.builder, opt_type, alloca, 1)
-        let payload_ty = wl_struct_get_type_at(opt_type, 1)
-        let payload_val = if payload_ty != 0: self.coerce_value_to_type(payload, payload_ty) else: payload
-        wl_build_store(self.builder, payload_val, payload_ptr)
-    wl_build_load(self.builder, opt_type, alloca)
-
-fn Codegen.build_option_none(self: Codegen, opt_type: i64) -> i64:
-    if wl_get_type_kind(opt_type) == wl_pointer_type_kind():
-        return wl_const_null(opt_type)
-    let alloca = self.create_entry_alloca(opt_type)
-    wl_build_store(self.builder, self.build_default_value(opt_type), alloca)
-    let tag_ptr = wl_build_struct_gep(self.builder, opt_type, alloca, 0)
-    wl_build_store(self.builder, wl_const_int(wl_i32_type(self.context), 1, 0), tag_ptr)
-    wl_build_load(self.builder, opt_type, alloca)
-
-fn Codegen.build_result_ok(self: Codegen, val: i64, res_type: i64) -> i64:
-    let alloca = self.create_entry_alloca(res_type)
-    wl_build_store(self.builder, self.build_default_value(res_type), alloca)
-    let tag_ptr = wl_build_struct_gep(self.builder, res_type, alloca, 0)
-    wl_build_store(self.builder, wl_const_int(wl_i32_type(self.context), 0, 0), tag_ptr)
-    let elem_count = wl_count_struct_elem_types(res_type)
-    if elem_count > 1:
-        let payload_ptr = wl_build_struct_gep(self.builder, res_type, alloca, 1)
+    mut fn extract_result_payload(recv: i64, payload_ty: i64) -> i64:
+        if payload_ty == 0:
+            return wl_get_undef(wl_i32_type(self.context))
+        if self.abi_size_of(payload_ty) == 0:
+            return self.build_default_value(payload_ty)
+        let recv_ty = wl_type_of(recv)
+        if recv_ty == 0 or wl_get_type_kind(recv_ty) != wl_struct_type_kind():
+            return self.build_default_value(payload_ty)
+        if wl_count_struct_elem_types(recv_ty) <= 1:
+            return self.build_default_value(payload_ty)
+        let alloca = self.create_entry_alloca(recv_ty)
+        wl_build_store(self.builder, recv, alloca)
+        let payload_ptr = wl_build_struct_gep(self.builder, recv_ty, alloca, 1)
         let cast_ptr = wl_build_bitcast(self.builder, payload_ptr, wl_ptr_type(self.context))
-        wl_build_store(self.builder, val, cast_ptr)
-    wl_build_load(self.builder, res_type, alloca)
+        wl_build_load(self.builder, payload_ty, cast_ptr)
 
-fn Codegen.build_result_err(self: Codegen, val: i64, res_type: i64) -> i64:
-    let alloca = self.create_entry_alloca(res_type)
-    wl_build_store(self.builder, self.build_default_value(res_type), alloca)
-    let tag_ptr = wl_build_struct_gep(self.builder, res_type, alloca, 0)
-    wl_build_store(self.builder, wl_const_int(wl_i32_type(self.context), 1, 0), tag_ptr)
-    let elem_count = wl_count_struct_elem_types(res_type)
-    if elem_count > 1:
-        let payload_ptr = wl_build_struct_gep(self.builder, res_type, alloca, 1)
-        let cast_ptr = wl_build_bitcast(self.builder, payload_ptr, wl_ptr_type(self.context))
-        wl_build_store(self.builder, val, cast_ptr)
-    wl_build_load(self.builder, res_type, alloca)
+    // ── Emit drops / defers ───────────────────────────────────────────
 
-fn Codegen.extract_result_payload(self: Codegen, recv: i64, payload_ty: i64) -> i64:
-    if payload_ty == 0:
-        return wl_get_undef(wl_i32_type(self.context))
-    if self.abi_size_of(payload_ty) == 0:
-        return self.build_default_value(payload_ty)
-    let recv_ty = wl_type_of(recv)
-    if recv_ty == 0 or wl_get_type_kind(recv_ty) != wl_struct_type_kind():
-        return self.build_default_value(payload_ty)
-    if wl_count_struct_elem_types(recv_ty) <= 1:
-        return self.build_default_value(payload_ty)
-    let alloca = self.create_entry_alloca(recv_ty)
-    wl_build_store(self.builder, recv, alloca)
-    let payload_ptr = wl_build_struct_gep(self.builder, recv_ty, alloca, 1)
-    let cast_ptr = wl_build_bitcast(self.builder, payload_ptr, wl_ptr_type(self.context))
-    wl_build_load(self.builder, payload_ty, cast_ptr)
+    mut fn emit_drops(watermark: i32):
+        // Drop scoped locals above watermark in reverse order
+        var i = self.scope_local_count - 1
+        while i >= watermark:
+            let sym = self.scope_local_syms.get(i as i64)
+            let alloca = self.scope_local_allocas.get(i as i64)
+            let ty = self.scope_local_types.get(i as i64)
+            // Check for drop function
+            let type_sym = self.find_type_symbol(ty)
+            if type_sym != 0:
+                let dfv = self.drop_fn_values.get(type_sym)
+                let dft = self.drop_fn_types.get(type_sym)
+                if dfv.is_some() and dft.is_some():
+                    let val = wl_build_load(self.builder, ty, alloca)
+                    let args: Vec[i64] = Vec.new()
+                    args.push(val)
+                    wl_build_call(self.builder, dft.unwrap() as i64, dfv.unwrap() as i64, vec_data_i64(&args), 1)
+            i = i - 1
+        self.scope_local_count = watermark
 
-// ── Emit drops / defers ───────────────────────────────────────────
+    mut fn build_fn_type_from_ast(fn_type_node: i32) -> i64:
+        // NodeKind.NK_TYPE_FN: d0=extra_start, d1=param_count, d2=return_type(node)
+        let extra_start = self.pool.get_data0(fn_type_node)
+        let param_count = self.pool.get_data1(fn_type_node)
+        let ret_node = self.pool.get_data2(fn_type_node)
 
-fn Codegen.emit_drops(self: Codegen, watermark: i32):
-    // Drop scoped locals above watermark in reverse order
-    var i = self.scope_local_count - 1
-    while i >= watermark:
-        let sym = self.scope_local_syms.get(i as i64)
-        let alloca = self.scope_local_allocas.get(i as i64)
-        let ty = self.scope_local_types.get(i as i64)
-        // Check for drop function
-        let type_sym = self.find_type_symbol(ty)
-        if type_sym != 0:
-            let dfv = self.drop_fn_values.get(type_sym)
-            let dft = self.drop_fn_types.get(type_sym)
-            if dfv.is_some() and dft.is_some():
-                let val = wl_build_load(self.builder, ty, alloca)
-                let args: Vec[i64] = Vec.new()
-                args.push(val)
-                wl_build_call(self.builder, dft.unwrap() as i64, dfv.unwrap() as i64, vec_data_i64(&args), 1)
-        i = i - 1
-    self.scope_local_count = watermark
+        let ptr_ty = wl_ptr_type(self.context)
+        let param_types: Vec[i64] = Vec.new()
+        param_types.push(ptr_ty)  // context pointer (closure convention)
+        for i in 0..param_count:
+            let p_node = self.pool.get_extra(extra_start + i)
+            param_types.push(self.resolve_type(p_node))
+        let ret_ty = self.resolve_type(ret_node)
+        wl_function_type(ret_ty, vec_data_i64(&param_types), param_count + 1, 0)
 
-fn Codegen.build_fn_type_from_ast(self: Codegen, fn_type_node: i32) -> i64:
-    // NodeKind.NK_TYPE_FN: d0=extra_start, d1=param_count, d2=return_type(node)
-    let extra_start = self.pool.get_data0(fn_type_node)
-    let param_count = self.pool.get_data1(fn_type_node)
-    let ret_node = self.pool.get_data2(fn_type_node)
+    // ── gen_module: multi-pass entry point ────────────────────────────
 
-    let ptr_ty = wl_ptr_type(self.context)
-    let param_types: Vec[i64] = Vec.new()
-    param_types.push(ptr_ty)  // context pointer (closure convention)
-    for i in 0..param_count:
-        let p_node = self.pool.get_extra(extra_start + i)
-        param_types.push(self.resolve_type(p_node))
-    let ret_ty = self.resolve_type(ret_node)
-    wl_function_type(ret_ty, vec_data_i64(&param_types), param_count + 1, 0)
+    mut fn gen_module(pool: AstPool) -> i32:
+        if self.debug_pool_flow_enabled():
+            with_eprint(f"[llvm-cg] gen_module input.decls={pool.decl_count()} input.nodes={pool.node_count()}")
+        self.pool = pool
+        if self.debug_pool_flow_enabled():
+            with_eprint(f"[llvm-cg] gen_module self.decls={self.pool.decl_count()} self.nodes={self.pool.node_count()}")
 
-// ── gen_module: multi-pass entry point ────────────────────────────
+        self.debug_init_module()
 
-fn Codegen.gen_module(self: Codegen, pool: AstPool) -> i32:
-    if self.debug_pool_flow_enabled():
-        with_eprint(f"[llvm-cg] gen_module input.decls={pool.decl_count()} input.nodes={pool.node_count()}")
-    self.pool = pool
-    if self.debug_pool_flow_enabled():
-        with_eprint(f"[llvm-cg] gen_module self.decls={self.pool.decl_count()} self.nodes={self.pool.node_count()}")
+        // Declare built-in string view types before user types.
+        self.declare_builtin_str_type()
+        self.declare_builtin_cstr_type()
+        self.predeclare_generator_state_types()
 
-    self.debug_init_module()
-
-    // Declare built-in string view types before user types.
-    self.declare_builtin_str_type()
-    self.declare_builtin_cstr_type()
-    self.predeclare_generator_state_types()
-
-    // Pass 0a: predeclare all struct/enum names so forward references resolve.
-    for i in 0..self.pool.decl_count():
-        self.sync_decl_context(i)
-        let decl = self.pool.get_decl(i)
-        let kind = self.pool.kind(decl)
-        if kind != NodeKind.NK_TYPE_DECL:
-            continue
-        let name_sym = self.sema.fn_decl_semantic_symbol_at(decl as i32, self.pool.get_data0(decl), i)
-        let name_str = self.intern.resolve(name_sym)
-        if name_sym == 0 or name_str.len() == 0:
-            continue
-        let sub_kind = type_decl_sub_kind(self.pool.get_data2(decl))
-        if sub_kind == TypeDeclKind.Distinct:
-            continue
-        if sub_kind == TypeDeclKind.Struct:
-            if self.type_decl_tp_count(decl) > 0:
-                self.generic_structs.insert(name_sym, decl as i32)
-            else:
-                self.predeclare_struct_type(name_sym)
-            continue
-        if sub_kind == TypeDeclKind.Enum:
-            if self.type_decl_tp_count(decl) > 0:
-                continue
-            self.predeclare_enum_type(name_sym)
-
-        if sub_kind == TypeDeclKind.DiscEnum:
-            self.predeclare_enum_type(name_sym)
-            continue
-        if sub_kind == TypeDeclKind.Opaque:
-            self.predeclare_struct_type(name_sym)
-            continue
-
-    // Pass 0b: define struct/enum bodies and type aliases.
-    for i in 0..self.pool.decl_count():
-        self.sync_decl_context(i)
-        let decl = self.pool.get_decl(i)
-        let kind = self.pool.kind(decl)
-        if kind != NodeKind.NK_TYPE_DECL:
-            continue
-        let name_sym = self.pool.get_data0(decl)
-        let name_str = self.intern.resolve(name_sym)
-        if name_sym == 0 or name_str.len() == 0:
-            continue
-        let sub_kind = type_decl_sub_kind(self.pool.get_data2(decl))
-        if sub_kind == TypeDeclKind.Struct:
-            if self.type_decl_tp_count(decl) == 0:
-                self.declare_struct_type(name_sym, decl)
-            continue
-        if sub_kind == TypeDeclKind.Enum:
-            if self.type_decl_tp_count(decl) > 0:
-                continue
-            self.declare_enum_type(name_sym, decl)
-            continue
-        if sub_kind == TypeDeclKind.DiscEnum:
-            self.declare_disc_enum_type(name_sym, decl)
-            continue
-        if sub_kind == TypeDeclKind.Opaque:
-            // Opaque type: predeclared in pass 0a, no body set (stays opaque)
-            continue
-        if sub_kind == TypeDeclKind.Union:
-            self.declare_union_type(name_sym, decl)
-            continue
-        if sub_kind == TypeDeclKind.Distinct:
-            // Distinct type: transparent — same LLVM type as inner type.
-            // Type safety enforced by sema, not by LLVM types.
-            continue
-        if sub_kind == TypeDeclKind.Alias:
-            let extra_start = self.pool.get_data1(decl)
-            let aliased_node = self.pool.get_extra(extra_start)
-            let resolved = self.resolve_type(aliased_node)
-            self.type_aliases.insert(name_sym, resolved)
-
-    if self.had_error != 0:
-        return 1
-    self.declare_generator_state_types()
-    if self.had_error != 0:
-        return 1
-
-    // Pass 0.5: collect trait declarations
-    for i in 0..self.pool.decl_count():
-        self.sync_decl_context(i)
-        let decl = self.pool.get_decl(i)
-        if self.pool.kind(decl) == NodeKind.NK_TRAIT_DECL:
-            self.collect_trait_info(decl)
-
-    // Pass 1: declare all functions and externs (forward declarations)
-    for i in 0..self.pool.decl_count():
-        self.sync_decl_context(i)
-        let decl = self.pool.get_decl(i)
-        let kind = self.pool.kind(decl)
-        if kind == NodeKind.NK_EXTERN_FN:
-            self.declare_extern_fn(decl)
-            continue
-        if kind == NodeKind.NK_EXTERN_VAR:
-            self.declare_extern_var(decl)
-            continue
-        if kind != NodeKind.NK_FN_DECL:
-            continue
-        let parsed_name_sym = self.pool.get_data0(decl)
-        let name_sym = self.sema.fn_decl_semantic_symbol_at(decl as i32, parsed_name_sym, i)
-        if name_sym == 0:
-            continue
-        let flags = self.pool.get_data2(decl)
-        let meta = self.pool.find_fn_meta(decl)
-        let is_sema_generic = self.sema.generic_fn_node_for_symbol(name_sym) != 0
-        let is_generic_struct_method = self.is_method_on_generic_struct(name_sym) and self.sema.fn_node_is_generic_template(decl as i32, name_sym) != 0
-        // Skip sema-generic functions unless they use the generic-struct
-        // lazy path in declare_function(). Blanket impl methods borrow type
-        // params from impl context, so eager declaration resolves unbound names.
-        if meta >= 0:
-            let tp_count = self.pool.fn_meta_tp_count(meta)
-            if tp_count > 0:
-                self.generic_fns.insert(name_sym, decl as i32)
-                if is_generic_struct_method:
-                    self.generic_struct_methods.insert(name_sym, decl as i32)
-            else if is_sema_generic and not is_generic_struct_method:
-                continue
-            else if (flags / FnFlags.ASYNC) % 2 == 1:
-                self.declare_async_function(decl)
-            else:
-                self.declare_function_at(decl, i)
-    self.declare_generator_next_functions()
-    self.declare_mir_only_functions()
-
-    // Pass 1.3: synthesize missing impl methods from trait defaults.
-    self.generate_default_trait_methods()
-
-    // Pass 1.25: synthesize trait vtables after all method declarations exist.
-    self.generate_trait_vtables()
-
-    // Pass 1.4: process top-level let declarations as module constants.
-    // Function declarations must exist first so global struct initializers can
-    // contain function-pointer fields.
-    for i in 0..self.pool.decl_count():
-        self.sync_decl_context(i)
-        let decl = self.pool.get_decl(i)
-        if self.pool.kind(decl) == NodeKind.NK_LET_DECL:
-            self.gen_module_constant(decl)
-
-    // Pass 1.5: detect drop functions
-    self.detect_drop_functions()
-
-    // Pass 2: generate function bodies
-    for i in 0..self.pool.decl_count():
-        if self.had_error != 0:
-            break
-        self.sync_decl_context(i)
-        let decl = self.pool.get_decl(i)
-        let kind = self.pool.kind(decl)
-        if kind == NodeKind.NK_FN_DECL:
-            if self.current_decl_is_imported_module_symbol():
+        // Pass 0a: predeclare all struct/enum names so forward references resolve.
+        for i in 0..self.pool.decl_count():
+            self.sync_decl_context(i)
+            let decl = self.pool.get_decl(i)
+            let kind = self.pool.kind(decl)
+            if kind != NodeKind.NK_TYPE_DECL:
                 continue
             let name_sym = self.sema.fn_decl_semantic_symbol_at(decl as i32, self.pool.get_data0(decl), i)
+            let name_str = self.intern.resolve(name_sym)
+            if name_sym == 0 or name_str.len() == 0:
+                continue
+            let sub_kind = type_decl_sub_kind(self.pool.get_data2(decl))
+            if sub_kind == TypeDeclKind.Distinct:
+                continue
+            if sub_kind == TypeDeclKind.Struct:
+                if self.type_decl_tp_count(decl) > 0:
+                    self.generic_structs.insert(name_sym, decl as i32)
+                else:
+                    self.predeclare_struct_type(name_sym)
+                continue
+            if sub_kind == TypeDeclKind.Enum:
+                if self.type_decl_tp_count(decl) > 0:
+                    continue
+                self.predeclare_enum_type(name_sym)
+
+            if sub_kind == TypeDeclKind.DiscEnum:
+                self.predeclare_enum_type(name_sym)
+                continue
+            if sub_kind == TypeDeclKind.Opaque:
+                self.predeclare_struct_type(name_sym)
+                continue
+
+        // Pass 0b: define struct/enum bodies and type aliases.
+        for i in 0..self.pool.decl_count():
+            self.sync_decl_context(i)
+            let decl = self.pool.get_decl(i)
+            let kind = self.pool.kind(decl)
+            if kind != NodeKind.NK_TYPE_DECL:
+                continue
+            let name_sym = self.pool.get_data0(decl)
+            let name_str = self.intern.resolve(name_sym)
+            if name_sym == 0 or name_str.len() == 0:
+                continue
+            let sub_kind = type_decl_sub_kind(self.pool.get_data2(decl))
+            if sub_kind == TypeDeclKind.Struct:
+                if self.type_decl_tp_count(decl) == 0:
+                    self.declare_struct_type(name_sym, decl)
+                continue
+            if sub_kind == TypeDeclKind.Enum:
+                if self.type_decl_tp_count(decl) > 0:
+                    continue
+                self.declare_enum_type(name_sym, decl)
+                continue
+            if sub_kind == TypeDeclKind.DiscEnum:
+                self.declare_disc_enum_type(name_sym, decl)
+                continue
+            if sub_kind == TypeDeclKind.Opaque:
+                // Opaque type: predeclared in pass 0a, no body set (stays opaque)
+                continue
+            if sub_kind == TypeDeclKind.Union:
+                self.declare_union_type(name_sym, decl)
+                continue
+            if sub_kind == TypeDeclKind.Distinct:
+                // Distinct type: transparent — same LLVM type as inner type.
+                // Type safety enforced by sema, not by LLVM types.
+                continue
+            if sub_kind == TypeDeclKind.Alias:
+                let extra_start = self.pool.get_data1(decl)
+                let aliased_node = self.pool.get_extra(extra_start)
+                let resolved = self.resolve_type(aliased_node)
+                self.type_aliases.insert(name_sym, resolved)
+
+        if self.had_error != 0:
+            return 1
+        self.declare_generator_state_types()
+        if self.had_error != 0:
+            return 1
+
+        // Pass 0.5: collect trait declarations
+        for i in 0..self.pool.decl_count():
+            self.sync_decl_context(i)
+            let decl = self.pool.get_decl(i)
+            if self.pool.kind(decl) == NodeKind.NK_TRAIT_DECL:
+                self.collect_trait_info(decl)
+
+        // Pass 1: declare all functions and externs (forward declarations)
+        for i in 0..self.pool.decl_count():
+            self.sync_decl_context(i)
+            let decl = self.pool.get_decl(i)
+            let kind = self.pool.kind(decl)
+            if kind == NodeKind.NK_EXTERN_FN:
+                self.declare_extern_fn(decl)
+                continue
+            if kind == NodeKind.NK_EXTERN_VAR:
+                self.declare_extern_var(decl)
+                continue
+            if kind != NodeKind.NK_FN_DECL:
+                continue
+            let parsed_name_sym = self.pool.get_data0(decl)
+            let name_sym = self.sema.fn_decl_semantic_symbol_at(decl as i32, parsed_name_sym, i)
             if name_sym == 0:
                 continue
             let flags = self.pool.get_data2(decl)
             let meta = self.pool.find_fn_meta(decl)
+            let is_sema_generic = self.sema.generic_fn_node_for_symbol(name_sym) != 0
+            let is_generic_struct_method = self.is_method_on_generic_struct(name_sym) and self.sema.fn_node_is_generic_template(decl as i32, name_sym) != 0
+            // Skip sema-generic functions unless they use the generic-struct
+            // lazy path in declare_function(). Blanket impl methods borrow type
+            // params from impl context, so eager declaration resolves unbound names.
             if meta >= 0:
                 let tp_count = self.pool.fn_meta_tp_count(meta)
-                let is_generic_struct_method = self.is_method_on_generic_struct(name_sym) and self.sema.fn_node_is_generic_template(decl as i32, name_sym) != 0
-                if tp_count == 0 and self.sema.generic_fn_node_for_symbol(name_sym) == 0 and not is_generic_struct_method:
-                    self.gen_function_dispatch_at(decl, i)
-    self.gen_mir_only_functions()
-    self.gen_generator_next_functions_from_mir()
+                if tp_count > 0:
+                    self.generic_fns.insert(name_sym, decl as i32)
+                    if is_generic_struct_method:
+                        self.generic_struct_methods.insert(name_sym, decl as i32)
+                else if is_sema_generic and not is_generic_struct_method:
+                    continue
+                else if (flags / FnFlags.ASYNC) % 2 == 1:
+                    self.declare_async_function(decl)
+                else:
+                    self.declare_function_at(decl, i)
+        self.declare_generator_next_functions()
+        self.declare_mir_only_functions()
 
-    if self.had_error != 0:
-        return 1
+        // Pass 1.3: synthesize missing impl methods from trait defaults.
+        self.generate_default_trait_methods()
 
-    self.emit_module_runtime_init_helpers()
-    if self.had_error != 0:
-        return 1
+        // Pass 1.25: synthesize trait vtables after all method declarations exist.
+        self.generate_trait_vtables()
 
-    // Wrap main for exit
-    self.wrap_main_for_exit()
+        // Pass 1.4: process top-level let declarations as module constants.
+        // Function declarations must exist first so global struct initializers can
+        // contain function-pointer fields.
+        for i in 0..self.pool.decl_count():
+            self.sync_decl_context(i)
+            let decl = self.pool.get_decl(i)
+            if self.pool.kind(decl) == NodeKind.NK_LET_DECL:
+                self.gen_module_constant(decl)
 
-    // Finalize debug info before verification
-    self.debug_finalize_module()
+        // Pass 1.5: detect drop functions
+        self.detect_drop_functions()
 
-    // Verify
-    self.verify()
+        // Pass 2: generate function bodies
+        for i in 0..self.pool.decl_count():
+            if self.had_error != 0:
+                break
+            self.sync_decl_context(i)
+            let decl = self.pool.get_decl(i)
+            let kind = self.pool.kind(decl)
+            if kind == NodeKind.NK_FN_DECL:
+                if self.current_decl_is_imported_module_symbol():
+                    continue
+                let name_sym = self.sema.fn_decl_semantic_symbol_at(decl as i32, self.pool.get_data0(decl), i)
+                if name_sym == 0:
+                    continue
+                let flags = self.pool.get_data2(decl)
+                let meta = self.pool.find_fn_meta(decl)
+                if meta >= 0:
+                    let tp_count = self.pool.fn_meta_tp_count(meta)
+                    let is_generic_struct_method = self.is_method_on_generic_struct(name_sym) and self.sema.fn_node_is_generic_template(decl as i32, name_sym) != 0
+                    if tp_count == 0 and self.sema.generic_fn_node_for_symbol(name_sym) == 0 and not is_generic_struct_method:
+                        self.gen_function_dispatch_at(decl, i)
+        self.gen_mir_only_functions()
+        self.gen_generator_next_functions_from_mir()
 
-// ── Wrap main for exit ────────────────────────────────────────────
+        if self.had_error != 0:
+            return 1
 
-fn Codegen.emit_runtime_fiber_config(self: Codegen, wrapper: i64) -> Unit:
-    if not self.uses_async:
-        return
-    let stack_size = self.sema.runtime_fiber_stack_size
-    let pool_size = self.sema.runtime_fiber_pool_size
-    let worker_count = self.sema.runtime_fiber_worker_count
-    if stack_size <= 0 and pool_size <= 0 and worker_count <= 0:
-        return
+        self.emit_module_runtime_init_helpers()
+        if self.had_error != 0:
+            return 1
 
-    let i32_ty = wl_i32_type(self.context)
-    let i64_ty = wl_i64_type(self.context)
-    var config_fn = wl_get_named_function(self.llmod, "with_runtime_configure_fibers")
-    if config_fn == 0:
-        let params: Vec[i64] = Vec.new()
-        params.push(i64_ty)
-        params.push(i32_ty)
-        params.push(i32_ty)
-        let ft = wl_function_type(i32_ty, vec_data_i64(&params), 3, 0)
-        config_fn = wl_add_function(self.llmod, "with_runtime_configure_fibers", ft)
-    let config_ft = wl_global_get_value_type(config_fn)
-    let args: Vec[i64] = Vec.new()
-    args.push(wl_const_int(i64_ty, stack_size, 0))
-    args.push(wl_const_int(i32_ty, pool_size as i64, 0))
-    args.push(wl_const_int(i32_ty, worker_count as i64, 0))
-    let rc = wl_build_call(self.builder, config_ft, config_fn, vec_data_i64(&args), 3)
-    let failed = wl_build_icmp(self.builder, wl_int_ne(), rc, wl_const_int(i32_ty, 0, 0))
-    let panic_bb = wl_append_bb(self.context, wrapper, "runtime.config.panic")
-    let ok_bb = wl_append_bb(self.context, wrapper, "runtime.config.ok")
-    wl_build_cond_br(self.builder, failed, panic_bb, ok_bb)
-    wl_position_at_end(self.builder, panic_bb)
-    let panic_msg = "runtime fiber configuration cannot change after fibers exist"
-    let panic_fn = self.ensure_c_fn("with_panic", wl_void_type(self.context), 3)
-    let panic_ty = self.get_runtime_fn_type("with_panic", wl_void_type(self.context), 3)
-    let panic_args: Vec[i64] = Vec.new()
-    panic_args.push(self.build_str_value(wl_build_global_string_ptr(self.builder, panic_msg), wl_const_int(i64_ty, panic_msg.len(), 0)))
-    panic_args.push(self.build_str_value(wl_build_global_string_ptr(self.builder, ""), wl_const_int(i64_ty, 0, 0)))
-    panic_args.push(wl_const_int(i32_ty, 0, 0))
-    wl_build_call(self.builder, panic_ty, panic_fn, vec_data_i64(&panic_args), 3)
-    wl_build_unreachable(self.builder)
-    wl_position_at_end(self.builder, ok_bb)
+        // Wrap main for exit
+        self.wrap_main_for_exit()
 
-fn Codegen.wrap_main_for_exit(self: Codegen) -> Unit:
-    if self.sema.no_std != 0:
-        return
-    // Create an OS-facing wrapper that preserves argv/runtime setup before
-    // calling the user's `main`.
-    let main_fn = wl_get_named_function(self.llmod, "main")
-    if main_fn == 0: return
-    let main_ft = wl_global_get_value_type(main_fn)
-    let ret_ty = wl_get_return_type(main_ft)
-    // Rename user main to __with_main.
-    wl_set_value_name(main_fn, "__with_main")
+        // Finalize debug info before verification
+        self.debug_finalize_module()
 
-    let i32_ty = wl_i32_type(self.context)
-    let ptr_ty = wl_ptr_type(self.context)
-    let wrapper_params: Vec[i64] = Vec.new()
-    wrapper_params.push(i32_ty)
-    wrapper_params.push(ptr_ty)
-    let wrapper_ft = wl_function_type(i32_ty, vec_data_i64(&wrapper_params), 2, 0)
-    let wrapper = wl_add_function(self.llmod, "main", wrapper_ft)
-    let bb = wl_append_bb(self.context, wrapper, "entry")
-    wl_position_at_end(self.builder, bb)
+        // Verify
+        self.verify()
 
-    let argc_val = wl_get_param(wrapper, 0)
-    let argv_val = wl_get_param(wrapper, 1)
+    // ── Wrap main for exit ────────────────────────────────────────────
 
-    var set_argv_fn = wl_get_named_function(self.llmod, "with_runtime_set_argv")
-    if set_argv_fn == 0:
-        let set_argv_params: Vec[i64] = Vec.new()
-        set_argv_params.push(i32_ty)
-        set_argv_params.push(ptr_ty)
-        let set_argv_ft = wl_function_type(wl_void_type(self.context), vec_data_i64(&set_argv_params), 2, 0)
-        set_argv_fn = wl_add_function(self.llmod, "with_runtime_set_argv", set_argv_ft)
-    let set_argv_ft = wl_global_get_value_type(set_argv_fn)
-    let set_argv_args: Vec[i64] = Vec.new()
-    set_argv_args.push(argc_val)
-    set_argv_args.push(argv_val)
-    wl_build_call(self.builder, set_argv_ft, set_argv_fn, vec_data_i64(&set_argv_args), 2)
+    fn emit_runtime_fiber_config(wrapper: i64) -> Unit:
+        if not self.uses_async:
+            return
+        let stack_size = self.sema.runtime_fiber_stack_size
+        let pool_size = self.sema.runtime_fiber_pool_size
+        let worker_count = self.sema.runtime_fiber_worker_count
+        if stack_size <= 0 and pool_size <= 0 and worker_count <= 0:
+            return
 
-    self.emit_runtime_fiber_config(wrapper)
+        let i32_ty = wl_i32_type(self.context)
+        let i64_ty = wl_i64_type(self.context)
+        var config_fn = wl_get_named_function(self.llmod, "with_runtime_configure_fibers")
+        if config_fn == 0:
+            let params: Vec[i64] = Vec.new()
+            params.push(i64_ty)
+            params.push(i32_ty)
+            params.push(i32_ty)
+            let ft = wl_function_type(i32_ty, vec_data_i64(&params), 3, 0)
+            config_fn = wl_add_function(self.llmod, "with_runtime_configure_fibers", ft)
+        let config_ft = wl_global_get_value_type(config_fn)
+        let args: Vec[i64] = Vec.new()
+        args.push(wl_const_int(i64_ty, stack_size, 0))
+        args.push(wl_const_int(i32_ty, pool_size as i64, 0))
+        args.push(wl_const_int(i32_ty, worker_count as i64, 0))
+        let rc = wl_build_call(self.builder, config_ft, config_fn, vec_data_i64(&args), 3)
+        let failed = wl_build_icmp(self.builder, wl_int_ne(), rc, wl_const_int(i32_ty, 0, 0))
+        let panic_bb = wl_append_bb(self.context, wrapper, "runtime.config.panic")
+        let ok_bb = wl_append_bb(self.context, wrapper, "runtime.config.ok")
+        wl_build_cond_br(self.builder, failed, panic_bb, ok_bb)
+        wl_position_at_end(self.builder, panic_bb)
+        let panic_msg = "runtime fiber configuration cannot change after fibers exist"
+        let panic_fn = self.ensure_c_fn("with_panic", wl_void_type(self.context), 3)
+        let panic_ty = self.get_runtime_fn_type("with_panic", wl_void_type(self.context), 3)
+        let panic_args: Vec[i64] = Vec.new()
+        panic_args.push(self.build_str_value(wl_build_global_string_ptr(self.builder, panic_msg), wl_const_int(i64_ty, panic_msg.len(), 0)))
+        panic_args.push(self.build_str_value(wl_build_global_string_ptr(self.builder, ""), wl_const_int(i64_ty, 0, 0)))
+        panic_args.push(wl_const_int(i32_ty, 0, 0))
+        wl_build_call(self.builder, panic_ty, panic_fn, vec_data_i64(&panic_args), 3)
+        wl_build_unreachable(self.builder)
+        wl_position_at_end(self.builder, ok_bb)
 
-    var runtime_init_fn = wl_get_named_function(self.llmod, "with_runtime_init")
-    if runtime_init_fn == 0:
-        let runtime_init_ft_new = wl_function_type(wl_void_type(self.context), 0, 0, 0)
-        runtime_init_fn = wl_add_function(self.llmod, "with_runtime_init", runtime_init_ft_new)
-    let runtime_init_ft = wl_global_get_value_type(runtime_init_fn)
-    wl_build_call(self.builder, runtime_init_ft, runtime_init_fn, 0, 0)
+    mut fn wrap_main_for_exit() -> Unit:
+        if self.sema.no_std != 0:
+            return
+        // Create an OS-facing wrapper that preserves argv/runtime setup before
+        // calling the user's `main`.
+        let main_fn = wl_get_named_function(self.llmod, "main")
+        if main_fn == 0: return
+        let main_ft = wl_global_get_value_type(main_fn)
+        let ret_ty = wl_get_return_type(main_ft)
+        // Rename user main to __with_main.
+        wl_set_value_name(main_fn, "__with_main")
 
-    for i in 0..self.module_runtime_init_fns.len() as i32:
-        let init_fn = self.module_runtime_init_fns.get(i as i64)
-        let init_ty = self.module_runtime_init_types.get(i as i64)
-        let init_global = self.module_runtime_init_globals.get(i as i64)
-        if init_fn == 0 or init_ty == 0 or init_global == 0:
-            continue
-        let init_ft = wl_global_get_value_type(init_fn)
-        let init_value = wl_build_call(self.builder, init_ft, init_fn, 0, 0)
-        wl_build_store(self.builder, init_value, init_global)
+        let i32_ty = wl_i32_type(self.context)
+        let ptr_ty = wl_ptr_type(self.context)
+        let wrapper_params: Vec[i64] = Vec.new()
+        wrapper_params.push(i32_ty)
+        wrapper_params.push(ptr_ty)
+        let wrapper_ft = wl_function_type(i32_ty, vec_data_i64(&wrapper_params), 2, 0)
+        let wrapper = wl_add_function(self.llmod, "main", wrapper_ft)
+        let bb = wl_append_bb(self.context, wrapper, "entry")
+        wl_position_at_end(self.builder, bb)
 
-    let main_param_count = wl_count_param_types(main_ft)
-    var main_call: i64 = 0
-    if main_param_count == 0:
-        main_call = wl_build_call(self.builder, main_ft, main_fn, 0, 0)
-    else if main_param_count == 2:
-        let main_args: Vec[i64] = Vec.new()
-        main_args.push(self.coerce_value_to_type(argc_val, wl_get_fn_param_type(main_ft, 0)))
-        main_args.push(self.coerce_value_to_type(argv_val, wl_get_fn_param_type(main_ft, 1)))
-        main_call = wl_build_call(self.builder, main_ft, main_fn, vec_data_i64(&main_args), 2)
-    else:
-        with_eprint("error: main must take either zero parameters or argc/argv")
-        self.had_error = 1
-        return
+        let argc_val = wl_get_param(wrapper, 0)
+        let argv_val = wl_get_param(wrapper, 1)
 
-    // Drain pending fibers after main returns
-    var runtime_run_fn = wl_get_named_function(self.llmod, "with_runtime_run")
-    if runtime_run_fn == 0:
-        let runtime_run_ft_new = wl_function_type(wl_void_type(self.context), 0, 0, 0)
-        runtime_run_fn = wl_add_function(self.llmod, "with_runtime_run", runtime_run_ft_new)
-    let runtime_run_ft = wl_global_get_value_type(runtime_run_fn)
-    wl_build_call(self.builder, runtime_run_ft, runtime_run_fn, 0, 0)
+        var set_argv_fn = wl_get_named_function(self.llmod, "with_runtime_set_argv")
+        if set_argv_fn == 0:
+            let set_argv_params: Vec[i64] = Vec.new()
+            set_argv_params.push(i32_ty)
+            set_argv_params.push(ptr_ty)
+            let set_argv_ft = wl_function_type(wl_void_type(self.context), vec_data_i64(&set_argv_params), 2, 0)
+            set_argv_fn = wl_add_function(self.llmod, "with_runtime_set_argv", set_argv_ft)
+        let set_argv_ft = wl_global_get_value_type(set_argv_fn)
+        let set_argv_args: Vec[i64] = Vec.new()
+        set_argv_args.push(argc_val)
+        set_argv_args.push(argv_val)
+        wl_build_call(self.builder, set_argv_ft, set_argv_fn, vec_data_i64(&set_argv_args), 2)
 
-    var runtime_shutdown_fn = wl_get_named_function(self.llmod, "with_runtime_shutdown")
-    if runtime_shutdown_fn == 0:
-        let runtime_shutdown_ft_new = wl_function_type(wl_void_type(self.context), 0, 0, 0)
-        runtime_shutdown_fn = wl_add_function(self.llmod, "with_runtime_shutdown", runtime_shutdown_ft_new)
-    let runtime_shutdown_ft = wl_global_get_value_type(runtime_shutdown_fn)
-    wl_build_call(self.builder, runtime_shutdown_ft, runtime_shutdown_fn, 0, 0)
+        self.emit_runtime_fiber_config(wrapper)
 
-    // For void or async main, return 0.
-    // Async main's spawn wrapper returns fiber_id (i32), not a meaningful exit code.
-    let main_sym = self.intern.intern("main")
-    let main_is_async = self.sema.task_fns.contains(main_sym)
-    if ret_ty == wl_void_type(self.context) or wl_get_type_kind(ret_ty) == wl_struct_type_kind() or main_is_async:
-        let _ = wl_build_ret(self.builder, wl_const_int(i32_ty, 0, 0))
-        return
+        var runtime_init_fn = wl_get_named_function(self.llmod, "with_runtime_init")
+        if runtime_init_fn == 0:
+            let runtime_init_ft_new = wl_function_type(wl_void_type(self.context), 0, 0, 0)
+            runtime_init_fn = wl_add_function(self.llmod, "with_runtime_init", runtime_init_ft_new)
+        let runtime_init_ft = wl_global_get_value_type(runtime_init_fn)
+        wl_build_call(self.builder, runtime_init_ft, runtime_init_fn, 0, 0)
 
-    let exit_val =
-        if ret_ty == i32_ty:
-            main_call
+        for i in 0..self.module_runtime_init_fns.len() as i32:
+            let init_fn = self.module_runtime_init_fns.get(i as i64)
+            let init_ty = self.module_runtime_init_types.get(i as i64)
+            let init_global = self.module_runtime_init_globals.get(i as i64)
+            if init_fn == 0 or init_ty == 0 or init_global == 0:
+                continue
+            let init_ft = wl_global_get_value_type(init_fn)
+            let init_value = wl_build_call(self.builder, init_ft, init_fn, 0, 0)
+            wl_build_store(self.builder, init_value, init_global)
+
+        let main_param_count = wl_count_param_types(main_ft)
+        var main_call: i64 = 0
+        if main_param_count == 0:
+            main_call = wl_build_call(self.builder, main_ft, main_fn, 0, 0)
+        else if main_param_count == 2:
+            let main_args: Vec[i64] = Vec.new()
+            main_args.push(self.coerce_value_to_type(argc_val, wl_get_fn_param_type(main_ft, 0)))
+            main_args.push(self.coerce_value_to_type(argv_val, wl_get_fn_param_type(main_ft, 1)))
+            main_call = wl_build_call(self.builder, main_ft, main_fn, vec_data_i64(&main_args), 2)
         else:
-            self.coerce_int(main_call, i32_ty)
-    let _ = wl_build_ret(self.builder, exit_val)
+            with_eprint("error: main must take either zero parameters or argc/argv")
+            self.had_error = 1
+            return
+
+        // Drain pending fibers after main returns
+        var runtime_run_fn = wl_get_named_function(self.llmod, "with_runtime_run")
+        if runtime_run_fn == 0:
+            let runtime_run_ft_new = wl_function_type(wl_void_type(self.context), 0, 0, 0)
+            runtime_run_fn = wl_add_function(self.llmod, "with_runtime_run", runtime_run_ft_new)
+        let runtime_run_ft = wl_global_get_value_type(runtime_run_fn)
+        wl_build_call(self.builder, runtime_run_ft, runtime_run_fn, 0, 0)
+
+        var runtime_shutdown_fn = wl_get_named_function(self.llmod, "with_runtime_shutdown")
+        if runtime_shutdown_fn == 0:
+            let runtime_shutdown_ft_new = wl_function_type(wl_void_type(self.context), 0, 0, 0)
+            runtime_shutdown_fn = wl_add_function(self.llmod, "with_runtime_shutdown", runtime_shutdown_ft_new)
+        let runtime_shutdown_ft = wl_global_get_value_type(runtime_shutdown_fn)
+        wl_build_call(self.builder, runtime_shutdown_ft, runtime_shutdown_fn, 0, 0)
+
+        // For void or async main, return 0.
+        // Async main's spawn wrapper returns fiber_id (i32), not a meaningful exit code.
+        let main_sym = self.intern.intern("main")
+        let main_is_async = self.sema.task_fns.contains(main_sym)
+        if ret_ty == wl_void_type(self.context) or wl_get_type_kind(ret_ty) == wl_struct_type_kind() or main_is_async:
+            let _ = wl_build_ret(self.builder, wl_const_int(i32_ty, 0, 0))
+            return
+
+        let exit_val =
+            if ret_ty == i32_ty:
+                main_call
+            else:
+                self.coerce_int(main_call, i32_ty)
+        let _ = wl_build_ret(self.builder, exit_val)

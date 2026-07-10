@@ -240,12 +240,28 @@ fn render_decl(pool: AstPool, intern: InternPool, node: NodeId, indent: i32) -> 
         var out = prefix
         if vis == Visibility.Public:
             out = out ++ "pub "
-        out = out ++ "trait " ++ name ++ ":\n"
+        out = out ++ "trait " ++ name
 
-        // Layout:
-        // [assoc_count, (name, bound_count, bounds..., default_type)*, method_count, (name, flags, param_start, param_count, ret_type, default_body)*]
-        let assoc_count = pool.get_extra(extra_start)
-        var ep = extra_start + 1
+        let tp_count = pool.get_extra(extra_start)
+        let tp_start = pool.get_extra(extra_start + 1)
+        if tp_count > 0:
+            out = out ++ "["
+            var tp_pos = tp_start
+            for ti in 0..tp_count:
+                if ti > 0: out = out ++ ", "
+                out = out ++ intern.resolve(pool.get_extra(tp_pos))
+                let bound_count = pool.get_extra(tp_pos + 1)
+                if bound_count > 0:
+                    out = out ++ ": "
+                    for bi in 0..bound_count:
+                        if bi > 0: out = out ++ " + "
+                        out = out ++ intern.resolve(pool.get_extra(tp_pos + 2 + bi))
+                tp_pos = tp_pos + 2 + bound_count
+            out = out ++ "]"
+        out = out ++ ":\n"
+
+        let assoc_count = pool.trait_assoc_count(node)
+        var ep = pool.trait_assoc_start(node)
         for ai in 0..assoc_count:
             out = out ++ make_indent(indent + 4)
             out = out ++ "type " ++ intern.resolve(pool.get_extra(ep))
@@ -265,20 +281,13 @@ fn render_decl(pool: AstPool, intern: InternPool, node: NodeId, indent: i32) -> 
                 out = out ++ " = " ++ render_type_expr(pool, intern, (default_ty) as NodeId)
             out = out ++ "\n"
 
-        let method_count = pool.get_extra(ep)
-        ep = ep + 1
+        let method_count = pool.trait_method_count(node)
         for mi in 0..method_count:
-            let mname = intern.resolve(pool.get_extra(ep))
-            ep = ep + 1
-            ep = ep + 1  // flags (currently not rendered)
-            let param_start = pool.get_extra(ep)
-            ep = ep + 1
-            let param_count = pool.get_extra(ep)
-            ep = ep + 1
-            let ret_ty = pool.get_extra(ep)
-            ep = ep + 1
-            let default_body = pool.get_extra(ep)
-            ep = ep + 1
+            let mname = intern.resolve(pool.trait_method_field(node, mi, TRAIT_METHOD_NAME))
+            let param_start = pool.trait_method_field(node, mi, TRAIT_METHOD_PARAM_START)
+            let param_count = pool.trait_method_field(node, mi, TRAIT_METHOD_PARAM_COUNT)
+            let ret_ty = pool.trait_method_field(node, mi, TRAIT_METHOD_RETURN_TYPE)
+            let default_body = pool.trait_method_field(node, mi, TRAIT_METHOD_DEFAULT_BODY)
 
             out = out ++ make_indent(indent + 4)
             out = out ++ "fn " ++ mname ++ "("

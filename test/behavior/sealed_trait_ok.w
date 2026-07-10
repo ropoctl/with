@@ -7,7 +7,7 @@ trait Shape:    fn area(self:
 type Circle { radius: i32 }
 
 impl Shape for Circle:    fn area(self:
-    Circle) -> i32:
+    &Self) -> i32:
         self.radius * self.radius * 3
 
 fn main:

@@ -102,8 +102,8 @@ unsafe fn aesgcm_aad(ctx: *mut AesGcm, data: *const u8, len: i32):
     for i in 0..16:
         ctx.ghash_state[i] = gs[i]
 
-unsafe fn AesGcm.aad(self: *mut AesGcm, data: *const u8, len: i32):
-    unsafe { aesgcm_aad(self, data, len) }
+unsafe fn AesGcm.aad(ctx: *mut AesGcm, data: *const u8, len: i32):
+    unsafe { aesgcm_aad(ctx, data, len) }
 
 unsafe fn aesgcm_encrypt(ctx: *mut AesGcm, pt: *const u8, ct: *mut u8, len: i32):
     ctx.ct_len = ctx.ct_len + len as u64
@@ -141,8 +141,8 @@ unsafe fn aesgcm_encrypt(ctx: *mut AesGcm, pt: *const u8, ct: *mut u8, len: i32)
         ctx.counter[i] = ctr[i]
         ctx.ghash_state[i] = gs[i]
 
-unsafe fn AesGcm.encrypt(self: *mut AesGcm, pt: *const u8, ct: *mut u8, len: i32):
-    unsafe { aesgcm_encrypt(self, pt, ct, len) }
+unsafe fn AesGcm.encrypt(ctx: *mut AesGcm, pt: *const u8, ct: *mut u8, len: i32):
+    unsafe { aesgcm_encrypt(ctx, pt, ct, len) }
 
 // Decrypt: XOR with keystream (same as encrypt) but GHASH the INPUT (ciphertext)
 unsafe fn aesgcm_decrypt(ctx: *mut AesGcm, ct_in: *const u8, pt_out: *mut u8, len: i32):
@@ -186,8 +186,8 @@ unsafe fn aesgcm_decrypt(ctx: *mut AesGcm, ct_in: *const u8, pt_out: *mut u8, le
         ctx.counter[i] = ctr[i]
         ctx.ghash_state[i] = gs[i]
 
-unsafe fn AesGcm.decrypt(self: *mut AesGcm, ct_in: *const u8, pt_out: *mut u8, len: i32):
-    unsafe { aesgcm_decrypt(self, ct_in, pt_out, len) }
+unsafe fn AesGcm.decrypt(ctx: *mut AesGcm, ct_in: *const u8, pt_out: *mut u8, len: i32):
+    unsafe { aesgcm_decrypt(ctx, ct_in, pt_out, len) }
 
 unsafe fn aesgcm_tag(ctx: *mut AesGcm, out: *mut u8):
     var gs: [u8; 16] = [0 as u8; 16]
@@ -216,5 +216,5 @@ unsafe fn aesgcm_tag(ctx: *mut AesGcm, out: *mut u8):
     for i in 0..16:
         *(out + i as u64) = gs[i] ^ j0_enc[i]
 
-unsafe fn AesGcm.tag(self: *mut AesGcm, out: *mut u8):
-    unsafe { aesgcm_tag(self, out) }
+unsafe fn AesGcm.tag(ctx: *mut AesGcm, out: *mut u8):
+    unsafe { aesgcm_tag(ctx, out) }

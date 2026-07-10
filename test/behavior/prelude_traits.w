@@ -7,12 +7,12 @@
 
 type Point { x: i32, y: i32 }
 
-impl Eq for Point:    fn eq(self: Point, other:
+impl Eq for Point:    fn eq(self: &Self, other:
     Point) -> bool:
         self.x == other.x and self.y == other.y
 
 impl Debug for Point:    fn debug_str(self:
-    Point) -> str:
+    &Self) -> str:
         "Point"
 
 fn main:

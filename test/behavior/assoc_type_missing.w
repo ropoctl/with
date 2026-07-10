@@ -8,5 +8,5 @@ type Empty { x: i32 }
 
 // Missing 'type Item = ...' — should error
 impl Container for Empty:    fn size(self:
-    Empty) -> i32:
+    &Self) -> i32:
         0

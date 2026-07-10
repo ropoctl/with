@@ -28,8 +28,8 @@ pub type Counter {
 pub fn Counter.new() -> Self:
     Self { value: 0 }
 
-pub fn Counter.bump(self: Counter, delta: i32) -> Self:
+pub fn Counter.bump(self: &Self, delta: i32) -> Self:
     Self { value: self.value + delta }
 
-pub fn Counter.get(self: Counter) -> i32:
+pub fn Counter.get(self: &Self) -> i32:
     self.value

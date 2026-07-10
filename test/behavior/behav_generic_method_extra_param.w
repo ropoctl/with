@@ -1,8 +1,8 @@
 //! expect-stdout: ok
 type Cell[T] { value: T }
 
-fn Cell.get(self: Cell[T]) -> T: self.value
-fn Cell.map_add(self: Cell[T], delta: T) -> T: self.value + delta
+fn Cell.get(self: &Self) -> T: self.value
+fn Cell.map_add(self: &Self, delta: T) -> T: self.value + delta
 
 fn main:
     let c1 = Cell{ value: 42 }

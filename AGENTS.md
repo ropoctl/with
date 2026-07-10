@@ -725,6 +725,75 @@ fixpoint bugs:
 ./out/stage/bin/with-stage2 check repro.w --validate-ownership
 with build :fixpoint-diff
 ```
+
+### Integrated compiler analysis (`with analyze`)
+
+Use this **before** standalone source scanners, debug prints, or a rebuild when a
+problem crosses AST/Sema/MIR/ABI/codegen. It runs one compilation and joins facts
+from the compiler's live `Sema`, `MirBody`, diagnostics, and real LLVM codegen
+branches. It also audits its own marshalling coverage, so an uninstrumented
+ordinary call path is a failure rather than a blind spot.
+
+```sh
+./out/stage/bin/with-stage2 analyze repro.w audit:all
+./out/stage/bin/with-stage2 analyze repro.w audit:storage
+./out/stage/bin/with-stage2 analyze repro.w summary
+./out/stage/bin/with-stage2 analyze repro.w 'matrix:name~function_name'
+./out/stage/bin/with-stage2 analyze repro.w 'select:stage=sema,kind=parameter,name~function_name'
+./out/stage/bin/with-stage2 analyze repro.w 'explain:call:function_name'
+./out/stage/bin/with-stage2 analyze repro.w 'path:call:caller:callee'
+./out/stage/bin/with-stage2 analyze repro.w 'closure:call:root_function'
+./out/stage/bin/with-stage2 analyze repro.w 'lldb:kind=call,name~function_name'
+```
+
+Requests:
+
+- `facts` / `snapshot`: stable TSV facts suitable for checked-in fixtures or a
+  normal text diff. Facts cover all AST function declarations (including generic
+  and uninstantiated methods), finalized signatures/effects/receiver modes,
+  specializations, MIR bodies/locals/places/calls, diagnostic provenance, LLVM
+  parameter shapes, caller marshalling, and callee binding. Source-bearing facts
+  include compiler source-file identity, exact byte `start`/`end`, and resolved
+  declaration owner. MIR call-argument facts join lowered operands back to Sema's
+  canonical AST argument nodes, including the implicit method receiver offset.
+- `select:<query>`, `summary[:<query>]`, `matrix:<query>`: query the same fact
+  database. Queries are comma-separated `field=value`, `field!=value`, or
+  `field~substring` predicates; run `with analyze file.w help` for fields.
+- `audit:calls|effects|storage|methods|mir|returns|receivers|phase|codegen|all`: hard invariants. `all`
+  includes typed/ownership MIR validators, receiver declarations/contracts,
+  fixed-point effects, freeze/eager-cache/specialization checks, frozen-phase
+  mutable-Sema re-entry, LLVM declaration ABI, caller marshalling, callee aliasing,
+  instrumentation coverage, and AST-indexed storage bounds/key-capacity checks.
+  `audit:storage` permanently checks the resolved-call table/key class that once
+  overflowed when AST node IDs crossed 32767/65535.
+- `path:call` / `closure:call`: operate on the live MIR call graph; use these in
+  place of source-text call-graph reconstruction whenever the program compiles.
+- `lldb:<query>`: emits breakpoints from actual matching facts and refuses to
+  invent one when nothing matches.
+
+The analysis command is also a reducer predicate:
+
+```sh
+./out/stage/bin/with-stage2 reduce repro.w --exit-code nonzero -- \
+  ./out/stage/bin/with-stage2 analyze {file} audit:all
+```
+
+Do not start a full build to test an ABI/ownership hypothesis. First require the
+focused repro's `audit:all` to pass and inspect its cross-layer `matrix`. A build
+is the final verification that the already-proven invariant holds repository-wide.
+There are no source-scanner semantic fallbacks. If analysis cannot reach the
+needed phase, reduce the repro or attach LLDB to the compiler branch that stopped
+it. Source rewrite tools may use the Lexer to apply byte edits, but selection and
+contracts must come from `compiler_analyze_file` facts:
+
+- `tools/annotate_receivers.w`: finalized Sema receiver requirements.
+- `tools/migrate_receivers.w`: Sema declaration scope/mode plus lexical splices.
+- `tools/relocate_methods.w`: Sema top-level method/owner/mode plus reindentation.
+- `tools/migrate_method_arg_moves.w`: structured compiler diagnostics and spans.
+
+The removed receiver/frozen/closure/diagnostic-map tools must not be recreated.
+Use `select`, `matrix`, `path`, `closure`, `explain:node`, and the audits instead.
+
 See `docs/deep-debugging-tools.md`.
 
 ### LLDB (preferred)

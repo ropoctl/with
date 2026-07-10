@@ -11,13 +11,13 @@ fn Point.new(x: i32, y: i32) -> Point:
 fn Point.origin() -> Point:
     Point { x: 0, y: 0 }
 
-fn Point.sum(self: Point) -> i32:
+fn Point.sum(self: &Self) -> i32:
     self.x + self.y
 
-fn Point.translate(self: Point, dx: i32, dy: i32) -> Point:
+fn Point.translate(self: &Self, dx: i32, dy: i32) -> Point:
     Point { x: self.x + dx, y: self.y + dy }
 
-fn Point.scale(self: Point, factor: i32) -> Point:
+fn Point.scale(self: &Self, factor: i32) -> Point:
     Point { x: self.x * factor, y: self.y * factor }
 
 fn test_static_constructor:
@@ -50,7 +50,7 @@ type Counter { value: i32 }
 fn Counter.new() -> Counter:
     Counter { value: 0 }
 
-fn Counter.get(self: Counter) -> i32:
+fn Counter.get(self: &Self) -> i32:
     self.value
 
 fn test_counter_methods:
@@ -59,13 +59,13 @@ fn test_counter_methods:
 
 type Rect { w: i32, h: i32 }
 
-fn Rect.area(self: Rect) -> i32:
+fn Rect.area(self: &Self) -> i32:
     self.w * self.h
 
-fn Rect.perimeter(self: Rect) -> i32:
+fn Rect.perimeter(self: &Self) -> i32:
     2 * (self.w + self.h)
 
-fn Rect.is_square(self: Rect) -> bool:
+fn Rect.is_square(self: &Self) -> bool:
     self.w == self.h
 
 fn test_rect_methods:

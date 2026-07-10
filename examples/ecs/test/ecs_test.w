@@ -11,12 +11,12 @@ extend Vec2:
 
     fn zero -> Vec2: Vec2 { x: 0.0, y: 0.0 }
 
-    fn add(self: Vec2, other: Vec2) -> Vec2:
+    fn add(self: &Self, other: Vec2) -> Vec2:
         Vec2 { x: self.x + other.x, y: self.y + other.y }
 
-    fn scale(self: Vec2, s: f64) -> Vec2: Vec2 { x: self.x * s, y: self.y * s }
+    fn scale(self: &Self, s: f64) -> Vec2: Vec2 { x: self.x * s, y: self.y * s }
 
-    fn length_sq(self: Vec2) -> f64: self.x * self.x + self.y * self.y
+    fn length_sq(self: &Self) -> f64: self.x * self.x + self.y * self.y
 
 type Transform {
     x: f64,

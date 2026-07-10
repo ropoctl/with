@@ -274,18 +274,19 @@ fn link_stage_restore_env(saved: LinkStageSavedEnv):
     for i in 0..saved.names.len() as i32:
         let _ = runtime_setenv(saved.names.get(i as i64), saved.values.get(i as i64))
 
-fn LinkStageCommand.run(self: LinkStageCommand) -> i32:
-    var argv = ""
-    argv = link_stage_argv_append(argv, self.linker)
-    for i in 0..self.args.len() as i32:
-        argv = link_stage_argv_append(argv, self.args.get(i as i64))
-    let saved = link_stage_apply_env(self.env)
-    let rc = if self.cwd.len() > 0:
-        runtime_exec_argv_cwd(argv, self.cwd)
-    else:
-        runtime_exec_argv(argv)
-    link_stage_restore_env(saved)
-    rc
+impl LinkStageCommand:
+    fn run() -> i32:
+        var argv = ""
+        argv = link_stage_argv_append(argv, self.linker)
+        for i in 0..self.args.len() as i32:
+            argv = link_stage_argv_append(argv, self.args.get(i as i64))
+        let saved = link_stage_apply_env(self.env)
+        let rc = if self.cwd.len() > 0:
+            runtime_exec_argv_cwd(argv, self.cwd)
+        else:
+            runtime_exec_argv(argv)
+        link_stage_restore_env(saved)
+        rc
 
 fn link_stage_make_link_command(linker: str, obj_path: str, bin_path: str, extras: Vec[str], link_libs: Vec[str], link_args: Vec[str]) -> LinkStageCommand:
     let args: Vec[str] = Vec.new()

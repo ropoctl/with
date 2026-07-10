@@ -3,7 +3,7 @@
 type Mat2 { a: i32, b: i32, c: i32, d: i32 }
 
 impl Mat2:
-    fn matmul(self: Mat2, rhs: Mat2) -> Mat2:
+    fn matmul(self: &Self, rhs: Mat2) -> Mat2:
         Mat2 {
             a: self.a * rhs.a + self.b * rhs.c,
             b: self.a * rhs.b + self.b * rhs.d,

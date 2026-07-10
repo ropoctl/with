@@ -9,11 +9,11 @@ type Wrapper { value: i32 }
 type Tag { label: str }
 
 impl Showable for Wrapper:    fn show(self:
-    Wrapper) -> str:
+    &Self) -> str:
         "wrapper"
 
 impl Showable for Tag:    fn show(self:
-    Tag) -> str:
+    &Self) -> str:
         self.label
 
 fn display[T](x: T) -> str where T: Showable:

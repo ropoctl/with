@@ -58,11 +58,11 @@ extend Database:
             return Err(.OpenFailed(code: rc))
         Ok(Database { handle })
 
-    fn close(self: Database):
+    fn close(self: &Self):
         if self.handle != null:
             sqlite3_close(self.handle)
 
-    fn execute(self: Database, sql: str) -> Result[i32, SqliteError]:
+    fn execute(self: &Self, sql: str) -> Result[i32, SqliteError]:
         var err_msg: *mut i8 = null
         let rc = sqlite3_exec(self.handle, sql.c_str(), null, null, &mut err_msg)
         if rc != SQLITE_OK:
@@ -71,7 +71,7 @@ extend Database:
             return Err(.ExecFailed(code: rc))
         Ok(sqlite3_changes(self.handle))
 
-    fn prepare(self: Database, sql: str) -> Result[Statement, SqliteError]:
+    fn prepare(self: &Self, sql: str) -> Result[Statement, SqliteError]:
         var stmt: *mut i8 = null
         var tail: *const i8 = null
         let rc = sqlite3_prepare_v2(self.handle, sql.c_str(), -1, &mut stmt, &mut tail)
@@ -86,23 +86,23 @@ type Statement {
 }
 
 extend Statement:
-    fn finalize(self: Statement):
+    fn finalize(self: &Self):
         if self.handle != null:
             sqlite3_finalize(self.handle)
 
-    fn bind_int(self: Statement, param: i32, value: i32) -> Result[i32, SqliteError]:
+    fn bind_int(self: &Self, param: i32, value: i32) -> Result[i32, SqliteError]:
         let rc = sqlite3_bind_int(self.handle, param, value)
         if rc != SQLITE_OK:
             return Err(.BindFailed(param, code: rc))
         Ok(0)
 
-    fn bind_text(self: Statement, param: i32, value: str) -> Result[i32, SqliteError]:
+    fn bind_text(self: &Self, param: i32, value: str) -> Result[i32, SqliteError]:
         let rc = sqlite3_bind_text(self.handle, param, value.c_str(), -1, null)
         if rc != SQLITE_OK:
             return Err(.BindFailed(param, code: rc))
         Ok(0)
 
-    fn step(self: Statement) -> Result[bool, SqliteError]:
+    fn step(self: &Self) -> Result[bool, SqliteError]:
         let rc = sqlite3_step(self.handle)
         if rc == SQLITE_ROW:
             Ok(true)
@@ -111,16 +111,16 @@ extend Statement:
         else:
             Err(.StepFailed(code: rc))
 
-    fn reset_stmt(self: Statement) -> Result[i32, SqliteError]:
+    fn reset_stmt(self: &Self) -> Result[i32, SqliteError]:
         let rc = sqlite3_reset(self.handle)
         if rc != SQLITE_OK:
             return Err(.StepFailed(code: rc))
         Ok(0)
 
-    fn column_int(self: Statement, col: i32) -> i32:
+    fn column_int(self: &Self, col: i32) -> i32:
         sqlite3_column_int(self.handle, col)
 
-    fn column_text(self: Statement, col: i32) -> str:
+    fn column_text(self: &Self, col: i32) -> str:
         let ptr = sqlite3_column_text(self.handle, col)
         if ptr == null:
             ""

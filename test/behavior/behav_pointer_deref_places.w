@@ -34,10 +34,10 @@ unsafe fn read_field(ptr: *const Pair) -> i32:
 unsafe fn read_offset(ptr: *const Pair, idx: i64) -> i32:
     (*(ptr + idx as u64)).y
 
-unsafe fn PairView.read_x(self: PairView) -> i32:
+unsafe fn PairView.read_x(self: &Self) -> i32:
     (*(self.tokens + self.index as u64)).x
 
-unsafe fn ForwardView.read_kind(self: ForwardView) -> i32:
+unsafe fn ForwardView.read_kind(self: &Self) -> i32:
     (*(self.tokens + self.index as u64)).kind
 
 unsafe fn get_element_field(arr: *const Pair, idx: i64) -> i32:

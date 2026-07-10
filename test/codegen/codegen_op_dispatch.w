@@ -2,13 +2,13 @@
 
 type Vec2 { x: i32, y: i32 }
 
-fn Vec2.add(self: Vec2, other: Vec2) -> Vec2:
+fn Vec2.add(self: &Self, other: Vec2) -> Vec2:
     Vec2 { x: self.x + other.x, y: self.y + other.y }
 
-fn Vec2.sub(self: Vec2, other: Vec2) -> Vec2:
+fn Vec2.sub(self: &Self, other: Vec2) -> Vec2:
     Vec2 { x: self.x - other.x, y: self.y - other.y }
 
-fn Vec2.eq(self: Vec2, other: Vec2) -> bool:
+fn Vec2.eq(self: &Self, other: Vec2) -> bool:
     self.x == other.x and self.y == other.y
 
 fn main:

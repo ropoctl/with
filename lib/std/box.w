@@ -14,17 +14,18 @@ pub fn Box.new[T](value: T) -> Box[T]:
     with_memcpy(ptr as *i8, (&raw const value as *const T) as *i8, sizeof[T]() as i64)
     ptr as Box[T]
 
-pub fn Box.as_ref[T](self: &Self) -> &T:
-    unsafe { *(self as *const *const T) as &T }
+impl[T] Box[T]:
+    pub fn as_ref() -> &T:
+        unsafe { *(self as *const *const T) as &T }
 
-pub fn Box.as_ptr[T](self: &Self) -> *const T:
-    unsafe { *(self as *const *const T) }
+    pub fn as_ptr() -> *const T:
+        unsafe { *(self as *const *const T) }
 
-pub fn Box.into_inner[T](move self: Self) -> T:
-    let ptr = self as *mut T
-    let value = unsafe { *ptr }
-    with_free(ptr as *i8)
-    value
+    pub move fn into_inner() -> T:
+        let ptr = self as *mut T
+        let value = unsafe { *ptr }
+        with_free(ptr as *i8)
+        value
 
 impl[T] Deref[T] for Box[T]:
     fn deref(self: &Self) -> &T:

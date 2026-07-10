@@ -6,6 +6,58 @@ These tools exist to stop edit/compile/trace loops. Use them to reduce the
 input, inspect the exact MIR place or origin, classify allocator behavior, or
 localize fixpoint nondeterminism before changing code.
 
+## Integrated Compiler Analysis
+
+`with analyze` is the primary cross-layer debugging surface. Unlike a standalone
+scanner, it reads the compiler's live AST declarations, finalized Sema signatures
+and effects, concrete specializations, `MirBody` tables, diagnostic provenance,
+and the actual LLVM marshalling/prologue branches used for production codegen.
+
+```sh
+./out/stage/bin/with-stage2 analyze repro.w audit:all
+./out/stage/bin/with-stage2 analyze repro.w audit:storage
+./out/stage/bin/with-stage2 analyze repro.w 'matrix:name~target_fn'
+./out/stage/bin/with-stage2 analyze repro.w 'path:call:main:target_fn'
+./out/stage/bin/with-stage2 analyze repro.w 'closure:call:main'
+./out/stage/bin/with-stage2 analyze repro.w 'lldb:kind=call,name~target_fn'
+```
+
+`audit:all` is the proof gate before an expensive build. It validates MIR shape,
+types, and ownership; receiver declaration coverage and finalized contracts;
+effect-flow fixed point; frozen caches and specialization bodies; frozen-phase
+mutable-Sema calls; LLVM declaration pass modes; caller argument marshalling;
+callee place aliasing; and the analyzer's own coverage of reachable ordinary
+calls. It also runs `audit:storage`, which checks AST-indexed table bounds,
+parallel start/count storage, canonical argument-node validity, and non-colliding
+64-bit keys across the former 16-bit AST-node boundary. The command exits nonzero
+on any violation.
+
+Use `matrix:<query>` for root cause. A call matrix places AST/Sema/ABI/MIR and
+Codegen facts in one stable table, making the first diverging layer visible. Use
+`facts` or `snapshot` for the complete stable TSV schema, `summary` for counts,
+and `select:<query>` for narrow machine-readable slices. Query operators are
+`=`, `!=`, and `~` (substring), joined by commas.
+
+Source-bearing facts include the source-file ID, byte `start`/`end`, line/column,
+path, and declaration owner. MIR `call-argument` facts join the lowered operand,
+type, effects, and ownership kind back to Sema's canonical AST argument node; for
+methods the analyzer accounts for the implicit receiver argument. AST node IDs are
+snapshot-local: rerun the query after any source change before using
+`explain:node:<id>`.
+
+The live MIR graph backs `path:call:<from>:<to>` and
+`closure:call:<root>`. Prefer these over parsing source text. There are no legacy
+semantic scanner fallbacks. If compilation stops before the needed snapshot, use
+`after-mir:<request>` when available, reduce the input, or attach LLDB to the exact
+compiler branch that stopped it.
+
+Use an analysis audit directly as a reduction predicate:
+
+```sh
+./out/stage/bin/with-stage2 reduce repro.w --exit-code nonzero -- \
+  ./out/stage/bin/with-stage2 analyze {file} audit:all
+```
+
 ## Repro Reduction
 
 `with reduce` minimizes a single-file repro by deleting source lines while a
@@ -49,6 +101,24 @@ These run from `with check` after MIR lowering:
 Use these before adding temporary trace prints to MIR lowering, ownership, or
 codegen code.
 
+## Source Rewrite Clients
+
+Semantic selection stays in the compiler. The remaining source tools are thin
+clients of `compiler_analyze_file`; they may use the compiler Lexer only to verify
+and apply byte splices inside compiler-proven spans:
+
+- `tools/annotate_receivers.w` applies finalized Sema receiver requirements.
+- `tools/migrate_receivers.w` removes explicit receivers only from declarations
+  Sema identifies as valid impl methods with matching modes.
+- `tools/relocate_methods.w` relocates only Sema-identified top-level instance
+  methods and verifies one semantic fact per structural rewrite.
+- `tools/migrate_method_arg_moves.w` consumes structured diagnostic facts and
+  exact spans; it never parses rendered stderr.
+
+All clients preflight the complete file/path and fail before writing on missing,
+duplicate, ambiguous, or mismatched facts. The removed receiver/frozen/closure,
+AST-metadata, diagnostic-map, and receiver-flip scripts must not be recreated.
+
 ## Ownership And Cleanup Inspection
 
 These commands focus on deep move/drop bugs, especially partial moves, cleanup
@@ -84,6 +154,47 @@ edges, and future runtime drop-flag work:
 Do not infer the root cause from these reports alone. They show what MIR
 believes; use `lldb` on the lowering or codegen branch to prove why it believes
 that.
+
+## Instruction-Level Root Cause
+
+`with analyze lldb:<query>` generates breakpoints from live facts, but LLDB is
+still the authority for the exact failing instruction and runtime condition. Stop
+at the function/branch, inspect registers and the backtrace, and disassemble when
+source-level stepping hides an inlined checked operation.
+
+The resolved-call storage failure is the model: LLDB proved that
+`resolved_call_arg_key(call_node, idx)` shifted an `i32` node by 16 bits and hit
+checked overflow at node 37418; even without the panic it would collide above
+65535. The repair separated start/count maps and changed default-argument keys to
+an `i64` 32/32 representation. `audit:storage` now preserves that proof. A trace
+count or error table would only have characterized the failure; the debugger named
+the exact function, instruction, operands, and invalid capacity assumption.
+
+### Batch LLDB on compiler binaries (proven recipes)
+
+Hard-won specifics for `lldb --batch` against `-O1 -g` With binaries:
+
+- Symbol names are dotted: `breakpoint set -n Codegen.gen_module`, not
+  `gen_module`. A bare-name breakpoint reports `no locations (pending)` and
+  the run proceeds uninstrumented.
+- Function-body breakpoints on our `-O1` binaries can resolve yet never fire
+  (line-table skew); LLVM C API symbols (`LLVMAddFunction`,
+  `LLVMTargetMachineEmitToFile`, `LLVMBuildAlloca`) are reliable anchors with
+  ABI-stable argument registers.
+- Our DWARF has no variable info (`frame variable` fails with "no variable
+  information"); read entry-register args at non-inlined symbol entries, and
+  treat `[inlined]` frame line attributions as unreliable.
+- `register read` transcribes inside breakpoint command lists;
+  `memory read` with a `$reg` address does not — do memory dumps at the
+  final stop from the `-o` command stream instead.
+- To classify an `llvm::Type*` without expression evaluation:
+  `memory read -s1 -fx -c 4 '$x1+8'` — the byte at +8 is the TypeID
+  (7 = void on LLVM 22). `CreateAlloca` of a void type is what a
+  `DataLayout::getTypeSizeInBits` `brk #1` under an alloca backtrace means.
+- A silent SIGTRAP (exit 133, no output) is either an LLVM release-build
+  `brk` or a `switch undef` miscompile detonating; the backtrace
+  discriminates in one run — LLVM frames mean invalid IR construction,
+  pure With frames mean the silent-undef class (#653).
 
 ## Fixpoint Diff
 

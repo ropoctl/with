@@ -374,33 +374,34 @@ fn TokenList.new -> TokenList:
     }
 
 // No-op: reserved for future manual memory management.
-fn TokenList.deinit(self: TokenList):
-    return
+impl TokenList:
+    fn deinit():
+        return
 
-fn TokenList.append(mut self: TokenList, tag: i32, start: i32, end: i32) -> Unit:
-    self.tags.push(tag)
-    self.starts.push(start)
-    self.ends.push(end)
+    mut fn append(tag: i32, start: i32, end: i32) -> Unit:
+        self.tags.push(tag)
+        self.starts.push(start)
+        self.ends.push(end)
 
-fn TokenList.len(self: TokenList) -> i32:
-    self.tags.len() as i32
+    fn len() -> i32:
+        self.tags.len() as i32
 
-fn TokenList.get_tag(self: TokenList, index: i32) -> i32:
-    self.tags.get(index as i64)
+    fn get_tag(index: i32) -> i32:
+        self.tags.get(index as i64)
 
-fn TokenList.get_start(self: TokenList, index: i32) -> i32:
-    self.starts.get(index as i64)
+    fn get_start(index: i32) -> i32:
+        self.starts.get(index as i64)
 
-fn TokenList.get_end(self: TokenList, index: i32) -> i32:
-    self.ends.get(index as i64)
+    fn get_end(index: i32) -> i32:
+        self.ends.get(index as i64)
 
-// Convenience: construct a Span for token at index with a given file_id.
-fn TokenList.get_span(self: TokenList, index: i32, file_id: i32) -> Span:
-    Span {
-        file: file_id,
-        start: self.starts.get(index as i64),
-        end: self.ends.get(index as i64),
-    }
+    // Convenience: construct a Span for token at index with a given file_id.
+    fn get_span(index: i32, file_id: i32) -> Span:
+        Span {
+            file: file_id,
+            start: self.starts.get(index as i64),
+            end: self.ends.get(index as i64),
+        }
 
 // Also expose a keyword_lookup alias for the lexer.
 fn keyword_lookup(text: str) -> i32:

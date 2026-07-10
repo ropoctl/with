@@ -755,124 +755,125 @@ fn ci_migrate_project_var_owner_rank(definition_kind: i32) -> i32:
         return 1
     0
 
-fn CiProject.migrate_var_type_id(self: &CiProject, session: i64, idx: i32, owner_type: str) -> CiTypeId:
-    let cursor = with_cimport_decl_cursor(session, idx)
-    if cursor < 0:
-        return 0 as CiTypeId
-    var ty_id = self.types.type_from_libclang(session, with_ci_cursor_type(session, cursor))
-    if owner_type.len() == 0:
-        return ty_id
-    if (ty_id as i32) == 0 or ci_print_type(self.types, ty_id) != owner_type:
-        ty_id = self.types.type_from_translated_text(owner_type)
-    ty_id
+impl CiProject:
+    fn migrate_var_type_id(session: i64, idx: i32, owner_type: str) -> CiTypeId:
+        let cursor = with_cimport_decl_cursor(session, idx)
+        if cursor < 0:
+            return 0 as CiTypeId
+        var ty_id = self.types.type_from_libclang(session, with_ci_cursor_type(session, cursor))
+        if owner_type.len() == 0:
+            return ty_id
+        if (ty_id as i32) == 0 or ci_print_type(self.types, ty_id) != owner_type:
+            ty_id = self.types.type_from_translated_text(owner_type)
+        ty_id
 
-fn CiProject.migrate_scan_file(self: &CiProject, input_path: str) -> i32:
-    ci_migrate_prepare_include_path(input_path)
-    ci_prepare_clang_resource_dir()
-    let source = ci_migrate_wrapped_source(input_path)
-    if source.len() == 0:
-        eprint("migrate: cannot read " ++ input_path)
-        return 1
+    fn migrate_scan_file(input_path: str) -> i32:
+        ci_migrate_prepare_include_path(input_path)
+        ci_prepare_clang_resource_dir()
+        let source = ci_migrate_wrapped_source(input_path)
+        if source.len() == 0:
+            eprint("migrate: cannot read " ++ input_path)
+            return 1
 
-    let session = with_cimport_parse(source)
-    if session == 0:
-        eprint("migrate: failed to parse " ++ input_path)
-        return 1
+        let session = with_cimport_parse(source)
+        if session == 0:
+            eprint("migrate: failed to parse " ++ input_path)
+            return 1
 
-    let err_msg = with_cimport_error(session)
-    if err_msg.len() > 0:
-        eprint("migrate: parse error: " ++ err_msg)
+        let err_msg = with_cimport_error(session)
+        if err_msg.len() > 0:
+            eprint("migrate: parse error: " ++ err_msg)
+            with_cimport_dispose(session)
+            return 1
+
+        let module_id = self.ensure_module(input_path)
+        let count = with_cimport_decl_count(session)
+        var i = 0
+        while i < count:
+            if with_cimport_decl_kind(session, i) == CK_VAR:
+                let name = with_cimport_decl_name(session, i)
+                let cursor = with_cimport_decl_cursor(session, i)
+                let loc = if cursor >= 0: with_ci_cursor_location(session, cursor) else: ""
+                if name.len() == 0 or ci_is_system_decl(name) or (loc.len() > 0 and ci_is_system_path(loc)):
+                    i = i + 1
+                    continue
+                if with_cimport_var_storage_class(session, i) == CX_SC_STATIC:
+                    i = i + 1
+                    continue
+                let symbol_id = self.ensure_symbol(CiProjectSymbolKind.CIPS_VAR, name)
+                var symbol = self.symbols.get(symbol_id as i64)
+                symbol.add_consumer(module_id)
+                self.update_symbol(symbol_id, symbol)
+
+                let owner_kind = ci_migrate_var_definition_kind(session, i)
+                if cursor < 0 or owner_kind == CI_VAR_DECL_ONLY:
+                    i = i + 1
+                    continue
+
+                let owner_type = ci_migrate_var_owner_type(session, i)
+                if owner_type.len() == 0 or ci_starts_with(owner_type, "__UNSUPPORTED:"):
+                    eprint("migrate: unsupported global owner type for " ++ name ++ " in " ++ input_path)
+                    with_cimport_dispose(session)
+                    return 1
+
+                let owner_rank = ci_migrate_project_var_owner_rank(owner_kind)
+                if symbol.owner_module < 0:
+                    symbol.owner_module = module_id
+                    symbol.owner_rank = owner_rank
+                    symbol.owner_definition_kind = owner_kind
+                    symbol.resolved_ty_text = owner_type
+                    symbol.resolved_ty = self.migrate_var_type_id(session, i, owner_type)
+                    self.update_symbol(symbol_id, symbol)
+                    i = i + 1
+                    continue
+
+                let existing_path = self.owner_module_path(symbol_id)
+                if symbol.owner_rank == owner_rank:
+                    if symbol.owner_definition_kind == CI_VAR_FULL_DEF and owner_kind == CI_VAR_FULL_DEF and existing_path != input_path:
+                        eprint("migrate: duplicate full global definition for " ++ name ++ " in " ++ existing_path ++ " and " ++ input_path)
+                        with_cimport_dispose(session)
+                        return 1
+                    if symbol.resolved_ty_text.len() > 0 and symbol.resolved_ty_text != owner_type:
+                        eprint("migrate: conflicting global owner type for " ++ name ++ " in " ++ existing_path ++ " and " ++ input_path)
+                        with_cimport_dispose(session)
+                        return 1
+                if owner_rank > symbol.owner_rank or (owner_rank == symbol.owner_rank and ci_str_compare(input_path, existing_path) < 0):
+                    symbol.owner_module = module_id
+                    symbol.owner_rank = owner_rank
+                    symbol.owner_definition_kind = owner_kind
+                    symbol.resolved_ty_text = owner_type
+                    symbol.resolved_ty = self.migrate_var_type_id(session, i, owner_type)
+                    self.update_symbol(symbol_id, symbol)
+            else if with_cimport_decl_kind(session, i) == CK_FUNCTION:
+                let name = with_cimport_decl_name(session, i)
+                let cursor = with_cimport_decl_cursor(session, i)
+                let loc = if cursor >= 0: with_ci_cursor_location(session, cursor) else: ""
+                if name.len() == 0 or ci_is_system_decl(name) or (loc.len() > 0 and ci_is_system_path(loc)):
+                    i = i + 1
+                    continue
+                if with_cimport_fn_storage_class(session, i) == CX_SC_STATIC:
+                    i = i + 1
+                    continue
+                let symbol_id = self.ensure_symbol(CiProjectSymbolKind.CIPS_FN, name)
+                var symbol = self.symbols.get(symbol_id as i64)
+                symbol.add_consumer(module_id)
+                self.update_symbol(symbol_id, symbol)
+                if cursor < 0 or with_ci_cursor_is_definition(session, cursor) == 0:
+                    i = i + 1
+                    continue
+                let existing_path = self.owner_module_path(symbol_id)
+                if symbol.owner_module >= 0 and existing_path != input_path:
+                    eprint("migrate: duplicate function definition for " ++ name ++ " in " ++ existing_path ++ " and " ++ input_path)
+                    with_cimport_dispose(session)
+                    return 1
+                symbol.owner_module = module_id
+                symbol.owner_rank = 1
+                symbol.owner_definition_kind = 1
+                self.update_symbol(symbol_id, symbol)
+            i = i + 1
+
         with_cimport_dispose(session)
-        return 1
-
-    let module_id = self.ensure_module(input_path)
-    let count = with_cimport_decl_count(session)
-    var i = 0
-    while i < count:
-        if with_cimport_decl_kind(session, i) == CK_VAR:
-            let name = with_cimport_decl_name(session, i)
-            let cursor = with_cimport_decl_cursor(session, i)
-            let loc = if cursor >= 0: with_ci_cursor_location(session, cursor) else: ""
-            if name.len() == 0 or ci_is_system_decl(name) or (loc.len() > 0 and ci_is_system_path(loc)):
-                i = i + 1
-                continue
-            if with_cimport_var_storage_class(session, i) == CX_SC_STATIC:
-                i = i + 1
-                continue
-            let symbol_id = self.ensure_symbol(CiProjectSymbolKind.CIPS_VAR, name)
-            var symbol = self.symbols.get(symbol_id as i64)
-            symbol.add_consumer(module_id)
-            self.update_symbol(symbol_id, symbol)
-
-            let owner_kind = ci_migrate_var_definition_kind(session, i)
-            if cursor < 0 or owner_kind == CI_VAR_DECL_ONLY:
-                i = i + 1
-                continue
-
-            let owner_type = ci_migrate_var_owner_type(session, i)
-            if owner_type.len() == 0 or ci_starts_with(owner_type, "__UNSUPPORTED:"):
-                eprint("migrate: unsupported global owner type for " ++ name ++ " in " ++ input_path)
-                with_cimport_dispose(session)
-                return 1
-
-            let owner_rank = ci_migrate_project_var_owner_rank(owner_kind)
-            if symbol.owner_module < 0:
-                symbol.owner_module = module_id
-                symbol.owner_rank = owner_rank
-                symbol.owner_definition_kind = owner_kind
-                symbol.resolved_ty_text = owner_type
-                symbol.resolved_ty = self.migrate_var_type_id(session, i, owner_type)
-                self.update_symbol(symbol_id, symbol)
-                i = i + 1
-                continue
-
-            let existing_path = self.owner_module_path(symbol_id)
-            if symbol.owner_rank == owner_rank:
-                if symbol.owner_definition_kind == CI_VAR_FULL_DEF and owner_kind == CI_VAR_FULL_DEF and existing_path != input_path:
-                    eprint("migrate: duplicate full global definition for " ++ name ++ " in " ++ existing_path ++ " and " ++ input_path)
-                    with_cimport_dispose(session)
-                    return 1
-                if symbol.resolved_ty_text.len() > 0 and symbol.resolved_ty_text != owner_type:
-                    eprint("migrate: conflicting global owner type for " ++ name ++ " in " ++ existing_path ++ " and " ++ input_path)
-                    with_cimport_dispose(session)
-                    return 1
-            if owner_rank > symbol.owner_rank or (owner_rank == symbol.owner_rank and ci_str_compare(input_path, existing_path) < 0):
-                symbol.owner_module = module_id
-                symbol.owner_rank = owner_rank
-                symbol.owner_definition_kind = owner_kind
-                symbol.resolved_ty_text = owner_type
-                symbol.resolved_ty = self.migrate_var_type_id(session, i, owner_type)
-                self.update_symbol(symbol_id, symbol)
-        else if with_cimport_decl_kind(session, i) == CK_FUNCTION:
-            let name = with_cimport_decl_name(session, i)
-            let cursor = with_cimport_decl_cursor(session, i)
-            let loc = if cursor >= 0: with_ci_cursor_location(session, cursor) else: ""
-            if name.len() == 0 or ci_is_system_decl(name) or (loc.len() > 0 and ci_is_system_path(loc)):
-                i = i + 1
-                continue
-            if with_cimport_fn_storage_class(session, i) == CX_SC_STATIC:
-                i = i + 1
-                continue
-            let symbol_id = self.ensure_symbol(CiProjectSymbolKind.CIPS_FN, name)
-            var symbol = self.symbols.get(symbol_id as i64)
-            symbol.add_consumer(module_id)
-            self.update_symbol(symbol_id, symbol)
-            if cursor < 0 or with_ci_cursor_is_definition(session, cursor) == 0:
-                i = i + 1
-                continue
-            let existing_path = self.owner_module_path(symbol_id)
-            if symbol.owner_module >= 0 and existing_path != input_path:
-                eprint("migrate: duplicate function definition for " ++ name ++ " in " ++ existing_path ++ " and " ++ input_path)
-                with_cimport_dispose(session)
-                return 1
-            symbol.owner_module = module_id
-            symbol.owner_rank = 1
-            symbol.owner_definition_kind = 1
-            self.update_symbol(symbol_id, symbol)
-        i = i + 1
-
-    with_cimport_dispose(session)
-    0
+        0
 
 fn ci_migrate_file_inner(input_path: str, output_path: str, project_active: bool, project: &CiProject) -> i32:
     if with_cimport_available() == 0:

@@ -9,11 +9,11 @@ trait Sized:    fn size(self:
 type Box { value: i32 }
 
 impl Showable for Box:    fn show(self:
-    Box) -> str:
+    &Self) -> str:
         "box"
 
 impl Sized for Box:    fn size(self:
-    Box) -> i32:
+    &Self) -> i32:
         4
 
 fn describe[T](x: T) -> str where T: Showable, T: Sized:

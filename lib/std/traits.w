@@ -6,13 +6,13 @@
 // available through the prelude for documentation and tooling.
 
 /// Equality comparison. Implement to enable `==` and `!=` operators.
-pub trait Eq:    fn eq(self, other:
-    Self) -> bool
+pub trait Eq:
+    fn eq(self: &Self, other: Self) -> bool
 
 /// Ordering comparison. Implement to enable `<`, `>`, `<=`, `>=`.
 /// Return negative for less-than, 0 for equal, positive for greater-than.
-pub trait Ord:    fn cmp(self, other:
-    Self) -> i32
+pub trait Ord:
+    fn cmp(self: &Self, other: Self) -> i32
 
 /// Addition. Available for explicit generic bounds; `+` dispatches by the
 /// fixed method name `add` on concrete operand types.
@@ -65,15 +65,15 @@ pub trait Deref[T]:
 
 /// Hashing. Implement to use a type as a HashMap key or HashSet element.
 pub trait Hash:
-    fn hash_value(self) -> i64
+    fn hash_value(self: &Self) -> i64
 
 /// Debug formatting. Used by `f"{value:?}"` format specifier.
 pub trait Debug:
-    fn debug_str(self) -> str
+    fn debug_str(self: &Self) -> str
 
 /// Display formatting. Used by `f"{value}"` string interpolation.
 pub trait Display:
-    fn to_str(self) -> str
+    fn to_str(self: &Self) -> str
 
 /// Error values expose a display string and an optional underlying cause.
 pub trait Error:
@@ -118,17 +118,14 @@ pub trait ScopedMut[T]:    fn with_enter_mut(self:
 
 // Core trait impls for primitive types
 
-impl Eq for i32:    fn eq(self: i32, other:
-    i32) -> bool:
-        self == other
+impl Eq for i32:
+    fn eq(self: &Self, other: i32) -> bool: *self == other
 
-impl Eq for bool:    fn eq(self: bool, other:
-    bool) -> bool:
-        self == other
+impl Eq for bool:
+    fn eq(self: &Self, other: bool) -> bool: *self == other
 
-impl Eq for u8:    fn eq(self: u8, other:
-    u8) -> bool:
-        self == other
+impl Eq for u8:
+    fn eq(self: &Self, other: u8) -> bool: *self == other
 
 impl Default for i32:
     fn default() -> i32:
@@ -150,46 +147,45 @@ impl Default for str:
     fn default() -> str:
         ""
 
-impl Eq for str:    fn eq(self: str, other:
-    str) -> bool:
-        self == other
+impl Eq for str:
+    fn eq(self: &Self, other: str) -> bool: *self == other
 
-impl Eq for i64:    fn eq(self: i64, other:
-    i64) -> bool:
-        self == other
+impl Eq for i64:
+    fn eq(self: &Self, other: i64) -> bool: *self == other
 
 impl Ord for i32:
-    fn cmp(self: i32, other: i32) -> i32:
-        if self < other: return -1
-        if self > other: return 1
+    fn cmp(self: &Self, other: i32) -> i32:
+        if *self < other: return -1
+        if *self > other: return 1
         0
 
 impl Ord for i64:
-    fn cmp(self: i64, other: i64) -> i32:
-        if self < other: return -1
-        if self > other: return 1
+    fn cmp(self: &Self, other: i64) -> i32:
+        if *self < other: return -1
+        if *self > other: return 1
         0
 
 impl Ord for u8:
-    fn cmp(self: u8, other: u8) -> i32:
-        if self < other: return -1
-        if self > other: return 1
+    fn cmp(self: &Self, other: u8) -> i32:
+        if *self < other: return -1
+        if *self > other: return 1
         0
 
 impl Ord for bool:
-    fn cmp(self: bool, other: bool) -> i32:
-        if self == other: return 0
-        if not self and other: return -1
+    fn cmp(self: &Self, other: bool) -> i32:
+        if *self == other: return 0
+        if not *self and other: return -1
         1
 
 impl Ord for str:
-    fn cmp(self: str, other: str) -> i32:
+    fn cmp(self: &Self, other: str) -> i32:
+        let value = *self
         var i = 0
-        let left_len = self.len()
+        let left_len = value.len()
         let right_len = other.len()
         let limit = if left_len < right_len: left_len else: right_len
         while i < limit:
-            let left = self.byte_at(i)
+            let left = value.byte_at(i)
             let right = other.byte_at(i)
             if left < right:
                 return -1
@@ -202,54 +198,50 @@ impl Ord for str:
             return 1
         0
 
-impl Debug for i32:    fn debug_str(self:
-    i32) -> str:
-        with_i32_to_str(self)
+impl Debug for i32:
+    fn debug_str(self: &Self) -> str: with_i32_to_str(*self)
 
-impl Debug for i64:    fn debug_str(self:
-    i64) -> str:
-        with_i64_to_str(self)
+impl Debug for i64:
+    fn debug_str(self: &Self) -> str: with_i64_to_str(*self)
 
-impl Debug for u8:    fn debug_str(self:
-    u8) -> str:
-        with_i32_to_str(self as i32)
+impl Debug for u8:
+    fn debug_str(self: &Self) -> str: with_i32_to_str(*self as i32)
 
-impl Debug for bool:    fn debug_str(self:
-    bool) -> str:
-        if self:
+impl Debug for bool:
+    fn debug_str(self: &Self) -> str:
+        if *self:
             "true"
         else:
             "false"
 
-impl Debug for str:    fn debug_str(self:
-    str) -> str:
-        "\"" ++ self ++ "\""
+impl Debug for str:
+    fn debug_str(self: &Self) -> str:
+        let value = *self
+        "\"" ++ value ++ "\""
 
-impl Hash for i32:    fn hash_value(self:
-    i32) -> i64:
-        (1469598103934665603 *% 1099511628211) ^ (self as i64)
+impl Hash for i32:
+    fn hash_value(self: &Self) -> i64: (1469598103934665603 *% 1099511628211) ^ (*self as i64)
 
-impl Hash for u8:    fn hash_value(self:
-    u8) -> i64:
-        (1469598103934665603 *% 1099511628211) ^ (self as i64)
+impl Hash for u8:
+    fn hash_value(self: &Self) -> i64: (1469598103934665603 *% 1099511628211) ^ (*self as i64)
 
-impl Hash for i64:    fn hash_value(self:
-    i64) -> i64:
-        (1469598103934665603 *% 1099511628211) ^ self
+impl Hash for i64:
+    fn hash_value(self: &Self) -> i64: (1469598103934665603 *% 1099511628211) ^ *self
 
-impl Hash for bool:    fn hash_value(self:
-    bool) -> i64:
-        if self:
+impl Hash for bool:
+    fn hash_value(self: &Self) -> i64:
+        if *self:
             1
         else:
             0
 
-impl Hash for str:    fn hash_value(self:
-    str) -> i64:
+impl Hash for str:
+    fn hash_value(self: &Self) -> i64:
+        let value = *self
         var h: i64 = 1469598103934665603
         var i: i64 = 0
-        while i < self.len():
-            h = (h *% 1099511628211) ^ self[i]
+        while i < value.len():
+            h = (h *% 1099511628211) ^ value[i]
             i = i + 1
         h
 

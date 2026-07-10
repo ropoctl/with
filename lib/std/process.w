@@ -66,17 +66,16 @@ pub fn command(program: str) -> Command:
     Command { args: argv }
 
 /// Append one argument and return the updated command.
-pub fn Command.arg(self: Command, arg: str) -> Command:
-    var argv: Vec[str] = Vec.new()
-    for i in 0..self.args.len() as i32:
-        argv.push(self.args.get(i as i64))
-    argv.push(arg)
-    Command { args: argv }
+impl Command:
+    pub fn arg(arg: str) -> Command:
+        var argv: Vec[str] = Vec.new()
+        for i in 0..self.args.len() as i32:
+            argv.push(self.args.get(i as i64))
+        argv.push(arg)
+        Command { args: argv }
 
-/// Run the command. Returns the exit status.
-pub fn Command.run(self: Command) -> i32:
-    run(self.args)
+    /// Run the command. Returns the exit status.
+    pub fn run() -> i32: run(self.args)
 
-/// Run the command and return its exit status.
-pub fn Command.status(self: Command) -> i32:
-    run(self.args)
+    /// Run the command and return its exit status.
+    pub fn status() -> i32: run(self.args)

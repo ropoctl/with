@@ -8,10 +8,10 @@ fn Point.new(x: i32, y: i32) -> Self:
 fn Point.origin() -> Self:
     Self { x: 0, y: 0 }
 
-fn Point.sum(self: Point) -> i32:
+fn Point.sum(self: &Self) -> i32:
     self.x + self.y
 
-fn Point.translate(self: Point, dx: i32, dy: i32) -> Self:
+fn Point.translate(self: &Self, dx: i32, dy: i32) -> Self:
     Self { x: self.x + dx, y: self.y + dy }
 
 fn main:

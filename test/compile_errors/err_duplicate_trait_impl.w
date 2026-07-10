@@ -4,9 +4,9 @@ trait Show:
     fn show(self: i32) -> str
 
 impl Show for i32:
-    fn show(self: i32) -> str:
+    fn show(self: &Self) -> str:
         int_to_string(self)
 
 impl Show for i32:
-    fn show(self: i32) -> str:
+    fn show(self: &Self) -> str:
         int_to_string(self)

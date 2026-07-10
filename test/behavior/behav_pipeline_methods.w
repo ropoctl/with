@@ -4,10 +4,10 @@ type PipeBox {
     value: i32,
 }
 
-fn PipeBox.add(self: PipeBox, n: i32) -> PipeBox:
+fn PipeBox.add(self: &Self, n: i32) -> PipeBox:
     PipeBox { value: self.value + n }
 
-fn PipeBox.choose(self: PipeBox) -> i32:
+fn PipeBox.choose(self: &Self) -> i32:
     1
 
 fn choose(_box: PipeBox) -> i32:

@@ -19,9 +19,9 @@ extend Vec2:
     fn scale(self: &Vec2, s: f32) -> Vec2:
         Vec2 { x: self.x * s, y: self.y * s }
 
-    fn add(self: Vec2, other: Vec2) -> Vec2: Vec2 { x: self.x + other.x, y: self.y + other.y }
-    fn sub(self: Vec2, other: Vec2) -> Vec2: Vec2 { x: self.x - other.x, y: self.y - other.y }
-    fn neg(self: Vec2) -> Vec2: Vec2 { x: -self.x, y: -self.y }
+    fn add(self: &Self, other: Vec2) -> Vec2: Vec2 { x: self.x + other.x, y: self.y + other.y }
+    fn sub(self: &Self, other: Vec2) -> Vec2: Vec2 { x: self.x - other.x, y: self.y - other.y }
+    fn neg(self: &Self) -> Vec2: Vec2 { x: -self.x, y: -self.y }
 
     fn dot(a: Vec2, b: Vec2) -> f32: a.x * b.x + a.y * b.y
     fn distance_sq(a: Vec2, b: Vec2) -> f32: (a - b).length_sq()

@@ -34,8 +34,8 @@ pub trait Deserialize:    fn deserialize(input:
 pub fn JsonWriter.new() -> JsonWriter:
     JsonWriter { text: "", needs_comma: false, after_key: false }
 
-pub fn JsonWriter.finish(self: &JsonWriter) -> str:
-    self.text
+impl JsonWriter:
+    pub fn finish(): self.text
 
 fn json_escape_string(value: str) -> str:
     var out = ""
@@ -60,39 +60,39 @@ fn json_escape_string(value: str) -> str:
 fn json_quote(value: str) -> str:
     "\"" ++ json_escape_string(value) ++ "\""
 
-fn JsonWriter.prefix_value(self: JsonWriter) -> JsonWriter:
-    if self.after_key:
-        return JsonWriter { text: self.text, needs_comma: self.needs_comma, after_key: false }
-    if self.needs_comma:
-        return JsonWriter { text: self.text ++ ",", needs_comma: self.needs_comma, after_key: self.after_key }
-    JsonWriter { text: self.text, needs_comma: self.needs_comma, after_key: self.after_key }
+impl JsonWriter:
+    fn prefix_value():
+        if self.after_key:
+            return JsonWriter { text: self.text, needs_comma: self.needs_comma, after_key: false }
+        if self.needs_comma:
+            return JsonWriter { text: self.text ++ ",", needs_comma: self.needs_comma, after_key: self.after_key }
+        JsonWriter { text: self.text, needs_comma: self.needs_comma, after_key: self.after_key }
 
-pub fn JsonWriter.begin_object(self: JsonWriter) -> JsonWriter:
-    let prefixed = self.prefix_value()
-    JsonWriter { text: prefixed.text ++ "{", needs_comma: false, after_key: false }
+    pub fn begin_object():
+        let prefixed = self.prefix_value()
+        JsonWriter { text: prefixed.text ++ "{", needs_comma: false, after_key: false }
 
-pub fn JsonWriter.end_object(self: JsonWriter) -> JsonWriter:
-    JsonWriter { text: self.text ++ "}", needs_comma: true, after_key: false }
+    pub fn end_object(): JsonWriter { text: self.text ++ "}", needs_comma: true, after_key: false }
 
-pub fn JsonWriter.key(self: JsonWriter, key: str) -> JsonWriter:
-    let prefix = if self.needs_comma: "," else: ""
-    JsonWriter { text: self.text ++ prefix ++ json_quote(key) ++ ":", needs_comma: false, after_key: true }
+    pub fn key(key: str):
+        let prefix = if self.needs_comma: "," else: ""
+        JsonWriter { text: self.text ++ prefix ++ json_quote(key) ++ ":", needs_comma: false, after_key: true }
 
-pub fn JsonWriter.value_raw(self: JsonWriter, raw: str) -> JsonWriter:
-    let prefixed = self.prefix_value()
-    JsonWriter { text: prefixed.text ++ raw, needs_comma: true, after_key: false }
+    pub fn value_raw(raw: str):
+        let prefixed = self.prefix_value()
+        JsonWriter { text: prefixed.text ++ raw, needs_comma: true, after_key: false }
 
-pub fn JsonWriter.value_str(self: JsonWriter, value: str) -> JsonWriter:
-    self.value_raw(json_quote(value))
+    pub fn value_str(value: str) -> JsonWriter:
+        self.value_raw(json_quote(value))
 
-pub fn JsonWriter.value_i32(self: JsonWriter, value: i32) -> JsonWriter:
-    self.value_raw(with_i32_to_str(value))
+    pub fn value_i32(value: i32) -> JsonWriter:
+        self.value_raw(with_i32_to_str(value))
 
-pub fn JsonWriter.value_i64(self: JsonWriter, value: i64) -> JsonWriter:
-    self.value_raw(with_i64_to_str(value))
+    pub fn value_i64(value: i64) -> JsonWriter:
+        self.value_raw(with_i64_to_str(value))
 
-pub fn JsonWriter.value_bool(self: JsonWriter, value: bool) -> JsonWriter:
-    self.value_raw(if value: "true" else: "false")
+    pub fn value_bool(value: bool) -> JsonWriter:
+        self.value_raw(if value: "true" else: "false")
 
 impl Serialize for str:    fn serialize(self: &str, out:
     JsonWriter) -> JsonWriter:
@@ -363,26 +363,27 @@ pub fn JsonDocument.parse(js: str) -> JsonDocument:
         json_panic("invalid JSON")
     JsonDocument { source: js, tokens, count }
 
-pub fn JsonDocument.root(self: &JsonDocument) -> JsonView:
-    if self.count <= 0:
-        json_panic("empty JSON document")
-    JsonView { source: self.source, tokens: self.tokens as *const JsonToken, index: 0 }
+impl JsonDocument:
+    pub fn root():
+        if self.count <= 0:
+            json_panic("empty JSON document")
+        JsonView { source: self.source, tokens: self.tokens as *const JsonToken, index: 0 }
 
-fn JsonView.token_type(self: JsonView) -> i32:
-    if self.index < 0:
-        json_panic("missing JSON value")
-    unsafe (*(self.tokens + self.index as u64)).tok_type
+impl JsonView:
+    fn token_type():
+        if self.index < 0:
+            json_panic("missing JSON value")
+        unsafe (*(self.tokens + self.index as u64)).tok_type
 
-pub fn JsonView.raw(self: JsonView) -> str:
-    json_str(self.source, self.tokens, self.index)
+    pub fn raw(): json_str(self.source, self.tokens, self.index)
 
-pub fn JsonView.field(self: JsonView, key: str) -> JsonView:
-    if self.token_type() != JSON_OBJECT:
-        json_panic("expected JSON object")
-    let value_idx = json_find(self.source, self.tokens, self.index, key)
-    if value_idx < 0:
-        json_panic("missing JSON field: " ++ key)
-    JsonView { source: self.source, tokens: self.tokens, index: value_idx }
+    pub fn field(key: str):
+        if self.token_type() != JSON_OBJECT:
+            json_panic("expected JSON object")
+        let value_idx = json_find(self.source, self.tokens, self.index, key)
+        if value_idx < 0:
+            json_panic("missing JSON field: " ++ key)
+        JsonView { source: self.source, tokens: self.tokens, index: value_idx }
 
 // ── Lookup helpers ──────────────────────────────────────────────
 

@@ -742,6 +742,25 @@ fn deep_debug_tool_expect(ctx: &ActionCtx, root: str, compiler: str, source_path
         return 1
     0
 
+fn deep_debug_analyze_expect(ctx: &ActionCtx, root: str, compiler: str, source_path: str, out_dir: str, name: str, request: str, needle: str) -> i32:
+    let args: Vec[str] = Vec.new()
+    args.push(compiler)
+    args.push("analyze")
+    args.push(source_path)
+    args.push(request)
+    let stdout_rel = build_project_join(out_dir, name ++ ".stdout")
+    let stderr_rel = build_project_join(out_dir, name ++ ".stderr")
+    let stdout_path = build_project_abs(root, stdout_rel)
+    let stderr_path = build_project_abs(root, stderr_rel)
+    let result = ctx.process_runner().run_capture_cwd(args, stdout_path, stderr_path, 120000, root)
+    if result.rc != 0:
+        ctx.diagnostics().error(f"deep-debug-tool-tests: {name} failed rc={result.rc}; stdout={stdout_path} stderr={stderr_path}")
+        return result.rc
+    if not ctx.fs().read_text(stdout_rel).contains(needle):
+        ctx.diagnostics().error("deep-debug-tool-tests: " ++ name ++ " report missing '" ++ needle ++ "'; stdout=" ++ stdout_path)
+        return 1
+    0
+
 fn run_deep_debug_tool_tests_action(ctx: ActionCtx) -> i32:
     let inputs = ctx.inputs()
     if inputs.len() == 0:
@@ -812,6 +831,11 @@ fn run_deep_debug_tool_tests_action(ctx: ActionCtx) -> i32:
     let ownership_source =
         "type Resource { id: i32 }\n\n" ++
         "type Plain { id: i32 }\n\n" ++
+        "type Matrix { n: i32 }\n\n" ++
+        "impl Matrix:\n" ++
+        "    mut fn write(): self.n = self.n + 1\n" ++
+        "    mut fn transitive_write(): self.write()\n" ++
+        "    move fn take() -> Matrix: self\n\n" ++
         "impl Drop for Resource:\n" ++
         "    fn drop(move self: Self):\n" ++
         "        let _ = self.id\n\n" ++
@@ -844,6 +868,16 @@ fn run_deep_debug_tool_tests_action(ctx: ActionCtx) -> i32:
     if deep_debug_tool_expect(ctx, root, compiler, ownership_abs, out_dir, "dump-place-map", "--dump-place-map", "", "projections=[Field") != 0:
         return 1
     if deep_debug_tool_expect(ctx, root, compiler, ownership_abs, out_dir, "trace-cleanup-edge", "--trace-cleanup-edge", "choose:bb0->bb1", "edge=bb0->bb1") != 0:
+        return 1
+    if deep_debug_analyze_expect(ctx, root, compiler, ownership_abs, out_dir, "analyze-audit", "audit:all", "compiler-analysis-audit") != 0:
+        return 1
+    if deep_debug_analyze_expect(ctx, root, compiler, ownership_abs, out_dir, "analyze-storage", "audit:storage", "storage-audit") != 0:
+        return 1
+    if deep_debug_analyze_expect(ctx, root, compiler, ownership_abs, out_dir, "analyze-matrix", "matrix:name~consume", "callee-place-alias") != 0:
+        return 1
+    if deep_debug_analyze_expect(ctx, root, compiler, ownership_abs, out_dir, "analyze-receiver-effects", "matrix:kind=receiver,name~Matrix.transitive_write", "declared=mut required=mut") != 0:
+        return 1
+    if deep_debug_analyze_expect(ctx, root, compiler, ownership_abs, out_dir, "analyze-path", "path:call:main:consume", "call-path: main -> consume") != 0:
         return 1
     let _ = fs.write_text(build_project_join(out_dir, ".stamp"), "ok")
     0

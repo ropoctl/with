@@ -23,18 +23,19 @@ pub fn Rc.new[T](value: T) -> Rc[T]:
     (unsafe *ptr).value = value_ptr as *mut u8
     Rc { ptr: ptr as *mut u8 }
 
-pub fn Rc.clone[T](self: &Self) -> Rc[T]:
-    let ptr = unsafe { *(self as *const *mut u8) } as *mut RcControl
-    (unsafe *ptr).strong = (unsafe *ptr).strong + 1
-    Rc { ptr: ptr as *mut u8 }
+impl[T] Rc[T]:
+    pub fn clone() -> Rc[T]:
+        let ptr = unsafe { *(self as *const *mut u8) } as *mut RcControl
+        (unsafe *ptr).strong = (unsafe *ptr).strong + 1
+        Rc { ptr: ptr as *mut u8 }
 
-pub fn Rc.strong_count[T](self: &Self) -> i64:
-    let ptr = unsafe { *(self as *const *mut u8) } as *mut RcControl
-    (unsafe *ptr).strong
+    pub fn strong_count() -> i64:
+        let ptr = unsafe { *(self as *const *mut u8) } as *mut RcControl
+        (unsafe *ptr).strong
 
-pub fn Rc.as_ref[T](self: &Self) -> &T:
-    let inner = unsafe { *(self as *const *mut u8) } as *mut RcControl
-    (unsafe *inner).value as *mut T as &T
+    pub fn as_ref() -> &T:
+        let inner = unsafe { *(self as *const *mut u8) } as *mut RcControl
+        (unsafe *inner).value as *mut T as &T
 
 impl[T] Deref[T] for Rc[T]:
     fn deref(self: &Self) -> &T:
@@ -64,20 +65,21 @@ pub fn Arc.new[T](value: T) -> Arc[T]:
     unsafe *strong_ptr = 1
     Arc { ptr: ptr as *mut u8 }
 
-pub fn Arc.clone[T](self: &Self) -> Arc[T]:
-    let ptr = unsafe { *(self as *const *mut u8) } as *mut RcControl
-    let strong = &raw mut (unsafe *ptr).strong as *mut Atomic[i64]
-    let _ = (unsafe *strong).fetch_add(1, .AcqRel)
-    Arc { ptr: ptr as *mut u8 }
+impl[T] Arc[T]:
+    pub fn clone() -> Arc[T]:
+        let ptr = unsafe { *(self as *const *mut u8) } as *mut RcControl
+        let strong = &raw mut (unsafe *ptr).strong as *mut Atomic[i64]
+        let _ = (unsafe *strong).fetch_add(1, .AcqRel)
+        Arc { ptr: ptr as *mut u8 }
 
-pub fn Arc.strong_count[T](self: &Self) -> i64:
-    let ptr = unsafe { *(self as *const *mut u8) } as *mut RcControl
-    let strong = &raw const (unsafe *ptr).strong as *const Atomic[i64]
-    (unsafe *strong).load(.Acquire)
+    pub fn strong_count() -> i64:
+        let ptr = unsafe { *(self as *const *mut u8) } as *mut RcControl
+        let strong = &raw const (unsafe *ptr).strong as *const Atomic[i64]
+        (unsafe *strong).load(.Acquire)
 
-pub fn Arc.as_ref[T](self: &Self) -> &T:
-    let inner = unsafe { *(self as *const *mut u8) } as *mut RcControl
-    (unsafe *inner).value as *mut T as &T
+    pub fn as_ref() -> &T:
+        let inner = unsafe { *(self as *const *mut u8) } as *mut RcControl
+        (unsafe *inner).value as *mut T as &T
 
 impl[T] Deref[T] for Arc[T]:
     fn deref(self: &Self) -> &T:

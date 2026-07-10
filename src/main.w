@@ -31,6 +31,8 @@ use InitTemplates
 use BuildGraphRuntime
 use BuildGraphCache
 use compiler.DriverOptions
+use Analysis
+use ReceiverMigration
 
 extern fn with_arg_count() -> i32
 extern fn with_arg_at(idx: i32) -> str
@@ -338,6 +340,19 @@ fn cli_prelude_mode(argc: i32) -> i32:
 fn cli_runtime_available(argc: i32) -> bool:
     not cli_has_flag(argc, "--no-runtime") and not cli_has_flag(argc, "--freestanding")
 
+fn cli_analysis_request(argc: i32, source: str) -> str:
+    var found_source = false
+    var i = 2
+    while i < argc:
+        let arg = with_arg_at(i)
+        if found_source:
+            if arg.len() > 0 and arg.byte_at(0) != 45:
+                return arg
+        else if arg == source:
+            found_source = true
+        i = i + 1
+    "facts"
+
 fn parse_cli_options(argc: i32) -> CliOptions:
     var opts = cli_options_default()
     opts.command = cli_command(argc)
@@ -613,7 +628,7 @@ fn cli_build_synthetic_source(one: &CliOneLiner) -> CliSyntheticSource:
             let start = source.len() as i32
             source.push_str(rewritten)
             source.push_str("\n")
-            syn = cli_synthetic_add_mapping(syn, start, rewritten, "<cli -e #" ++ f"{i + 1}" ++ ">")
+            syn = cli_synthetic_add_mapping(move syn, start, rewritten, "<cli -e #" ++ f"{i + 1}" ++ ">")
         syn.source = source.to_str()
         return syn
     source.push_str("var nr: i64 = 0\n")
@@ -626,7 +641,7 @@ fn cli_build_synthetic_source(one: &CliOneLiner) -> CliSyntheticSource:
             let start = source.len() as i32 + 4
             source.push_str(indented)
             source.push_str("\n")
-            syn = cli_synthetic_add_mapping(syn, start, rewritten, "<cli -n #" ++ f"{i + 1}" ++ ">")
+            syn = cli_synthetic_add_mapping(move syn, start, rewritten, "<cli -n #" ++ f"{i + 1}" ++ ">")
         syn.source = source.to_str()
         return syn
     source.push_str("for __line in stdin.lines():\n")
@@ -638,7 +653,7 @@ fn cli_build_synthetic_source(one: &CliOneLiner) -> CliSyntheticSource:
         let start = source.len() as i32 + 4
         source.push_str(indented)
         source.push_str("\n")
-        syn = cli_synthetic_add_mapping(syn, start, rewritten, "<cli -p #" ++ f"{i + 1}" ++ ">")
+        syn = cli_synthetic_add_mapping(move syn, start, rewritten, "<cli -p #" ++ f"{i + 1}" ++ ">")
     source.push_str("    print(line)\n")
     syn.source = source.to_str()
     syn
@@ -793,6 +808,19 @@ fn run_cli(argc: i32) -> i32:
         if not ok:
             return 1
         return 0
+    if cli_command(argc) == "analyze":
+        if source == "":
+            with_eprint("error: 'analyze' requires a source file argument")
+            return 1
+        var comp = Compilation.init()
+        comp.configure(opt_level, no_std, alloc_mode, runtime_available)
+        comp.set_prelude_mode(prelude_mode)
+        comp.set_overflow_mode(driver_internal_overflow_mode())
+        let result = comp.analyze_file(source, cli_analysis_request(argc, source))
+        with_write(result.text)
+        return result.status
+    if cli_command(argc) == "migrate-receivers":
+        return run_receiver_migration()
     if cli_command(argc) == "ast":
         if source == "":
             with_eprint("error: 'ast' requires a source file argument")
@@ -1373,7 +1401,7 @@ fn load_build_graph_from_build_w(root: str, cfg: &ProjectConfig, options: &Build
     comp.configure_options(build_command_options_clone(options))
     comp.set_tool_mode_entry_path(entry_path)
     let compile_cfg = project_config_clone(cfg)
-    let pool = comp.compile_source_text_with_config(entry_path, build_tool_eval_entry_source(), compile_cfg)
+    let pool = comp.compile_source_text_with_config(entry_path, build_tool_eval_entry_source(), move compile_cfg)
     var sema = comp.zcu.last_sema
     if pool.decl_count() == 0 or comp.has_errors():
         graph.error_msg = "build.w evaluation wrapper compilation failed"
@@ -3506,6 +3534,8 @@ fn print_usage:
     with_write("  ast              Parse and print the AST\n")
     with_write("  tokens           Lex and print tokens\n")
     with_write("  ir               Compile and print LLVM IR\n")
+    with_write("  analyze          Query and audit live Sema, MIR, ABI, and codegen state\n")
+    with_write("  migrate-receivers  Prove or apply compiler-selected receiver relocation\n")
     with_write("  reduce           Minimize a single-file compiler repro\n")
     with_write("  fixpoint-diff    Explain the first differing fixpoint-object byte\n")
     with_write("\n")

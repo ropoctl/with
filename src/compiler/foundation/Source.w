@@ -30,10 +30,10 @@ pub fn Source.from_file(path: str, file_id: FileId) -> Source:
     let text = with_fs_read_file(path)
     Source.from_string(path, text, file_id)
 
-pub fn Source.line_count(self: Source) -> i32:
+pub fn Source.line_count(self: &Self) -> i32:
     self.line_offsets.len() as i32
 
-pub fn Source.offset_to_location(self: Source, offset: i32) -> SourceLocation:
+pub fn Source.offset_to_location(self: &Self, offset: i32) -> SourceLocation:
     if offset <= 0:
         return SourceLocation { line: 0, col: 0 }
 
@@ -57,7 +57,7 @@ pub fn Source.offset_to_location(self: Source, offset: i32) -> SourceLocation:
         col: clamped - line_start,
     }
 
-pub fn Source.line_text(self: Source, line: i32) -> str:
+pub fn Source.line_text(self: &Self, line: i32) -> str:
     if line < 0 or line >= self.line_offsets.len() as i32:
         return ""
 

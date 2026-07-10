@@ -6,7 +6,7 @@ trait Printable:    fn show(self:
 type Wrapper { value: i32 }
 
 impl Printable for Wrapper:    fn show(self:
-    Wrapper) -> str:
+    &Self) -> str:
         "wrapped"
 
 fn display[T](x: T) -> str where T: Printable:

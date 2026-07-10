@@ -5,14 +5,14 @@ trait Describable:    fn describe(self:
     &Self) -> str
 
 impl Describable for i32:    fn describe(self:
-    i32) -> str:
+    &Self) -> str:
         "an integer"
 
 // Foreign trait (Debug), local type — OK
 type Point { x: i32, y: i32 }
 
 impl Debug for Point:    fn debug(self:
-    Point) -> str:
+    &Self) -> str:
         "Point"
 
 fn main:

@@ -21,18 +21,19 @@ fn span_zero -> Span:
 fn Span.zero -> Span:
     span_zero()
 
-fn Span.len(self: Span) -> i32:
-    self.end - self.start
+impl Span:
+    fn len() -> i32:
+        self.end - self.start
 
-fn Span.is_valid(self: Span) -> bool:
-    self.file >= 0 and self.start >= 0 and self.end >= self.start
+    fn is_valid() -> bool:
+        self.file >= 0 and self.start >= 0 and self.end >= self.start
 
-fn Span.merge(self: Span, other: Span) -> Span:
-    Span {
-        file: self.file,
-        start: span_min_i32(self.start, other.start),
-        end: span_max_i32(self.end, other.end),
-    }
+    fn merge(other: Span) -> Span:
+        Span {
+            file: self.file,
+            start: span_min_i32(self.start, other.start),
+            end: span_max_i32(self.end, other.end),
+        }
 
 fn span_min_i32(a: i32, b: i32) -> i32:
     if a < b:

@@ -77,18 +77,19 @@ fn MirOptModule.init -> MirOptModule:
     }
 
 // No-op: reserved for future manual memory management.
-fn MirOptModule.deinit(self: MirOptModule):
-    return
+impl MirOptModule:
+    fn deinit():
+        return
 
-fn MirOptModule.add_function(self: MirOptModule, name: str) -> i32:
-    let idx = self.functions.len() as i32
-    self.functions.push(MirOptFunction.init(name))
-    idx
+    mut fn add_function(name: str):
+        let idx = self.functions.len() as i32
+        self.functions.push(MirOptFunction.init(name))
+        idx
 
-fn MirOptModule.add_type(self: MirOptModule, name: str) -> i32:
-    let idx = self.types.len() as i32
-    self.types.push(MirOptTypeDecl.init(name))
-    idx
+    mut fn add_type(name: str):
+        let idx = self.types.len() as i32
+        self.types.push(MirOptTypeDecl.init(name))
+        idx
 
 type OptSummary {
     devirtualized_calls: i32,

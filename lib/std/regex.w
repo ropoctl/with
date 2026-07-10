@@ -95,29 +95,30 @@ fn regex_compile_flags(flags: str) -> Result[RegexFlags, RegexError]:
         i = i + 1
     Ok(regex_make_flags(options, state_flags))
 
-pub fn Regex.clone(self: &Self) -> Self:
-    let copied = with_regex_code_copy(self.ptr)
-    if copied as i64 == 0:
-        with_panic("Regex.clone(): pcre2_code_copy_8 failed", "", 0)
-    Regex {
-        ptr: copied,
-        pattern_text: self.pattern_text,
-        flags_text: self.flags_text,
-        options: self.options,
-        flags: self.flags,
-        capture_count: self.capture_count,
-        owned: 1,
-        global_pos: null,
-        global_subject_ptr: null,
-        global_subject_len: null,
-    }
+impl Regex:
+    pub fn clone() -> Self:
+        let copied = with_regex_code_copy(self.ptr)
+        if copied as i64 == 0:
+            with_panic("Regex.clone(): pcre2_code_copy_8 failed", "", 0)
+        Regex {
+            ptr: copied,
+            pattern_text: self.pattern_text,
+            flags_text: self.flags_text,
+            options: self.options,
+            flags: self.flags,
+            capture_count: self.capture_count,
+            owned: 1,
+            global_pos: null,
+            global_subject_ptr: null,
+            global_subject_len: null,
+        }
 
-fn Regex.drop(move self: Self):
-    if self.owned != 0 and self.ptr as i64 != 0:
-        with_regex_code_free(self.ptr)
+    move fn drop():
+        if self.owned != 0 and self.ptr as i64 != 0:
+            with_regex_code_free(self.ptr)
 
-pub fn Regex.is_global(self: &Self) -> bool:
-    (self.flags & REGEX_FLAG_GLOBAL) != 0
+    pub fn is_global() -> bool:
+        (self.flags & REGEX_FLAG_GLOBAL) != 0
 
 pub fn Regex.compile(pattern: str) -> Result[Regex, RegexError]:
     Regex.compile_flags(pattern, "")
@@ -163,130 +164,131 @@ pub unsafe fn Regex.__literal_code(slot: *mut *const i8, pattern: str, options: 
     *slot = compiled
     compiled
 
-pub fn Regex.pattern(self: &Self) -> str:
-    self.pattern_text
+impl Regex:
+    pub fn pattern() -> str:
+        self.pattern_text
 
-pub fn Regex.num_captures(self: &Self) -> i32:
-    self.capture_count
+    pub fn num_captures() -> i32:
+        self.capture_count
 
-pub fn Regex.capture_index(self: &Self, name: str) -> Option[i32]:
-    if self.ptr as i64 == 0:
-        return None
-    let number = with_regex_group_name_to_index(self.ptr, name)
-    if number < 0:
-        return None
-    Some(number)
+    pub fn capture_index(name: str) -> Option[i32]:
+        if self.ptr as i64 == 0:
+            return None
+        let number = with_regex_group_name_to_index(self.ptr, name)
+        if number < 0:
+            return None
+        Some(number)
 
-pub fn Regex.capture_names(self: &Self) -> Vec[str]:
-    let out: Vec[str] = Vec.new()
-    if self.ptr as i64 == 0:
-        return out
-    let count = with_regex_capture_name_count(self.ptr)
-    var i: i32 = 0
-    while i < count:
-        out.push(with_regex_capture_name_at(self.ptr, i))
-        i = i + 1
-    out
+    pub fn capture_names() -> Vec[str]:
+        let out: Vec[str] = Vec.new()
+        if self.ptr as i64 == 0:
+            return out
+        let count = with_regex_capture_name_count(self.ptr)
+        var i: i32 = 0
+        while i < count:
+            out.push(with_regex_capture_name_at(self.ptr, i))
+            i = i + 1
+        out
 
-pub fn Regex.captures(self: &Self, text: str) -> Option[Captures]:
-    self.captures_at(text, 0)
+    pub fn captures(text: str) -> Option[Captures]:
+        self.captures_at(text, 0)
 
-pub fn Regex.captures_at(self: &Self, text: str, start_offset: i32) -> Option[Captures]:
-    if self.ptr as i64 == 0:
-        return None
-    var ints_count: i32 = 0
-    let raw = with_regex_match_spans_alloc_at(self.ptr, text, start_offset, &raw mut ints_count)
-    if raw as i64 == 0 or ints_count <= 0:
-        return None
-    let spans: Vec[i32] = Vec.new()
-    var i: i32 = 0
-    while i < ints_count:
-        spans.push(unsafe *((raw as i64 + i as i64 * 4) as *const i32))
-        i = i + 1
-    with_free(raw as *mut u8)
-    Some(Captures { regex_ptr: self.ptr, subject: text, spans: spans, })
+    pub fn captures_at(text: str, start_offset: i32) -> Option[Captures]:
+        if self.ptr as i64 == 0:
+            return None
+        var ints_count: i32 = 0
+        let raw = with_regex_match_spans_alloc_at(self.ptr, text, start_offset, &raw mut ints_count)
+        if raw as i64 == 0 or ints_count <= 0:
+            return None
+        let spans: Vec[i32] = Vec.new()
+        var i: i32 = 0
+        while i < ints_count:
+            spans.push(unsafe *((raw as i64 + i as i64 * 4) as *const i32))
+            i = i + 1
+        with_free(raw as *mut u8)
+        Some(Captures { regex_ptr: self.ptr, subject: text, spans: spans, })
 
-pub fn Regex.is_match(self: &Self, text: str) -> bool:
-    self.captures(text).is_some()
+    pub fn is_match(text: str) -> bool:
+        self.captures(text).is_some()
 
-pub fn Regex.captures_match_op(self: &Self, text: str) -> Option[Captures]:
-    if not self.is_global() or self.global_pos as i64 == 0 or self.global_subject_ptr as i64 == 0 or self.global_subject_len as i64 == 0:
-        return self.captures(text)
-    let subject_ptr = unsafe *(&text as *const *const u8) as i64
-    let subject_len = text.len()
-    if unsafe *self.global_subject_ptr != subject_ptr or unsafe *self.global_subject_len != subject_len:
-        unsafe *self.global_subject_ptr = subject_ptr
-        unsafe *self.global_subject_len = subject_len
-        unsafe *self.global_pos = 0
-    let start_offset = unsafe *self.global_pos
-    match self.captures_at(text, start_offset):
-        Some(captures) => {
-            match captures.get(0):
-                Some(found) => {
-                    if found.end == found.start:
-                        if found.end >= text.len() as i32:
-                            unsafe *self.global_pos = text.len() as i32 + 1
-                        else:
-                            unsafe *self.global_pos = found.end + 1
-                    else:
-                        unsafe *self.global_pos = found.end
-                    Some(captures)
-                }
-                None => {
-                    unsafe *self.global_pos = 0
-                    None
-                }
-        }
-        None => {
+    pub fn captures_match_op(text: str) -> Option[Captures]:
+        if not self.is_global() or self.global_pos as i64 == 0 or self.global_subject_ptr as i64 == 0 or self.global_subject_len as i64 == 0:
+            return self.captures(text)
+        let subject_ptr = unsafe *(&text as *const *const u8) as i64
+        let subject_len = text.len()
+        if unsafe *self.global_subject_ptr != subject_ptr or unsafe *self.global_subject_len != subject_len:
+            unsafe *self.global_subject_ptr = subject_ptr
+            unsafe *self.global_subject_len = subject_len
             unsafe *self.global_pos = 0
-            None
-        }
-
-pub fn Regex.find(self: &Self, text: str) -> Option[Match]:
-    self.find_at(text, 0)
-
-pub fn Regex.find_at(self: &Self, text: str, start_offset: i32) -> Option[Match]:
-    match self.captures_at(text, start_offset):
-        Some(captures) => captures.get(0)
-        None => None
-
-pub fn Regex.find_all(self: &Self, text: str) -> Vec[Match]:
-    let out: Vec[Match] = Vec.new()
-    var cursor: i32 = 0
-    while cursor <= text.len() as i32:
-        match self.find_at(text, cursor):
-            Some(found) => {
-                out.push(found)
-                if found.end == found.start:
-                    if found.end >= text.len() as i32:
-                        break
-                    cursor = found.end + 1
-                else:
-                    cursor = found.end
-            }
-            None => break
-    out
-
-pub fn Regex.captures_all(self: &Self, text: str) -> Vec[Captures]:
-    let out: Vec[Captures] = Vec.new()
-    var cursor: i32 = 0
-    while cursor <= text.len() as i32:
-        match self.captures_at(text, cursor):
+        let start_offset = unsafe *self.global_pos
+        match self.captures_at(text, start_offset):
             Some(captures) => {
                 match captures.get(0):
                     Some(found) => {
-                        out.push(captures)
                         if found.end == found.start:
                             if found.end >= text.len() as i32:
-                                break
-                            cursor = found.end + 1
+                                unsafe *self.global_pos = text.len() as i32 + 1
+                            else:
+                                unsafe *self.global_pos = found.end + 1
                         else:
-                            cursor = found.end
+                            unsafe *self.global_pos = found.end
+                        Some(captures)
                     }
-                    None => break
+                    None => {
+                        unsafe *self.global_pos = 0
+                        None
+                    }
             }
-            None => break
-    out
+            None => {
+                unsafe *self.global_pos = 0
+                None
+            }
+
+    pub fn find(text: str) -> Option[Match]:
+        self.find_at(text, 0)
+
+    pub fn find_at(text: str, start_offset: i32) -> Option[Match]:
+        match self.captures_at(text, start_offset):
+            Some(captures) => captures.get(0)
+            None => None
+
+    pub fn find_all(text: str) -> Vec[Match]:
+        let out: Vec[Match] = Vec.new()
+        var cursor: i32 = 0
+        while cursor <= text.len() as i32:
+            match self.find_at(text, cursor):
+                Some(found) => {
+                    out.push(found)
+                    if found.end == found.start:
+                        if found.end >= text.len() as i32:
+                            break
+                        cursor = found.end + 1
+                    else:
+                        cursor = found.end
+                }
+                None => break
+        out
+
+    pub fn captures_all(text: str) -> Vec[Captures]:
+        let out: Vec[Captures] = Vec.new()
+        var cursor: i32 = 0
+        while cursor <= text.len() as i32:
+            match self.captures_at(text, cursor):
+                Some(captures) => {
+                    match captures.get(0):
+                        Some(found) => {
+                            out.push(captures)
+                            if found.end == found.start:
+                                if found.end >= text.len() as i32:
+                                    break
+                                cursor = found.end + 1
+                            else:
+                                cursor = found.end
+                        }
+                        None => break
+                }
+                None => break
+        out
 
 fn regex_expand_numbered_capture(captures: &Captures, repl: str, start: i64, end: i64) -> str:
     var number: i32 = 0
@@ -356,177 +358,180 @@ fn regex_expand_replacement(captures: &Captures, repl: str) -> str:
         i = i + 1
     out
 
-fn Regex.replace_impl(self: &Self, text: str, repl: str, replace_all: bool) -> str:
-    var out = ""
-    var cursor: i32 = 0
-    while cursor <= text.len() as i32:
-        match self.captures_at(text, cursor):
-            Some(captures) => {
-                match captures.get(0):
-                    Some(found) => {
-                        out = out ++ with_str_slice(text, cursor as i64, found.start as i64) ++ regex_expand_replacement(&captures, repl)
-                        if not replace_all:
-                            out = out ++ with_str_slice(text, found.end as i64, text.len())
+impl Regex:
+    fn replace_impl(text: str, repl: str, replace_all: bool) -> str:
+        var out = ""
+        var cursor: i32 = 0
+        while cursor <= text.len() as i32:
+            match self.captures_at(text, cursor):
+                Some(captures) => {
+                    match captures.get(0):
+                        Some(found) => {
+                            out = out ++ with_str_slice(text, cursor as i64, found.start as i64) ++ regex_expand_replacement(&captures, repl)
+                            if not replace_all:
+                                out = out ++ with_str_slice(text, found.end as i64, text.len())
+                                break
+                            if found.end == found.start:
+                                if found.end >= text.len() as i32:
+                                    cursor = text.len() as i32 + 1
+                                else:
+                                    out = out ++ with_str_slice(text, found.start as i64, found.start as i64 + 1)
+                                    cursor = found.start + 1
+                            else:
+                                cursor = found.end
+                        }
+                        None => {
+                            out = out ++ with_str_slice(text, cursor as i64, text.len())
                             break
-                        if found.end == found.start:
-                            if found.end >= text.len() as i32:
-                                cursor = text.len() as i32 + 1
+                        }
+                }
+                None => {
+                    out = out ++ with_str_slice(text, cursor as i64, text.len())
+                    break
+                }
+        out
+
+    pub fn replace(text: str, repl: str) -> str:
+        with_regex_substitute(self.ptr, text, repl, if self.is_global(): 1 else: 0)
+
+    pub fn replace_all(text: str, repl: str) -> str:
+        with_regex_substitute(self.ptr, text, repl, 1)
+
+    pub fn replace_fn(text: str, replacement_callback: fn(&Captures) -> str) -> str:
+        var out = ""
+        var cursor: i32 = 0
+        while cursor <= text.len() as i32:
+            match self.captures_at(text, cursor):
+                Some(captures) => {
+                    match captures.get(0):
+                        Some(found) => {
+                            out = out ++ with_str_slice(text, cursor as i64, found.start as i64) ++ replacement_callback(&captures)
+                            out = out ++ with_str_slice(text, found.end as i64, text.len())
+                            return out
+                        }
+                        None => break
+                }
+                None => break
+        text
+
+    pub fn replace_all_fn(text: str, replacement_callback: fn(&Captures) -> str) -> str:
+        var out = ""
+        var cursor: i32 = 0
+        while cursor <= text.len() as i32:
+            match self.captures_at(text, cursor):
+                Some(captures) => {
+                    match captures.get(0):
+                        Some(found) => {
+                            out = out ++ with_str_slice(text, cursor as i64, found.start as i64) ++ replacement_callback(&captures)
+                            if found.end == found.start:
+                                if found.end >= text.len() as i32:
+                                    cursor = text.len() as i32 + 1
+                                else:
+                                    out = out ++ with_str_slice(text, found.start as i64, found.start as i64 + 1)
+                                    cursor = found.start + 1
                             else:
-                                out = out ++ with_str_slice(text, found.start as i64, found.start as i64 + 1)
-                                cursor = found.start + 1
-                        else:
-                            cursor = found.end
-                    }
-                    None => {
-                        out = out ++ with_str_slice(text, cursor as i64, text.len())
-                        break
-                    }
-            }
-            None => {
-                out = out ++ with_str_slice(text, cursor as i64, text.len())
-                break
-            }
-    out
+                                cursor = found.end
+                        }
+                        None => {
+                            out = out ++ with_str_slice(text, cursor as i64, text.len())
+                            return out
+                        }
+                }
+                None => {
+                    out = out ++ with_str_slice(text, cursor as i64, text.len())
+                    return out
+                }
+        out
 
-pub fn Regex.replace(self: &Self, text: str, repl: str) -> str:
-    with_regex_substitute(self.ptr, text, repl, if self.is_global(): 1 else: 0)
+    pub fn split(text: str) -> Vec[str]:
+        self.splitn(text, 0)
 
-pub fn Regex.replace_all(self: &Self, text: str, repl: str) -> str:
-    with_regex_substitute(self.ptr, text, repl, 1)
-
-pub fn Regex.replace_fn(self: &Self, text: str, replacement_callback: fn(&Captures) -> str) -> str:
-    var out = ""
-    var cursor: i32 = 0
-    while cursor <= text.len() as i32:
-        match self.captures_at(text, cursor):
-            Some(captures) => {
-                match captures.get(0):
-                    Some(found) => {
-                        out = out ++ with_str_slice(text, cursor as i64, found.start as i64) ++ replacement_callback(&captures)
-                        out = out ++ with_str_slice(text, found.end as i64, text.len())
-                        return out
-                    }
-                    None => break
-            }
-            None => break
-    text
-
-pub fn Regex.replace_all_fn(self: &Self, text: str, replacement_callback: fn(&Captures) -> str) -> str:
-    var out = ""
-    var cursor: i32 = 0
-    while cursor <= text.len() as i32:
-        match self.captures_at(text, cursor):
-            Some(captures) => {
-                match captures.get(0):
-                    Some(found) => {
-                        out = out ++ with_str_slice(text, cursor as i64, found.start as i64) ++ replacement_callback(&captures)
-                        if found.end == found.start:
-                            if found.end >= text.len() as i32:
-                                cursor = text.len() as i32 + 1
-                            else:
-                                out = out ++ with_str_slice(text, found.start as i64, found.start as i64 + 1)
-                                cursor = found.start + 1
-                        else:
-                            cursor = found.end
-                    }
-                    None => {
-                        out = out ++ with_str_slice(text, cursor as i64, text.len())
-                        return out
-                    }
-            }
-            None => {
-                out = out ++ with_str_slice(text, cursor as i64, text.len())
-                return out
-            }
-    out
-
-pub fn Regex.split(self: &Self, text: str) -> Vec[str]:
-    self.splitn(text, 0)
-
-pub fn Regex.splitn(self: &Self, text: str, n: i32) -> Vec[str]:
-    let out: Vec[str] = Vec.new()
-    var cursor: i32 = 0
-    while cursor <= text.len() as i32:
-        if n > 0 and out.len() as i32 >= n - 1:
-            out.push(with_str_slice(text, cursor as i64, text.len()))
-            return out
-        match self.find_at(text, cursor):
-            Some(found) => {
-                out.push(with_str_slice(text, cursor as i64, found.start as i64))
-                if found.end == found.start:
-                    if found.end >= text.len() as i32:
-                        cursor = text.len() as i32 + 1
-                    else:
-                        cursor = found.start + 1
-                else:
-                    cursor = found.end
-            }
-            None => {
+    pub fn splitn(text: str, n: i32) -> Vec[str]:
+        let out: Vec[str] = Vec.new()
+        var cursor: i32 = 0
+        while cursor <= text.len() as i32:
+            if n > 0 and out.len() as i32 >= n - 1:
                 out.push(with_str_slice(text, cursor as i64, text.len()))
-                break
+                return out
+            match self.find_at(text, cursor):
+                Some(found) => {
+                    out.push(with_str_slice(text, cursor as i64, found.start as i64))
+                    if found.end == found.start:
+                        if found.end >= text.len() as i32:
+                            cursor = text.len() as i32 + 1
+                        else:
+                            cursor = found.start + 1
+                    else:
+                        cursor = found.end
+                }
+                None => {
+                    out.push(with_str_slice(text, cursor as i64, text.len()))
+                    break
+                }
+        out
+
+impl Captures:
+    pub fn get(index: i32) -> Option[Match]:
+        let base = index * 2
+        if base < 0 or base + 1 >= self.spans.len() as i32:
+            return None
+        let start = self.spans.get(base as i64)
+        let end = self.spans.get((base + 1) as i64)
+        if start < 0 or end < 0:
+            return None
+        Some(Match {
+            text: with_str_slice(self.subject, start as i64, end as i64),
+            start: start,
+            end: end,
+        })
+
+    pub fn len() -> i32:
+        (self.spans.len() as i32) / 2
+
+    pub fn by_name(name: str) -> Option[Match]:
+        if self.regex_ptr as i64 == 0:
+            return None
+        let number = with_regex_group_name_to_index(self.regex_ptr, name)
+        if number < 0:
+            return None
+        self.get(number)
+
+    pub fn name(name: str) -> Option[Match]:
+        self.by_name(name)
+
+    pub fn text(index: i32) -> str:
+        match self.get(index):
+            Some(found) => found.text
+            None => ""
+
+    pub fn name_text(name: str) -> str:
+        let lookup_name = if name.len() > 0 and name.byte_at(0) == 36:
+            with_str_slice(name, 1, name.len())
+        else:
+            name
+        match self.name(lookup_name):
+            Some(found) => found.text
+            None => ""
+
+impl Regex:
+    pub fn capture_text(text: str, index: i32) -> str:
+        match self.captures(text):
+            Some(captures) => {
+                match captures.get(index):
+                    Some(found) => found.text
+                    None => ""
             }
-    out
+            None => ""
 
-pub fn Captures.get(self: &Self, index: i32) -> Option[Match]:
-    let base = index * 2
-    if base < 0 or base + 1 >= self.spans.len() as i32:
-        return None
-    let start = self.spans.get(base as i64)
-    let end = self.spans.get((base + 1) as i64)
-    if start < 0 or end < 0:
-        return None
-    Some(Match {
-        text: with_str_slice(self.subject, start as i64, end as i64),
-        start: start,
-        end: end,
-    })
-
-pub fn Captures.len(self: &Self) -> i32:
-    (self.spans.len() as i32) / 2
-
-pub fn Captures.by_name(self: &Self, name: str) -> Option[Match]:
-    if self.regex_ptr as i64 == 0:
-        return None
-    let number = with_regex_group_name_to_index(self.regex_ptr, name)
-    if number < 0:
-        return None
-    self.get(number)
-
-pub fn Captures.name(self: &Self, name: str) -> Option[Match]:
-    self.by_name(name)
-
-pub fn Captures.text(self: &Self, index: i32) -> str:
-    match self.get(index):
-        Some(found) => found.text
-        None => ""
-
-pub fn Captures.name_text(self: &Self, name: str) -> str:
-    let lookup_name = if name.len() > 0 and name.byte_at(0) == 36:
-        with_str_slice(name, 1, name.len())
-    else:
-        name
-    match self.name(lookup_name):
-        Some(found) => found.text
-        None => ""
-
-pub fn Regex.capture_text(self: &Self, text: str, index: i32) -> str:
-    match self.captures(text):
-        Some(captures) => {
-            match captures.get(index):
-                Some(found) => found.text
-                None => ""
-        }
-        None => ""
-
-pub fn Regex.capture_name_text(self: &Self, text: str, name: str) -> str:
-    let lookup_name = if name.len() > 0 and name.byte_at(0) == 36:
-        with_str_slice(name, 1, name.len())
-    else:
-        name
-    match self.captures(text):
-        Some(captures) => {
-            match captures.name(lookup_name):
-                Some(found) => found.text
-                None => ""
-        }
-        None => ""
+    pub fn capture_name_text(text: str, name: str) -> str:
+        let lookup_name = if name.len() > 0 and name.byte_at(0) == 36:
+            with_str_slice(name, 1, name.len())
+        else:
+            name
+        match self.captures(text):
+            Some(captures) => {
+                match captures.name(lookup_name):
+                    Some(found) => found.text
+                    None => ""
+            }
+            None => ""

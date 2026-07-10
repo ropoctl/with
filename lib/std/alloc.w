@@ -232,9 +232,10 @@ impl Drop for FrameArena:
 pub fn FrameArena.high_water(self: &FrameArena) -> i64:
     self.high_water_bytes
 
-pub fn Arena.scope(self: Arena) -> ArenaScope:
-    let mark = self.mark()
-    ArenaScope { arena: self, mark, allocations: 0 }
+impl Arena:
+    pub move fn scope() -> ArenaScope:
+        let mark = self.mark()
+        ArenaScope { arena: self, mark, allocations: 0 }
 
 pub fn ArenaScope.alloc(mut self: ArenaScope, size: i32) -> *i8:
     let ptr = self.arena.alloc(size)
@@ -388,4 +389,4 @@ pub unsafe fn arena_vec_push[T](xs: *mut ArenaVec[T], value: T) -> Unit:
 pub unsafe fn arena_vec_get[T](xs: *const ArenaVec[T], index: i32) -> T:
     if index < 0 or index >= (*xs).len_value:
         panic("ArenaVec index out of bounds")
-    unsafe *((*xs).ptr + (index as usize))
+    *((*xs).ptr + (index as usize))

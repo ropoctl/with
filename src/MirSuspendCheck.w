@@ -27,21 +27,22 @@ impl Copy for SuspendBits
 
 extern fn with_alloc(size: i64) -> *mut u8
 
-fn SuspendBits.vget(self: SuspendBits, idx: i64) -> i32:
-    let st = self.state
-    unsafe { st.w.get(idx) }
+impl SuspendBits:
+    fn vget(idx: i64) -> i32:
+        let st = self.state
+        unsafe { st.w.get(idx) }
 
-fn SuspendBits.vset(self: SuspendBits, idx: i32, value: i32):
-    let st = self.state
-    unsafe { st.w.set_i32(idx, value) }
+    fn vset(idx: i32, value: i32):
+        let st = self.state
+        unsafe { st.w.set_i32(idx, value) }
 
-fn SuspendBits.vlen(self: SuspendBits) -> i64:
-    let st = self.state
-    unsafe { st.w.len() }
+    fn vlen() -> i64:
+        let st = self.state
+        unsafe { st.w.len() }
 
-fn SuspendBits.vpush(self: SuspendBits, value: i32):
-    let st = self.state
-    unsafe { st.w.push(value) }
+    fn vpush(value: i32):
+        let st = self.state
+        unsafe { st.w.push(value) }
 
 fn suspend_bits_fill(count: i32, value: i32) -> SuspendBits:
     // Vec header is larger than a pointer; allocate generously like the

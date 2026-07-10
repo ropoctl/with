@@ -461,99 +461,100 @@ fn LspDocument.new(uri: str, path: str, text: str, version: i32) -> LspDocument:
     }
 
 // Fast-tier: parse-only, no imports, no sema. ~1ms.
-fn LspDocument.ensure_parsed(self: LspDocument):
-    if self.fast_valid and self.fast_text_len == self.text.len() as i32:
-        return
-    var lexer = Lexer.init(self.text, 0)
-    let tokens = lexer.tokenize()
-    var intern = InternPool.init()
-    var diags = DiagnosticList.init()
-    var parser = Parser.init(tokens, self.text, 0, intern, diags)
-    self.fast_pool = parser.parse_module()
-    self.fast_intern = parser.intern
-    self.fast_text_len = self.text.len() as i32
-    self.fast_valid = true
+impl LspDocument:
+    mut fn ensure_parsed():
+        if self.fast_valid and self.fast_text_len == self.text.len() as i32:
+            return
+        var lexer = Lexer.init(self.text, 0)
+        let tokens = lexer.tokenize()
+        var intern = InternPool.init()
+        var diags = DiagnosticList.init()
+        var parser = Parser.init(tokens, self.text, 0, intern, diags)
+        self.fast_pool = parser.parse_module()
+        self.fast_intern = parser.intern
+        self.fast_text_len = self.text.len() as i32
+        self.fast_valid = true
 
-// Slow-tier: full compilation with PRELUDE_NONE. ~50-200ms.
-fn LspDocument.ensure_analyzed(self: LspDocument):
-    if self.cache_valid and self.cached_text_len == self.text.len() as i32:
-        return
-    var comp = Compilation.init()
-    comp.set_prelude_mode(2)
-    let pool = comp.compile_source_text(self.path, self.text)
-    self.cached_pool = pool
-    self.cached_intern = comp.zcu.pool
-    self.cached_diags = comp.zcu.diagnostics
-    self.cached_decl_paths = comp.zcu.decl_source_paths
-    // Build type-at-offset map from sema's typed_expr_types.
-    // Iterate all AST nodes and check which have type info.
-    let sema = comp.zcu.last_sema
-    let typed = comp.zcu.typed_expr_types
-    self.cached_type_at = HashMap.new()
-    for ni in 0..pool.node_count():
-        let tid_opt = typed.get(ni)
-        if tid_opt.is_some():
-            let start = pool.get_start(ni as NodeId)
-            if start > 0:
-                let tname = sema.get_type_name_for_lsp(tid_opt.unwrap() as i32)
-                if tname.len() > 0:
-                    self.cached_type_at.insert(start, tname)
-    // Build trait-methods-per-type map from sema's impl tables.
-    self.cached_trait_methods = HashMap.new()
-    for ii in 0..sema.impl_type_syms.len() as i32:
-        let type_sym = sema.impl_type_syms.get(ii as i64)
-        let type_name = sema.pool_resolve(type_sym)
-        if type_name.len() == 0:
-            continue
-        let start = sema.impl_starts.get(ii as i64)
-        let count = sema.impl_counts.get(ii as i64)
-        var methods: Vec[str] = Vec.new()
-        let existing = self.cached_trait_methods.get(type_name)
-        if existing.is_some():
-            methods = existing.unwrap()
-        var ti = 0
-        while ti < count:
-            let trait_sym = sema.impl_extra.get((start + ti) as i64)
-            let trait_opt = sema.trait_lookup.get(trait_sym)
-            if trait_opt.is_some():
-                let tidx = trait_opt.unwrap()
-                if tidx >= 0 and tidx < sema.trait_method_starts.len() as i32:
-                    let mstart = sema.trait_method_starts.get(tidx as i64)
-                    let mcount = sema.trait_method_counts.get(tidx as i64)
-                    var mi = 0
-                    while mi < mcount:
-                        let msym = sema.trait_method_names.get((mstart + mi) as i64)
-                        let mname = sema.pool_resolve(msym)
-                        if mname.len() > 0:
-                            methods.push(mname)
-                        mi = mi + 1
-            ti = ti + 1
-        if methods.len() > 0:
-            self.cached_trait_methods.insert(type_name, methods)
-    self.cached_text_len = self.text.len() as i32
-    self.cache_valid = true
+    // Slow-tier: full compilation with PRELUDE_NONE. ~50-200ms.
+    mut fn ensure_analyzed():
+        if self.cache_valid and self.cached_text_len == self.text.len() as i32:
+            return
+        var comp = Compilation.init()
+        comp.set_prelude_mode(2)
+        let pool = comp.compile_source_text(self.path, self.text)
+        self.cached_pool = pool
+        self.cached_intern = comp.zcu.pool
+        self.cached_diags = comp.zcu.diagnostics
+        self.cached_decl_paths = comp.zcu.decl_source_paths
+        // Build type-at-offset map from sema's typed_expr_types.
+        // Iterate all AST nodes and check which have type info.
+        let sema = comp.zcu.last_sema
+        let typed = comp.zcu.typed_expr_types
+        self.cached_type_at = HashMap.new()
+        for ni in 0..pool.node_count():
+            let tid_opt = typed.get(ni)
+            if tid_opt.is_some():
+                let start = pool.get_start(ni as NodeId)
+                if start > 0:
+                    let tname = sema.get_type_name_for_lsp(tid_opt.unwrap() as i32)
+                    if tname.len() > 0:
+                        self.cached_type_at.insert(start, tname)
+        // Build trait-methods-per-type map from sema's impl tables.
+        self.cached_trait_methods = HashMap.new()
+        for ii in 0..sema.impl_type_syms.len() as i32:
+            let type_sym = sema.impl_type_syms.get(ii as i64)
+            let type_name = sema.pool_resolve(type_sym)
+            if type_name.len() == 0:
+                continue
+            let start = sema.impl_starts.get(ii as i64)
+            let count = sema.impl_counts.get(ii as i64)
+            var methods: Vec[str] = Vec.new()
+            let existing = self.cached_trait_methods.get(type_name)
+            if existing.is_some():
+                methods = existing.unwrap()
+            var ti = 0
+            while ti < count:
+                let trait_sym = sema.impl_extra.get((start + ti) as i64)
+                let trait_opt = sema.trait_lookup.get(trait_sym)
+                if trait_opt.is_some():
+                    let tidx = trait_opt.unwrap()
+                    if tidx >= 0 and tidx < sema.trait_method_starts.len() as i32:
+                        let mstart = sema.trait_method_starts.get(tidx as i64)
+                        let mcount = sema.trait_method_counts.get(tidx as i64)
+                        var mi = 0
+                        while mi < mcount:
+                            let msym = sema.trait_method_names.get((mstart + mi) as i64)
+                            let mname = sema.pool_resolve(msym)
+                            if mname.len() > 0:
+                                methods.push(mname)
+                            mi = mi + 1
+                ti = ti + 1
+            if methods.len() > 0:
+                self.cached_trait_methods.insert(type_name, methods)
+        self.cached_text_len = self.text.len() as i32
+        self.cache_valid = true
 
-// Find the type of an expression at a byte offset using the slow tier.
-fn LspDocument.type_at_offset(self: LspDocument, offset: i32) -> str:
-    if not self.cache_valid:
-        return ""
-    let opt = self.cached_type_at.get(offset)
-    if opt.is_some():
-        return opt.unwrap()
-    ""
+    // Find the type of an expression at a byte offset using the slow tier.
+    fn type_at_offset(offset: i32) -> str:
+        if not self.cache_valid:
+            return ""
+        let opt = self.cached_type_at.get(offset)
+        if opt.is_some():
+            return opt.unwrap()
+        ""
 
-// Get trait methods for a type via cached sema data.
-fn LspDocument.trait_methods_for_type(self: LspDocument, type_name: str) -> Vec[str]:
-    if not self.cache_valid:
-        return Vec.new()
-    let opt = self.cached_trait_methods.get(type_name)
-    if opt.is_some():
-        return opt.unwrap()
-    Vec.new()
+    // Get trait methods for a type via cached sema data.
+    fn trait_methods_for_type(type_name: str) -> Vec[str]:
+        if not self.cache_valid:
+            return Vec.new()
+        let opt = self.cached_trait_methods.get(type_name)
+        if opt.is_some():
+            return opt.unwrap()
+        Vec.new()
 
-fn LspDocument.invalidate(self: LspDocument):
-    self.cache_valid = false
-    self.fast_valid = false
+    mut fn invalidate():
+        self.cache_valid = false
+        self.fast_valid = false
 
 type LspState {
     initialized: bool,
@@ -563,35 +564,54 @@ type LspState {
 fn LspState.new() -> LspState:
     LspState { initialized: false, documents: Vec.new() }
 
-fn LspState.find_doc(self: LspState, uri: str) -> i32:
-    for i in 0..self.documents.len() as i32:
-        if self.documents.get(i as i64).uri == uri:
-            return i
-    -1
+impl LspState:
+    fn find_doc(uri: str) -> i32:
+        for i in 0..self.documents.len() as i32:
+            if self.documents.get(i as i64).uri == uri:
+                return i
+        -1
 
-fn LspState.get_parsed(self: LspState, uri: str, text: str) -> LspParseResult:
-    let idx = self.find_doc(uri)
-    if idx >= 0:
-        self.documents.get(idx as i64).ensure_parsed()
-        let doc = self.documents.get(idx as i64)
-        if doc.fast_valid:
-            return LspParseResult { pool: doc.fast_pool, intern: doc.fast_intern }
-    lsp_parse_file(text)
+    mut fn ensure_doc_parsed(idx: i32):
+        if idx < 0:
+            return
+        var doc = self.documents.get(idx as i64)
+        doc.ensure_parsed()
+        let slot_idx = idx as i64
+        with self.documents.slot(slot_idx) as mut slot:
+            slot.set(doc)
 
-fn LspState.set_doc(self: LspState, uri: str, text: str, version: i32):
-    let idx = self.find_doc(uri)
-    if idx < 0:
-        self.documents.push(LspDocument.new(uri, uri_to_path(uri), text, version))
-        return
-    // Update text and invalidate cache
-    let new_docs: Vec[LspDocument] = Vec.new()
-    for i in 0..self.documents.len() as i32:
-        if i == idx:
-            var doc = LspDocument.new(uri, uri_to_path(uri), text, version)
-            new_docs.push(doc)
-        else:
-            new_docs.push(self.documents.get(i as i64))
-    self.documents = new_docs
+    mut fn ensure_doc_analyzed(idx: i32):
+        if idx < 0:
+            return
+        var doc = self.documents.get(idx as i64)
+        doc.ensure_analyzed()
+        let slot_idx = idx as i64
+        with self.documents.slot(slot_idx) as mut slot:
+            slot.set(doc)
+
+    mut fn get_parsed(uri: str, text: str) -> LspParseResult:
+        let idx = self.find_doc(uri)
+        if idx >= 0:
+            self.ensure_doc_parsed(idx)
+            let doc = self.documents.get(idx as i64)
+            if doc.fast_valid:
+                return LspParseResult { pool: doc.fast_pool, intern: doc.fast_intern }
+        lsp_parse_file(text)
+
+    mut fn set_doc(uri: str, text: str, version: i32):
+        let idx = self.find_doc(uri)
+        if idx < 0:
+            self.documents.push(LspDocument.new(uri, uri_to_path(uri), text, version))
+            return
+        // Update text and invalidate cache
+        let new_docs: Vec[LspDocument] = Vec.new()
+        for i in 0..self.documents.len() as i32:
+            if i == idx:
+                var doc = LspDocument.new(uri, uri_to_path(uri), text, version)
+                new_docs.push(doc)
+            else:
+                new_docs.push(self.documents.get(i as i64))
+        self.documents = new_docs
 
 fn uri_to_path(uri: str) -> str:
     if uri.starts_with("file://"):
@@ -635,10 +655,10 @@ fn lsp_line_col_to_offset(text: str, line: i32, col: i32) -> i32:
 
 // ── Diagnostics ──────────────────────────────────────────────
 
-fn lsp_publish_diagnostics(state: &LspState, uri: str, text: str):
+fn lsp_publish_diagnostics(state: LspState, uri: str, text: str):
     let idx = state.find_doc(uri)
     if idx >= 0:
-        state.documents.get(idx as i64).ensure_analyzed()
+        state.ensure_doc_analyzed(idx)
 
     // Use cached diagnostics if available
     var dl = DiagnosticList.init()
@@ -674,7 +694,7 @@ fn lsp_publish_diagnostics(state: &LspState, uri: str, text: str):
 
 // ── Go to definition ─────────────────────────────────────────
 
-fn lsp_definition(id: i32, state: &LspState, uri: str, text: str, line: i32, col: i32):
+fn lsp_definition(id: i32, state: LspState, uri: str, text: str, line: i32, col: i32):
     let offset = lsp_line_col_to_offset(text, line, col)
 
     var lexer = Lexer.init(text, 0)
@@ -693,7 +713,7 @@ fn lsp_definition(id: i32, state: &LspState, uri: str, text: str, line: i32, col
     // Try slow tier first (cross-file via decl_source_paths)
     let idx = state.find_doc(uri)
     if idx >= 0:
-        state.documents.get(idx as i64).ensure_analyzed()
+        state.ensure_doc_analyzed(idx)
     var slow_pool = AstPool.new()
     var slow_intern = InternPool.init()
     var slow_paths: Vec[str] = Vec.new()
@@ -781,7 +801,7 @@ fn lsp_extract_doc_comment(text: str, decl_start: i32) -> str:
         i = i - 1
     result
 
-fn lsp_hover(id: i32, state: &LspState, uri: str, text: str, line: i32, col: i32):
+fn lsp_hover(id: i32, state: LspState, uri: str, text: str, line: i32, col: i32):
     let offset = lsp_line_col_to_offset(text, line, col)
 
     var lexer = Lexer.init(text, 0)
@@ -799,7 +819,7 @@ fn lsp_hover(id: i32, state: &LspState, uri: str, text: str, line: i32, col: i32
 
     let idx = state.find_doc(uri)
     if idx >= 0:
-        state.documents.get(idx as i64).ensure_analyzed()
+        state.ensure_doc_analyzed(idx)
     var pool = AstPool.new()
     var intern = InternPool.init()
     if idx >= 0 and state.documents.get(idx as i64).cache_valid:
@@ -852,7 +872,7 @@ fn lsp_hover(id: i32, state: &LspState, uri: str, text: str, line: i32, col: i32
 
 // ── Dot completion ───────────────────────────────────────────
 
-fn lsp_dot_completion(id: i32, state: &LspState, uri: str, text: str, offset: i32, dot_pos: i32):
+fn lsp_dot_completion(id: i32, state: LspState, uri: str, text: str, offset: i32, dot_pos: i32):
     // Find the receiver identifier before the dot
     var recv_end = dot_pos
     var recv_start = recv_end - 1
@@ -971,29 +991,13 @@ fn lsp_dot_completion(id: i32, state: &LspState, uri: str, text: str, offset: i3
                     continue
                 if parsed.intern.resolve(parsed.pool.get_data0(tdecl)) != trait_name:
                     continue
-                // Walk trait methods from extra data
-                let tes = parsed.pool.get_data1(tdecl)
-                let tp_count = parsed.pool.get_extra(tes)
-                // Skip type params: tes+1 = tp_start (unused here)
-                var tpos = tes + 2
-                // Skip associated types
-                let assoc_count = parsed.pool.get_extra(tpos)
-                tpos = tpos + 1
-                var ai = 0
-                while ai < assoc_count:
-                    tpos = tpos + 1  // name
-                    let bc = parsed.pool.get_extra(tpos)
-                    tpos = tpos + 1 + bc + 1  // bounds + default
-                    ai = ai + 1
-                let method_count = parsed.pool.get_extra(tpos)
-                tpos = tpos + 1
+                let method_count = parsed.pool.trait_method_count(tdecl)
                 for mi in 0..method_count:
-                    let mname = parsed.intern.resolve(parsed.pool.get_extra(tpos))
+                    let mname = parsed.intern.resolve(parsed.pool.trait_method_field(tdecl, mi, TRAIT_METHOD_NAME))
                     if mname.len() > 0:
                         if not first: items = items ++ ","
                         first = false
                         items = items ++ jobj_start() ++ jkv_str("label", mname) ++ "," ++ jkv_int("kind", 2) ++ jobj_end()
-                    tpos = tpos + 6  // name, flags, param_start, param_count, ret_type, body
                 break
         // Sema-based trait methods from slow tier (includes imported traits)
         let cidx = state.find_doc(uri)
@@ -1108,7 +1112,7 @@ fn lsp_type_node_to_name(pool: AstPool, intern: InternPool, type_node: i32) -> s
 
 // ── Completion ───────────────────────────────────────────────
 
-fn lsp_completion(id: i32, state: &LspState, uri: str, text: str, line: i32, col: i32):
+fn lsp_completion(id: i32, state: LspState, uri: str, text: str, line: i32, col: i32):
     let offset = lsp_line_col_to_offset(text, line, col)
 
     // Find the line text up to cursor to detect context
@@ -1157,7 +1161,7 @@ fn lsp_completion(id: i32, state: &LspState, uri: str, text: str, line: i32, col
     // Get cached analysis
     let cidx = state.find_doc(uri)
     if cidx >= 0:
-        state.documents.get(cidx as i64).ensure_analyzed()
+        state.ensure_doc_analyzed(cidx)
     var pool = AstPool.new()
     var intern = InternPool.init()
     if cidx >= 0 and state.documents.get(cidx as i64).cache_valid:
@@ -1475,7 +1479,7 @@ fn lsp_keywords() -> Vec[str]:
 
 // ── Signature help ───────────────────────────────────────────
 
-fn lsp_signature_help(id: i32, state: &LspState, uri: str, text: str, line: i32, col: i32):
+fn lsp_signature_help(id: i32, state: LspState, uri: str, text: str, line: i32, col: i32):
     let offset = lsp_line_col_to_offset(text, line, col)
 
     // Walk tokens backward from cursor to find the opening ( and function name.
@@ -1576,7 +1580,7 @@ fn lsp_signature_help(id: i32, state: &LspState, uri: str, text: str, line: i32,
 
 // ── Find references ──────────────────────────────────────────
 
-fn lsp_find_references(id: i32, state: &LspState, uri: str, text: str, line: i32, col: i32):
+fn lsp_find_references(id: i32, state: LspState, uri: str, text: str, line: i32, col: i32):
     let offset = lsp_line_col_to_offset(text, line, col)
 
     // Find the identifier at cursor
@@ -1650,7 +1654,7 @@ fn lsp_find_references(id: i32, state: &LspState, uri: str, text: str, line: i32
         return
     let idx = state.find_doc(uri)
     if idx >= 0:
-        state.documents.get(idx as i64).ensure_analyzed()
+        state.ensure_doc_analyzed(idx)
     var cached_paths: Vec[str] = Vec.new()
     if idx >= 0 and state.documents.get(idx as i64).cache_valid:
         cached_paths = state.documents.get(idx as i64).cached_decl_paths
@@ -1690,10 +1694,10 @@ fn lsp_find_references(id: i32, state: &LspState, uri: str, text: str, line: i32
 
 // ── Document symbols ─────────────────────────────────────────
 
-fn lsp_document_symbols(id: i32, state: &LspState, uri: str, text: str):
+fn lsp_document_symbols(id: i32, state: LspState, uri: str, text: str):
     let idx = state.find_doc(uri)
     if idx >= 0:
-        state.documents.get(idx as i64).ensure_analyzed()
+        state.ensure_doc_analyzed(idx)
     var pool = AstPool.new()
     var intern = InternPool.init()
     if idx >= 0 and state.documents.get(idx as i64).cache_valid:
@@ -1756,7 +1760,7 @@ fn lsp_is_valid_ident(name: str) -> bool:
             return false
     true
 
-fn lsp_rename(id: i32, state: &LspState, uri: str, text: str, line: i32, col: i32, new_name: str):
+fn lsp_rename(id: i32, state: LspState, uri: str, text: str, line: i32, col: i32, new_name: str):
     let offset = lsp_line_col_to_offset(text, line, col)
 
     // Find the identifier at cursor
@@ -1807,7 +1811,7 @@ fn lsp_rename(id: i32, state: &LspState, uri: str, text: str, line: i32, col: i3
     // Cross-file edits via cached decl_source_paths
     let cidx = state.find_doc(uri)
     if cidx >= 0:
-        state.documents.get(cidx as i64).ensure_analyzed()
+        state.ensure_doc_analyzed(cidx)
     var cached_paths: Vec[str] = Vec.new()
     if cidx >= 0 and state.documents.get(cidx as i64).cache_valid:
         cached_paths = state.documents.get(cidx as i64).cached_decl_paths
@@ -1913,8 +1917,8 @@ fn run_lsp() -> i32:
             // Proactive: parse + analyze so subsequent requests hit cache
             let oi = state.find_doc(uri)
             if oi >= 0:
-                state.documents.get(oi as i64).ensure_parsed()
-                state.documents.get(oi as i64).ensure_analyzed()
+                state.ensure_doc_parsed(oi)
+                state.ensure_doc_analyzed(oi)
             lsp_publish_diagnostics(state, uri, text)
 
         else if method == "textDocument/didChange":
@@ -1935,7 +1939,7 @@ fn run_lsp() -> i32:
             let idx = state.find_doc(uri)
             if idx >= 0:
                 // Re-analyze on save (slow tier refreshes cross-file data)
-                state.documents.get(idx as i64).ensure_analyzed()
+                state.ensure_doc_analyzed(idx)
                 let doc = state.documents.get(idx as i64)
                 lsp_publish_diagnostics(state, uri, doc.text)
 

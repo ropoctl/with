@@ -6,9 +6,9 @@ trait Shape:    fn area(self:
 type Circle { radius: i32 }
 type Rect { width: i32, height: i32 }
 
-impl Shape for Circle:    fn area(self: Circle) -> i32:
+impl Shape for Circle:    fn area(self: &Self) -> i32:
     self.radius * self.radius * 3
-impl Shape for Rect:    fn area(self: Rect) -> i32:
+impl Shape for Rect:    fn area(self: &Self) -> i32:
     self.width * self.height
 
 fn describe(s: dyn Shape) -> i32:

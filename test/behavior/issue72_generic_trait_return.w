@@ -6,7 +6,7 @@ trait Source[T]:
 type NumSource {}
 
 impl Source[i32] for NumSource:    fn next(self:
-    NumSource) -> Option[i32]:
+    &Self) -> Option[i32]:
         Some(7)
 
 fn main:

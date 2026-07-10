@@ -1,20 +1,24 @@
-// tools/relocate_methods.w — D7 P3: relocate top-level instance methods into impl
+// Built-in D7 receiver migration: relocate top-level instance methods into impl
 // blocks. A top-level `fn Type.method(self: ...)` is "static by location" under
 // D7; to become an implicit-self instance method it must move into an
 // `impl Type:` (or `impl[Tp] Type[Args]:`) block, dropping `self` for the keyword
 // form. Associated functions (`fn Type.make()` — no `self`) stay at top level.
 //
-// Uses the compiler's Lexer for token-accurate identification. Comments are
+// Sema selects top-level instance declarations and their finalized receiver
+// modes. The compiler's Lexer is then used for token-accurate rewriting. Comments are
 // whitespace to the lexer, so gaps between methods carry no tokens: a same-target
 // run of methods (only comments/blanks between them) groups under one impl header,
 // and their inter-method comments are re-indented into the block. A method whose
 // type params are not all bound by its receiver (e.g. `Vec.map[T, U]` on `Vec[T]`)
 // is SKIPPED and reported, never silently mis-moved.
 //
-//   with run tools/relocate_methods.w --report src/Foo.w      # dry-run, list targets
-//   with run tools/relocate_methods.w src/Foo.w lib/std/x.w   # rewrite in place
+//   with run tools/relocate_methods.w --report src/main.w     # whole-project proof
+//   with run tools/relocate_methods.w --list src/main.w       # include every target
+//   with run tools/relocate_methods.w --apply src/main.w      # rewrite selected files
 
 use std.process
+use AnalysisTypes
+use compiler.Compilation
 use Lexer
 use Token
 
@@ -106,8 +110,42 @@ fn count_args(inner: str) -> i32:
         i = i + 1
     segs
 
-fn relocate_file(path: str, report_only: bool) -> i32:
-    let text = unsafe { with_fs_read_file(path) }
+type RelocationFacts {
+    paths: Vec[str],
+    starts: Vec[i32],
+    ends: Vec[i32],
+    modes: Vec[i32],
+    matched: Vec[i32],
+}
+
+fn local_source_path(path: str):
+    let embedded = "<embedded-std>/"
+    if path.starts_with(embedded): "lib/" ++ slice(path, embedded.len() as i32, path.len() as i32) else: path
+
+fn compiler_relocation_facts(entry: str) -> RelocationFacts:
+    let result = compiler_analyze_file(entry, "select:kind=declaration")
+    let facts = RelocationFacts { paths: Vec.new(), starts: Vec.new(), ends: Vec.new(), modes: Vec.new(), matched: Vec.new() }
+    for i in 0..result.report.facts.len() as i32:
+        let fact = result.report.facts.get(i as i64)
+        if fact.kind != AnalysisFactKind.Declaration: continue
+        if fact.flags & (AnalysisDeclarationFlag.TopLevelMethod as i32) == 0: continue
+        let mode = fact.flags & 255
+        if mode != AnalysisReceiverMode.Read as i32 and mode != AnalysisReceiverMode.Mut as i32 and mode != AnalysisReceiverMode.Move as i32: continue
+        if fact.flags & (AnalysisDeclarationFlag.ExplicitReceiver as i32) == 0: continue
+        facts.paths.push(local_source_path(fact.path))
+        facts.starts.push(fact.start)
+        facts.ends.push(fact.end)
+        facts.modes.push(mode)
+        facts.matched.push(0)
+    facts
+
+fn relocation_fact_at(facts: &RelocationFacts, path: str, offset: i32) -> i32:
+    for i in 0..facts.starts.len() as i32:
+        if facts.paths.get(i as i64) == path and offset >= facts.starts.get(i as i64) and offset < facts.ends.get(i as i64): return i
+    -1
+
+fn relocate_file(path: str, semantic: &RelocationFacts, apply: bool, list_methods: bool) -> i32:
+    let text = with_fs_read_file(path)
     let tlen = text.len() as i32
     if tlen == 0:
         return 0
@@ -140,7 +178,10 @@ fn relocate_file(path: str, report_only: bool) -> i32:
         var reloc = false
         if fn_tok < n and tokens.get_tag(fn_tok) == TokenKind.TK_KW_FN:
             let ti = fn_tok + 1
-            if ti + 2 < n and tokens.get_tag(ti) == TokenKind.TK_IDENT and tokens.get_tag(ti + 1) == TokenKind.TK_DOT and tokens.get_tag(ti + 2) == TokenKind.TK_IDENT:
+            // Parser method names accept identifiers or keywords. Sema's exact
+            // declaration span is the authority; here only the `Type . name`
+            // token shape matters.
+            if ti + 2 < n and tokens.get_tag(ti) == TokenKind.TK_IDENT and tokens.get_tag(ti + 1) == TokenKind.TK_DOT:
                 reloc = true
 
         if not reloc:
@@ -190,19 +231,35 @@ fn relocate_file(path: str, report_only: bool) -> i32:
 
         // first param must be `[mut|move] self`
         var fp = k + 1
-        var mode_kw = ""
+        var source_mode = AnalysisReceiverMode.Read as i32
         var param_start = tokens.get_start(fp)
         var self_tok = fp
         if fp < n and tokens.get_tag(fp) == TokenKind.TK_KW_MUT:
-            mode_kw = "mut "
+            source_mode = AnalysisReceiverMode.Mut as i32
             self_tok = fp + 1
         else if fp < n and tokens.get_tag(fp) == TokenKind.TK_KW_MOVE:
-            mode_kw = "move "
+            source_mode = AnalysisReceiverMode.Move as i32
             self_tok = fp + 1
         if self_tok >= n or tokens.get_tag(self_tok) != TokenKind.TK_IDENT or slice(text, tokens.get_start(self_tok), tokens.get_end(self_tok)) != "self":
             open_header = ""
             i = i + 1
             continue
+
+        let semantic_index = relocation_fact_at(semantic, path, fn_pos)
+        if semantic_index < 0:
+            skipped = skipped + 1
+            open_header = ""
+            i = i + 1
+            continue
+        if semantic.matched.get(semantic_index as i64) != 0:
+            print(f"error: {path}: duplicate relocation match at byte {fn_pos}")
+            return -1
+        semantic.matched.set_i32(semantic_index as i64, 1)
+        let mode = semantic.modes.get(semantic_index as i64)
+        if source_mode != mode:
+            print(f"error: {path}: source/compiler receiver mode mismatch at byte {fn_pos}")
+            return -1
+        let mode_kw = if mode == AnalysisReceiverMode.Mut as i32: "mut " else if mode == AnalysisReceiverMode.Move as i32: "move " else: ""
 
         // receiver type: after `self :` to top-level `,`/`)`
         var rt = self_tok + 1
@@ -290,11 +347,15 @@ fn relocate_file(path: str, report_only: bool) -> i32:
                 let target_args = slice(target, ta + 1, tb)
                 if count_args(tp_inner) != count_args(target_args):
                     ok = false
+        // A legacy top-level `Type.method` was globally inherent regardless of
+        // its source file. Preserve that semantic identity with `impl`; `extend`
+        // is module-scoped and would silently narrow method visibility.
         let header = f"impl{tp_decl} {target}:"
 
-        if report_only:
-            let flag = if ok: "" else: "  [SKIP: complex type params]"
-            print(f"  {type_name}.{slice(text, name_start, tokens.get_end(type_idx + 2))}  {header}{flag}")
+        if not apply:
+            if list_methods:
+                let flag = if ok: "" else: "  [SKIP: complex type params]"
+                print(f"  {type_name}.{slice(text, name_start, tokens.get_end(type_idx + 2))}  {header}{flag}")
             if ok:
                 count = count + 1
             else:
@@ -332,32 +393,122 @@ fn relocate_file(path: str, report_only: bool) -> i32:
         count = count + 1
         i = j
 
-    if report_only:
+    for fi in 0..semantic.matched.len() as i32:
+        if semantic.paths.get(fi as i64) == path and semantic.matched.get(fi as i64) == 0:
+            print(f"error: {path}: compiler-selected declaration at byte {semantic.starts.get(fi as i64)} was not structurally matched")
+            return -1
+
+    if not apply:
         if count > 0 or skipped > 0:
             print(f"{path}: {count} relocatable, {skipped} skipped")
+        if skipped > 0: return -1
         return count
 
+    if skipped > 0:
+        print(f"error: {path}: {skipped} methods have unbound/complex type parameters; file left unchanged")
+        return -1
     if count == 0:
         return 0
     chunks.push(slice(text, cursor, tlen))    // tail
-    let _ = unsafe { with_fs_write_file(path, chunks.join("")) }
-    if skipped > 0:
-        print(f"{path}: relocated {count}, SKIPPED {skipped} (complex type params — left at top level)")
-    else:
-        print(f"{path}: relocated {count}")
+    if with_fs_write_file(path, chunks.join("")) != 0:
+        print("error: failed to write " ++ path)
+        return -1
+    print(f"{path}: relocated {count}")
     count
 
-fn main:
+fn path_excluded(path: str, excludes: &Vec[str]) -> bool:
+    for i in 0..excludes.len() as i32:
+        let excluded = excludes.get(i as i64)
+        if path == excluded or path.starts_with(excluded ++ "/"): return true
+    false
+
+fn unique_relocation_paths(facts: &RelocationFacts, excludes: &Vec[str]) -> Vec[str]:
+    let paths: Vec[str] = Vec.new()
+    for i in 0..facts.paths.len() as i32:
+        let path = facts.paths.get(i as i64)
+        if path_excluded(path, excludes): continue
+        var seen = false
+        for pi in 0..paths.len() as i32:
+            if paths.get(pi as i64) == path:
+                seen = true
+                break
+        if not seen: paths.push(path)
+    paths
+
+fn count_selected(facts: &RelocationFacts, excludes: &Vec[str]) -> i32:
+    var count = 0
+    for i in 0..facts.paths.len() as i32:
+        if not path_excluded(facts.paths.get(i as i64), excludes): count = count + 1
+    count
+
+fn verify_all_matched(facts: &RelocationFacts, excludes: &Vec[str]) -> bool:
+    for i in 0..facts.matched.len() as i32:
+        if path_excluded(facts.paths.get(i as i64), excludes): continue
+        if facts.matched.get(i as i64) == 0:
+            print(f"error: {facts.paths.get(i as i64)}: compiler-selected declaration at byte {facts.starts.get(i as i64)} was not processed")
+            return false
+    true
+
+fn reset_matches(facts: &RelocationFacts):
+    for i in 0..facts.matched.len() as i32: facts.matched.set_i32(i as i64, 0)
+
+pub fn run_receiver_migration -> i32:
     let argv = args()
     if argv.len() < 2:
-        print("usage: relocate_methods [--report] <file.w> [file.w ...]")
+        print("usage: relocate_methods [--report|--list|--apply] [--exclude path ...] <entry.w>")
         exit_code(1)
-    var report_only = false
-    var start = 1
-    if argv.get(1) == "--report":
-        report_only = true
-        start = 2
-    var total = 0
-    for i in start..argv.len() as i32:
-        total = total + relocate_file(argv.get(i as i64), report_only)
-    print(f"total: {total} methods")
+    var apply = false
+    var list_methods = false
+    let excludes: Vec[str] = Vec.new()
+    var entry = ""
+    var arg = 2
+    while arg < argv.len() as i32:
+        if argv.get(arg as i64) == "--apply":
+            apply = true
+        else if argv.get(arg as i64) == "--report":
+            apply = false
+        else if argv.get(arg as i64) == "--list":
+            list_methods = true
+        else if argv.get(arg as i64) == "--exclude":
+            if arg + 1 >= argv.len() as i32:
+                print("error: --exclude requires a file path")
+                exit_code(1)
+            arg = arg + 1
+            excludes.push(argv.get(arg as i64))
+        else:
+            if entry.len() > 0:
+                print("error: exactly one semantic entry file is required")
+                exit_code(1)
+            entry = argv.get(arg as i64)
+        arg = arg + 1
+    if entry.len() == 0:
+        print("error: no semantic entry file supplied")
+        exit_code(1)
+    let facts = compiler_relocation_facts(entry)
+    let paths = unique_relocation_paths(&facts, &excludes)
+    let selected = count_selected(&facts, &excludes)
+    // Always complete a no-write structural preflight over the whole semantic
+    // selection before the first file can be changed.
+    var preflight = 0
+    for i in 0..paths.len() as i32:
+        let changed = relocate_file(paths.get(i as i64), &facts, false, list_methods)
+        if changed < 0: exit_code(1)
+        preflight = preflight + changed
+    if not verify_all_matched(&facts, &excludes): exit_code(1)
+    if preflight != selected:
+        print(f"error: compiler selected {selected} methods but the rewriter matched {preflight}")
+        exit_code(1)
+    if not apply:
+        print(f"receiver-relocation: selected={selected} matched={preflight} files={paths.len() as i32} mode=report")
+        return 0
+    reset_matches(&facts)
+    var changed_total = 0
+    for i in 0..paths.len() as i32:
+        let changed = relocate_file(paths.get(i as i64), &facts, true, false)
+        if changed < 0: exit_code(1)
+        changed_total = changed_total + changed
+    if not verify_all_matched(&facts, &excludes) or changed_total != selected:
+        print(f"error: apply phase changed {changed_total} of {selected} selected methods")
+        exit_code(1)
+    print(f"receiver-relocation: selected={selected} matched={preflight} changed={changed_total} files={paths.len() as i32} mode=apply")
+    0

@@ -1,7 +1,7 @@
 //! expect-error: use of moved value
 type Resource { id: i32 }
 
-fn Resource.drop(self: Resource):
+fn Resource.drop(self: &Self):
     0
 
 fn apply(f: fn(i32) -> i32, x: i32) -> i32: f(x)

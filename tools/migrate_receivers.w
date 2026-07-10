@@ -1,4 +1,4 @@
-// tools/migrate_receivers.w — D7 eliminate-self receiver migrator (standalone).
+// D7 eliminate-self syntax migration driven by live compiler declaration facts.
 //
 // Rewrites in-place receiver methods declared inside impl/extend/trait blocks:
 //   fn get(self: &Self) -> T    =>   fn get() -> T
@@ -14,31 +14,58 @@
 // trait dictates the receiver, so read borrows there keep the explicit `self`.
 // `mut fn`/`move fn` synthesize regardless, so those migrate in any block.
 //
-// Accurate because it tokenizes with the compiler's own Lexer, so comments and
-// strings are never mistaken for code. Always re-run the gate afterward — the
-// migration is only correct if the tree still builds byte-identically.
+// Sema selects valid declarations and receiver modes. The Lexer is used only to
+// locate exact byte ranges inside those compiler-proven declaration spans.
 //
 //   with run tools/migrate_receivers.w lib/std/rc.w lib/std/box.w ...
+//   with run tools/migrate_receivers.w --exclude test/negative.w test examples
 
 use std.process
+use AnalysisTypes
+use compiler.Compilation
 use Lexer
 use Token
 
 extern fn with_fs_read_file(path: str) -> str
+extern fn with_fs_list_files(path: str) -> str
 extern fn with_fs_write_file(path: str, data: str) -> i32
 
-// 0-based column of a byte offset (distance from the start of its line, 10 = '\n').
-fn col_of(text: str, offset: i32):
-    var j = offset - 1
-    while j >= 0 and (text.byte_at(j as i64) as i32) != 10:
-        j = j - 1
-    offset - (j + 1)
+fn slice(text: str, start: i32, end: i32): text.slice(start as i64, end as i64)
+
+type ReceiverDeclFacts {
+    starts: Vec[i32],
+    ends: Vec[i32],
+    modes: Vec[i32],
+    flags: Vec[i32],
+}
+
+fn compiler_receiver_decls(path: str) -> ReceiverDeclFacts:
+    let result = compiler_analyze_file(path, "select:kind=declaration")
+    let facts = ReceiverDeclFacts { starts: Vec.new(), ends: Vec.new(), modes: Vec.new(), flags: Vec.new() }
+    for i in 0..result.report.facts.len() as i32:
+        let fact = result.report.facts.get(i as i64)
+        if fact.kind != AnalysisFactKind.Declaration or fact.path != path: continue
+        let mode = fact.flags & 255
+        if mode != AnalysisReceiverMode.Read as i32 and mode != AnalysisReceiverMode.Mut as i32 and mode != AnalysisReceiverMode.Move as i32: continue
+        if fact.flags & (AnalysisDeclarationFlag.InImpl as i32) == 0: continue
+        if fact.flags & (AnalysisDeclarationFlag.ExplicitReceiver as i32) == 0: continue
+        facts.starts.push(fact.start)
+        facts.ends.push(fact.end)
+        facts.modes.push(mode)
+        facts.flags.push(fact.flags)
+    facts
+
+fn receiver_fact_at(facts: &ReceiverDeclFacts, offset: i32) -> i32:
+    for i in 0..facts.starts.len() as i32:
+        if offset >= facts.starts.get(i as i64) and offset < facts.ends.get(i as i64): return i
+    -1
 
 fn migrate_file(path: str) -> i32:
     let text = unsafe { with_fs_read_file(path) }
     let tlen = text.len() as i32
     if tlen == 0:
         return 0
+    let declarations = compiler_receiver_decls(path)
     var lexer = Lexer.init(text, 0)
     let tokens = lexer.tokenize()
     let n = tokens.len()
@@ -48,32 +75,10 @@ fn migrate_file(path: str) -> i32:
     var ends: Vec[i32] = Vec.new()
     var repls: Vec[str] = Vec.new()
 
-    // Track the enclosing block: 0 = top level, 1 = inherent impl / extend,
-    // 2 = trait def or trait impl (`impl T for U`). Read-borrow `self` is only
-    // synthesized inside an inherent impl/extend (D7 P2), so a plain read method
-    // migrates only when block_kind == 1; `mut`/`move fn` synthesize anywhere.
-    var block_kind = 0
-    var block_col = -1
+    var failures = 0
     var i = 0
     while i < n:
         let tag_i = tokens.get_tag(i)
-        if tag_i == TokenKind.TK_KW_IMPL or tag_i == TokenKind.TK_KW_EXTEND or tag_i == TokenKind.TK_KW_TRAIT:
-            block_col = col_of(text, tokens.get_start(i))
-            if tag_i == TokenKind.TK_KW_TRAIT:
-                block_kind = 2
-            else if tag_i == TokenKind.TK_KW_EXTEND:
-                block_kind = 1
-            else:
-                // `impl` is a trait impl iff a `for` appears on its header line.
-                block_kind = 1
-                var c = i + 1
-                while c < n and tokens.get_tag(c) != TokenKind.TK_NEWLINE:
-                    if tokens.get_tag(c) == TokenKind.TK_KW_FOR:
-                        block_kind = 2
-                        break
-                    c = c + 1
-            i = i + 1
-            continue
         if tag_i != TokenKind.TK_KW_FN:
             i = i + 1
             continue
@@ -118,11 +123,19 @@ fn migrate_file(path: str) -> i32:
         if text.slice(tokens.get_start(p) as i64, tokens.get_end(p) as i64) != "self":
             i = i + 1
             continue
-        // A read borrow only synthesizes inside an inherent impl/extend (D7 P2);
-        // in a trait def/impl or at top level, leave the explicit `self` alone.
-        // `mut`/`move fn` synthesize regardless, so they migrate anywhere.
-        let here_kind = if col_of(text, fn_pos) > block_col: block_kind else: 0
-        if mode == 0 and here_kind != 1:
+        let fact_index = receiver_fact_at(&declarations, fn_pos)
+        if fact_index < 0:
+            i = i + 1
+            continue
+        let declared_mode = declarations.modes.get(fact_index as i64)
+        let trait_impl = declarations.flags.get(fact_index as i64) & (AnalysisDeclarationFlag.TraitImpl as i32) != 0
+        if declared_mode == AnalysisReceiverMode.Read as i32 and trait_impl:
+            i = i + 1
+            continue
+        let syntax_mode = if mode == 2: AnalysisReceiverMode.Mut as i32 else if mode == 3: AnalysisReceiverMode.Move as i32 else: AnalysisReceiverMode.Read as i32
+        if syntax_mode != declared_mode:
+            print(f"error: {path}: receiver syntax/compiler mode mismatch at byte {fn_pos}")
+            failures = failures + 1
             i = i + 1
             continue
 
@@ -164,6 +177,9 @@ fn migrate_file(path: str) -> i32:
         repls.push("")
         i = q
 
+    if failures != 0:
+        print(f"error: {path}: {failures} receiver declarations failed semantic preflight; file left unchanged")
+        return -1
     let m = starts.len() as i32
     if m == 0:
         return 0
@@ -183,16 +199,56 @@ fn migrate_file(path: str) -> i32:
     let _ = unsafe { with_fs_write_file(path, result) }
     methods
 
+fn path_excluded(path: str, excludes: &Vec[str]) -> bool:
+    for i in 0..excludes.len() as i32:
+        if path == excludes.get(i as i64): return true
+    false
+
+fn migrate_path(path: str, excludes: &Vec[str]) -> i32:
+    if path_excluded(path, excludes): return 0
+    if path.ends_with(".w"):
+        let changed = migrate_file(path)
+        if changed > 0: print(f"migrated {path}: {changed} receiver methods")
+        return changed
+    let listing = unsafe { with_fs_list_files(path) }
+    var total = 0
+    var start = 0
+    for i in 0..listing.len() as i32 + 1:
+        if i != listing.len() as i32 and listing.byte_at(i as i64) as i32 != 10: continue
+        if i > start:
+            let file = slice(listing, start, i)
+            if file.ends_with(".w") and not path_excluded(file, excludes):
+                let changed = migrate_file(file)
+                if changed < 0: return -1
+                if changed > 0: print(f"migrated {file}: {changed} receiver methods")
+                total = total + changed
+        start = i + 1
+    total
+
 fn main:
     let argv = args()
     if argv.len() < 2:
-        print("usage: migrate_receivers <file.w> [file.w ...]")
+        print("usage: migrate_receivers [--exclude file.w ...] <file-or-dir> [file-or-dir ...]")
+        exit_code(1)
+    let excludes: Vec[str] = Vec.new()
+    let paths: Vec[str] = Vec.new()
+    var arg = 1
+    while arg < argv.len() as i32:
+        if argv.get(arg as i64) == "--exclude":
+            if arg + 1 >= argv.len() as i32:
+                print("error: --exclude requires a file path")
+                exit_code(1)
+            arg = arg + 1
+            excludes.push(argv.get(arg as i64))
+        else:
+            paths.push(argv.get(arg as i64))
+        arg = arg + 1
+    if paths.len() == 0:
+        print("error: no migration paths supplied")
         exit_code(1)
     var total = 0
-    for i in 1..argv.len() as i32:
-        let path = argv.get(i as i64)
-        let m = migrate_file(path)
-        if m > 0:
-            print(f"migrated {path}: {m} receiver methods")
-        total = total + m
+    for i in 0..paths.len() as i32:
+        let changed = migrate_path(paths.get(i as i64), &excludes)
+        if changed < 0: exit_code(1)
+        total = total + changed
     print(f"total: {total} receiver methods migrated")

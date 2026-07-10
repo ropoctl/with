@@ -6,7 +6,7 @@
 type Matrix { data: i32 }
 
 impl Matrix:
-    fn multi_index(self: Matrix, n: i32) -> i32:
+    fn multi_index(self: &Self, n: i32) -> i32:
         self.data + n
 
 fn main:

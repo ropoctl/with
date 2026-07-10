@@ -9,11 +9,11 @@ type Circle { radius: i32 }
 type Square { side: i32 }
 
 impl Describable for Circle:    fn describe(self:
-    Circle) -> str:
+    &Self) -> str:
         "circle"
 
 impl Describable for Square:    fn describe(self:
-    Square) -> str:
+    &Self) -> str:
         "square"
 
 fn test_trait_dispatch:
@@ -26,11 +26,11 @@ trait HasArea:    fn area(self:
     &Self) -> i32
 
 impl HasArea for Circle:    fn area(self:
-    Circle) -> i32:
+    &Self) -> i32:
         self.radius * self.radius * 3
 
 impl HasArea for Square:    fn area(self:
-    Square) -> i32:
+    &Self) -> i32:
         self.side * self.side
 
 fn test_trait_with_fields:

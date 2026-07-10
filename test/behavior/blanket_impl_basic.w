@@ -4,7 +4,7 @@ trait Showable:
     fn show(self: &Self) -> str
 
 impl Showable for i32:
-    fn show(self: i32) -> str:
+    fn show(self: &Self) -> str:
         int_to_string(self)
 
 // Blanket impl: anything Showable is also Displayable
@@ -13,7 +13,7 @@ trait Displayable:
 
 impl[T:
     Showable] Displayable for T:
-    fn display(self: T) -> str:
+    fn display(self: &Self) -> str:
         self.show()
 
 // Generic function requiring Displayable bound — should pass for i32

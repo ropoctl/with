@@ -8,7 +8,7 @@ type SafeStr { data: str, len: i32 }
 extend SafeStr:
     fn new(s: str) -> SafeStr: SafeStr { data: s, len: s.len as i32 }
 
-    fn get_len(self: SafeStr) -> i32: self.len
+    fn get_len(self: &Self) -> i32: self.len
 
 type Entry { key: i32, value: i32, active: bool }
 

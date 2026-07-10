@@ -9,11 +9,11 @@ type Box { val: i32 }
 type Pair { a: i32, b: i32 }
 
 impl HasValue for Box:    fn value(self:
-    Box) -> i32:
+    &Self) -> i32:
         self.val
 
 impl HasValue for Pair:    fn value(self:
-    Pair) -> i32:
+    &Self) -> i32:
         self.a + self.b
 
 fn test_basic_trait:

@@ -7,7 +7,7 @@ type Point: Copy { x: i32, y: i32 }
 enum Val { Num(i32) | Empty }
 
 impl Named for Point:    fn label(self:
-    Point) -> str:
+    &Self) -> str:
         let _ = self
         "Point"
 

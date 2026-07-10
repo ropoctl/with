@@ -10,10 +10,10 @@ type Builder:
     retries: i32
 
 extend Builder:
-    fn with_host(self: Builder, h: str) -> Builder: { self with host: h }
-    fn with_port(self: Builder, p: i32) -> Builder: { self with port: p }
+    fn with_host(move self: Builder, h: str) -> Builder: { self with host: h }
+    fn with_port(move self: Builder, p: i32) -> Builder: { self with port: p }
     // A single update can replace several fields at once.
-    fn tune(self: Builder, p: i32, r: i32) -> Builder: { self with port: p, retries: r }
+    fn tune(move self: Builder, p: i32, r: i32) -> Builder: { self with port: p, retries: r }
 
 fn test_consuming_self_chaining:
     let b = Builder { host: "", port: 0, retries: 0 }.with_host("localhost").with_port(8080)

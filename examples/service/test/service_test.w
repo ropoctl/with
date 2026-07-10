@@ -47,7 +47,7 @@ type Service {
 extend Service:
     fn new(config: ServiceConfig) -> Service: Service { config, request_count: 0 }
 
-    fn get_timeout(self: Service) -> i32: self.config.timeout_ms
+    fn get_timeout(self: &Self) -> i32: self.config.timeout_ms
 
 fn validate_id(id: i32) -> ServiceResult: if id in 1..=1000: Ok else: InvalidInput
 

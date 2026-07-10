@@ -80,54 +80,55 @@ fn CfgGraph.init -> CfgGraph:
     CfgGraph { state: ptr }
 
 // No-op: reserved for future manual memory management.
-fn CfgGraph.deinit(self: CfgGraph):
-    return
+impl CfgGraph:
+    fn deinit():
+        return
 
-fn CfgGraph.entry_node(self: CfgGraph) -> i32:
-    let st = self.state
-    unsafe { st.entry }
+    fn entry_node() -> i32:
+        let st = self.state
+        unsafe { st.entry }
 
-fn CfgGraph.exit_node(self: CfgGraph) -> i32:
-    let st = self.state
-    unsafe { st.exit }
+    fn exit_node() -> i32:
+        let st = self.state
+        unsafe { st.exit }
 
-fn CfgGraph.set_entry(self: CfgGraph, node_id: i32):
-    let st = self.state
-    unsafe st.entry = node_id
+    fn set_entry(node_id: i32):
+        let st = self.state
+        unsafe st.entry = node_id
 
-fn CfgGraph.set_exit(self: CfgGraph, node_id: i32):
-    let st = self.state
-    unsafe st.exit = node_id
+    fn set_exit(node_id: i32):
+        let st = self.state
+        unsafe st.exit = node_id
 
-fn CfgGraph.node_count(self: CfgGraph) -> i32:
-    let st = self.state
-    unsafe { st.nodes.len() as i32 }
+    fn node_count() -> i32:
+        let st = self.state
+        unsafe { st.nodes.len() as i32 }
 
-fn CfgGraph.add_node(self: CfgGraph, kind: i32, span_start: i32, span_end: i32) -> i32:
-    let st = self.state
-    let id = unsafe { st.nodes.len() as i32 }
-    unsafe { st.nodes.push(CfgNode { kind, span_start, span_end }) }
-    id
+    fn add_node(kind: i32, span_start: i32, span_end: i32) -> i32:
+        let st = self.state
+        let id = unsafe { st.nodes.len() as i32 }
+        unsafe { st.nodes.push(CfgNode { kind, span_start, span_end }) }
+        id
 
-fn CfgGraph.add_edge(self: CfgGraph, from: i32, to: i32) -> Unit:
-    let st = self.state
-    unsafe { st.edges.push(CfgEdge { from, to }) }
+    fn add_edge(from: i32, to: i32) -> Unit:
+        let st = self.state
+        unsafe { st.edges.push(CfgEdge { from, to }) }
 
-fn CfgGraph.out_degree(self: CfgGraph, node_id: i32) -> i32:
-    let st = self.state
-    var n = 0
-    for i in 0..unsafe { st.edges.len() as i32 }:
-        if unsafe { st.edges.get(i as i64) }.from == node_id:
-            n = n + 1
-    n
+    fn out_degree(node_id: i32) -> i32:
+        let st = self.state
+        var n = 0
+        for i in 0..unsafe { st.edges.len() as i32 }:
+            if unsafe { st.edges.get(i as i64) }.from == node_id:
+                n = n + 1
+        n
 
-fn CfgGraph.has_edge(self: CfgGraph, from: i32, to: i32) -> bool:
-    let st = self.state
-    for i in 0..unsafe { st.edges.len() as i32 }:
-        let e = unsafe { st.edges.get(i as i64) }
-        if e.from == from and e.to == to:
-            return true
-    false
+    fn has_edge(from: i32, to: i32) -> bool:
+        let st = self.state
+        for i in 0..unsafe { st.edges.len() as i32 }:
+            let e = unsafe { st.edges.get(i as i64) }
+            if e.from == from and e.to == to:
+                return true
+        false
 
 // Build a CFG from an AST expression subtree.
 // For now, builds a simple linear CFG from the expression.

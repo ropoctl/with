@@ -8,7 +8,7 @@ type Box32 { value: i32 }
 
 impl Container for Box32:
     type Item = i32
-    fn get(self: Box32) -> i32:
+    fn get(self: &Self) -> i32:
         self.value
 
 fn extract[T: Container](c: T) -> T.Item:

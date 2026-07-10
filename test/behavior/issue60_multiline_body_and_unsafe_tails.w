@@ -17,7 +17,7 @@ fn scalar_from_body(seed: i32) -> i32:
     let next = seed + 2
     next
 
-fn Holder.promote(self: Holder) -> Pair:
+fn Holder.promote(self: &Self) -> Pair:
     let next = self.value + 10
     Pair { left: self.value, right: next }
 

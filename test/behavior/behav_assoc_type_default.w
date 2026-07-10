@@ -8,7 +8,7 @@ type Tripler {}
 impl Mapper for Tripler:
     type Input = i32
     type Output = i32
-    fn map(self: Tripler, x: i32) -> i32: x * 3
+    fn map(self: &Self, x: i32) -> i32: x * 3
 
 fn main:
     let t = Tripler{}

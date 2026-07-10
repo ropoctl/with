@@ -9,12 +9,12 @@ trait Showable:    fn show(self:
 type Pair { a: i32, b: i32 }
 
 impl Describable for Pair:    fn describe(self:
-    Pair) -> str:
+    &Self) -> str:
         "pair"
 
 // where clause on impl (parsed, not yet enforced)
 impl Showable for Pair where Pair: Describable:    fn show(self:
-    Pair) -> str:
+    &Self) -> str:
         self.describe()
 
 fn main:

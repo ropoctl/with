@@ -7,8 +7,8 @@ trait Transform:
 type Doubler { value: i32 }
 
 // Impl without providing Output — default should be accepted
-impl Transform for Doubler:    fn apply(self:
-    Doubler) -> i32:
+impl Transform for Doubler:
+    fn apply(self: &Self) -> i32:
         self.value * 2
 
 fn main:

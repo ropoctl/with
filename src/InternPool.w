@@ -46,25 +46,26 @@ fn InternStringArena.new() -> InternStringArena:
     arena.pages.push(first)
     arena
 
-fn InternStringArena.store(mut self: InternStringArena, s: str) -> str:
-    if s.len() == 0:
-        return ""
-    let src = unsafe *(&s as *const *const u8)
-    let len = s.len()
-    let need = len + 1
-    if self.offset + need > INTERN_PAGE_SIZE:
-        let page_size = if need > INTERN_PAGE_SIZE: need else: INTERN_PAGE_SIZE
-        let page = with_alloc(page_size)
-        self.pages.push(page)
-        self.offset = 0
-    let page = self.pages.get(self.pages.len() - 1)
-    let dest = (page as i64 + self.offset) as *mut u8
-    with_memcpy(dest, src, len)
-    unsafe *((dest as i64 + len) as *mut u8) = 0
-    self.offset = self.offset + need
-    var raw: [2]i64 = [dest as i64, len]
-    let p = &raw as *const str
-    unsafe *p
+impl InternStringArena:
+    mut fn store(s: str) -> str:
+        if s.len() == 0:
+            return ""
+        let src = unsafe *(&s as *const *const u8)
+        let len = s.len()
+        let need = len + 1
+        if self.offset + need > INTERN_PAGE_SIZE:
+            let page_size = if need > INTERN_PAGE_SIZE: need else: INTERN_PAGE_SIZE
+            let page = with_alloc(page_size)
+            self.pages.push(page)
+            self.offset = 0
+        let page = self.pages.get(self.pages.len() - 1)
+        let dest = (page as i64 + self.offset) as *mut u8
+        with_memcpy(dest, src, len)
+        unsafe *((dest as i64 + len) as *mut u8) = 0
+        self.offset = self.offset + need
+        var raw: [2]i64 = [dest as i64, len]
+        let p = &raw as *const str
+        unsafe *p
 
 // ── InternPool ────────────────────────────────────────────────────
 
@@ -119,83 +120,84 @@ fn InternPool.init -> InternPool:
 fn InternPool.new -> InternPool:
     InternPool.init()
 
-fn InternPool.deinit(self: InternPool):
-    return
+impl InternPool:
+    fn deinit():
+        return
 
-fn InternPool.intern_str(self: InternPool, s: str) -> Symbol:
-    let st = self.state
-    let existing = st.symbol_map.get(s)
-    if existing.is_some():
-        return existing.unwrap()
+    fn intern_str(s: str) -> Symbol:
+        let st = self.state
+        let existing = st.symbol_map.get(s)
+        if existing.is_some():
+            return existing.unwrap()
 
-    var i = 1
-    while i < st.symbol_texts.len() as i32:
-        let existing_text = st.symbol_texts.get(i as i64)
-        if intern_text_eq(existing_text, s):
-            st.symbol_map.insert(existing_text, i)
-            return i
-        i = i + 1
+        var i = 1
+        while i < st.symbol_texts.len() as i32:
+            let existing_text = st.symbol_texts.get(i as i64)
+            if intern_text_eq(existing_text, s):
+                st.symbol_map.insert(existing_text, i)
+                return i
+            i = i + 1
 
-    let id = st.symbol_texts.len() as i32
-    let owned = st.strings.store(s)
-    st.symbol_texts.push(owned)
-    st.symbol_map.insert(owned, id)
-    id
+        let id = st.symbol_texts.len() as i32
+        let owned = st.strings.store(s)
+        st.symbol_texts.push(owned)
+        st.symbol_map.insert(owned, id)
+        id
 
-fn InternPool.resolve_symbol(self: InternPool, sym: Symbol) -> str:
-    let st = self.state
-    if sym <= 0 or sym >= st.symbol_texts.len() as i32:
-        return ""
-    st.symbol_texts.get(sym as i64)
+    fn resolve_symbol(sym: Symbol) -> str:
+        let st = self.state
+        if sym <= 0 or sym >= st.symbol_texts.len() as i32:
+            return ""
+        st.symbol_texts.get(sym as i64)
 
-fn InternPool.intern_type(self: InternPool, key: TypeKey) -> TypeId:
-    let st = self.state
-    let canon = type_key_to_string(key)
-    let existing = st.type_map.get(canon)
-    if existing.is_some():
-        return existing.unwrap() as TypeId
+    fn intern_type(key: TypeKey) -> TypeId:
+        let st = self.state
+        let canon = type_key_to_string(key)
+        let existing = st.type_map.get(canon)
+        if existing.is_some():
+            return existing.unwrap() as TypeId
 
-    let id = st.type_keys.len() as i32
-    st.type_keys.push(key)
-    st.type_map.insert(st.strings.store(canon), id)
-    id as TypeId
+        let id = st.type_keys.len() as i32
+        st.type_keys.push(key)
+        st.type_map.insert(st.strings.store(canon), id)
+        id as TypeId
 
-fn InternPool.resolve_type(self: InternPool, id: TypeId) -> TypeKey:
-    let st = self.state
-    if id <= 0 or id >= st.type_keys.len() as i32:
-        return type_key_invalid()
-    st.type_keys.get(id as i64)
+    fn resolve_type(id: TypeId) -> TypeKey:
+        let st = self.state
+        if id <= 0 or id >= st.type_keys.len() as i32:
+            return type_key_invalid()
+        st.type_keys.get(id as i64)
 
-fn InternPool.intern_value(self: InternPool, key: ValueKey) -> ValueId:
-    let st = self.state
-    let canon = value_key_to_string(key)
-    let existing = st.value_map.get(canon)
-    if existing.is_some():
-        return existing.unwrap() as ValueId
+    fn intern_value(key: ValueKey) -> ValueId:
+        let st = self.state
+        let canon = value_key_to_string(key)
+        let existing = st.value_map.get(canon)
+        if existing.is_some():
+            return existing.unwrap() as ValueId
 
-    let id = st.value_keys.len() as i32
-    st.value_keys.push(key)
-    st.value_map.insert(st.strings.store(canon), id)
-    id
+        let id = st.value_keys.len() as i32
+        st.value_keys.push(key)
+        st.value_map.insert(st.strings.store(canon), id)
+        id
 
-fn InternPool.resolve_value(self: InternPool, id: ValueId) -> ValueKey:
-    let st = self.state
-    if id <= 0 or id >= st.value_keys.len() as i32:
-        return value_key_invalid()
-    st.value_keys.get(id as i64)
+    fn resolve_value(id: ValueId) -> ValueKey:
+        let st = self.state
+        if id <= 0 or id >= st.value_keys.len() as i32:
+            return value_key_invalid()
+        st.value_keys.get(id as i64)
 
-fn InternPool.symbol_count(self: InternPool) -> i32:
-    (self.state.symbol_texts.len() as i32) - 1
+    fn symbol_count() -> i32:
+        (self.state.symbol_texts.len() as i32) - 1
 
-fn InternPool.type_count(self: InternPool) -> i32:
-    (self.state.type_keys.len() as i32) - 1
+    fn type_count() -> i32:
+        (self.state.type_keys.len() as i32) - 1
 
-fn InternPool.value_count(self: InternPool) -> i32:
-    (self.state.value_keys.len() as i32) - 1
+    fn value_count() -> i32:
+        (self.state.value_keys.len() as i32) - 1
 
-// Legacy compatibility entrypoints used throughout current parser/sema/codegen.
-fn InternPool.intern(self: InternPool, s: str) -> Symbol:
-    self.intern_str(s)
+    // Legacy compatibility entrypoints used throughout current parser/sema/codegen.
+    fn intern(s: str) -> Symbol:
+        self.intern_str(s)
 
-fn InternPool.resolve(self: InternPool, sym: Symbol) -> str:
-    self.resolve_symbol(sym)
+    fn resolve(sym: Symbol) -> str:
+        self.resolve_symbol(sym)

@@ -47,32 +47,33 @@ pub fn StringBuilder.with_capacity(capacity: i64) -> Self:
     StringBuilder { bytes: Vec[u8].with_capacity(cap) }
 
 /// Append raw UTF-8 bytes from a string.
-pub fn StringBuilder.push_str(mut self: Self, s: str) -> Unit:
-    for i in 0..s.len():
-        self.bytes.push(s.byte_at(i) as u8)
-    return
+impl StringBuilder:
+    pub mut fn push_str(s: str) -> Unit:
+        for i in 0..s.len():
+            self.bytes.push(s.byte_at(i) as u8)
+        return
 
-/// Append one byte.
-pub fn StringBuilder.push_byte(mut self: Self, b: u8) -> Unit:
-    self.bytes.push(b)
-    return
+    /// Append one byte.
+    pub mut fn push_byte(b: u8) -> Unit:
+        self.bytes.push(b)
+        return
 
-/// Append one byte from an integer code point.
-pub fn StringBuilder.push_char(mut self: Self, b: i32) -> Unit:
-    self.bytes.push(b as u8)
-    return
+    /// Append one byte from an integer code point.
+    pub mut fn push_char(b: i32) -> Unit:
+        self.bytes.push(b as u8)
+        return
 
-/// Number of bytes appended so far.
-pub fn StringBuilder.len(self: &Self) -> i64:
-    self.bytes.len
+    /// Number of bytes appended so far.
+    pub fn len() -> i64:
+        self.bytes.len
 
-/// True when no bytes have been appended.
-pub fn StringBuilder.is_empty(self: &Self) -> bool:
-    self.bytes.len == 0
+    /// True when no bytes have been appended.
+    pub fn is_empty() -> bool:
+        self.bytes.len == 0
 
-/// Materialize the accumulated bytes as an owned str.
-pub fn StringBuilder.to_str(self: &Self) -> str:
-    with_str_from_vec_u8(&self.bytes)
+    /// Materialize the accumulated bytes as an owned str.
+    pub fn to_str() -> str:
+        with_str_from_vec_u8(&self.bytes)
 
 /// String length (same as `s.len()`).
 pub fn string_len(s: str) -> i64:
@@ -91,26 +92,28 @@ pub fn view_eq(a: &str, b: &str) -> bool:
     a == b
 
 /// C string byte length, excluding the trailing NUL.
-pub fn CStr.len(self: &Self) -> i64:
-    self.len
+impl CStr:
+    pub fn len() -> i64:
+        self.len
 
-/// Raw pointer to the NUL-terminated bytes this `CStr` borrows.
-pub fn CStr.ptr(self: &Self) -> *const i8:
-    self.ptr
+    /// Raw pointer to the NUL-terminated bytes this `CStr` borrows.
+    pub fn ptr() -> *const i8:
+        self.ptr
 
 // ── String conversion surface (§15.1–§15.3) ───────────────────────────
 
 /// Borrow an owned `String` as a `StrView` (`&str`). The view borrows `self`
 /// and must not outlive it.
-pub fn str.as_view(self: &Self) -> StrView:
-    self
+impl str:
+    pub fn as_view() -> StrView:
+        self
 
-/// Copy a `StrView` (or any `&str`) into a fresh owned `str`.
-pub fn str.to_owned(self: &Self) -> str:
-    var sb = StringBuilder.new()
-    for i in 0..self.len():
-        sb.push_byte(self.byte_at(i) as u8)
-    sb.to_str()
+    /// Copy a `StrView` (or any `&str`) into a fresh owned `str`.
+    pub fn to_owned() -> str:
+        var sb = StringBuilder.new()
+        for i in 0..self.len():
+            sb.push_byte(self.byte_at(i) as u8)
+        sb.to_str()
 
 /// Why a `str` could not be converted to a `CString`.
 pub enum CStringError:
@@ -127,30 +130,32 @@ impl Drop for CString:
 /// Convert to an owned C string, rejecting an interior NUL loudly (§16.3c):
 /// the conversion never silently truncates. Returns `Err(.InteriorNul)` when
 /// the string contains a NUL byte.
-pub fn str.to_cstring(self: &Self) -> Result[CString, CStringError]:
-    let n = self.len()
-    var i: i64 = 0
-    while i < n:
-        if self.byte_at(i) == 0:
-            return Err(.InteriorNul)
-        i = i + 1
-    let buf = with_alloc(n + 1)
-    var j: i64 = 0
-    while j < n:
-        unsafe { *((buf as i64 + j) as *mut u8) = self.byte_at(j) as u8 }
-        j = j + 1
-    unsafe { *((buf as i64 + n) as *mut u8) = 0 as u8 }
-    Ok(CString { ptr: buf, len: n })
+impl str:
+    pub fn to_cstring() -> Result[CString, CStringError]:
+        let n = self.len()
+        var i: i64 = 0
+        while i < n:
+            if self.byte_at(i) == 0:
+                return Err(.InteriorNul)
+            i = i + 1
+        let buf = with_alloc(n + 1)
+        var j: i64 = 0
+        while j < n:
+            unsafe { *((buf as i64 + j) as *mut u8) = self.byte_at(j) as u8 }
+            j = j + 1
+        unsafe { *((buf as i64 + n) as *mut u8) = 0 as u8 }
+        Ok(CString { ptr: buf, len: n })
 
 /// Borrow the owned C string as a `&CStr` view (no copy, no allocation). The
 /// view borrows `self` and must not outlive it. `CString` and `CStr` share a
 /// `{ptr, len}` layout, so this is a reinterpret of the owned buffer.
-pub fn CString.as_cstr(self: &Self) -> &CStr:
-    unsafe { (self as *const CString as *const CStr) as &CStr }
+impl CString:
+    pub fn as_cstr() -> &CStr:
+        unsafe { (self as *const CString as *const CStr) as &CStr }
 
-/// Byte length of the owned C string, excluding the terminator.
-pub fn CString.len(self: &Self) -> i64:
-    self.len
+    /// Byte length of the owned C string, excluding the terminator.
+    pub fn len() -> i64:
+        self.len
 
 /// Compare two strings for equality. Returns true if equal.
 pub fn string_eq(a: str, b: str) -> bool:

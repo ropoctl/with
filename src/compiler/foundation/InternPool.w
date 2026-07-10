@@ -88,7 +88,7 @@ pub fn InternPool.init -> InternPool:
     ptr.value_keys.push(value_key_invalid())
     InternPool { state: ptr }
 
-pub fn InternPool.intern_str(self: InternPool, s: str) -> Symbol:
+pub fn InternPool.intern_str(self: &Self, s: str) -> Symbol:
     let st = self.state
     let existing = st.symbol_map.get(s)
     if existing.is_some():
@@ -108,7 +108,7 @@ pub fn InternPool.intern_str(self: InternPool, s: str) -> Symbol:
     st.symbol_map.insert(owned, id)
     symbol_from_raw(id)
 
-pub fn InternPool.resolve_symbol(self: InternPool, sym: Symbol) -> str:
+pub fn InternPool.resolve_symbol(self: &Self, sym: Symbol) -> str:
     if not symbol_is_valid(sym):
         return ""
     let raw = symbol_raw(sym)
@@ -116,7 +116,7 @@ pub fn InternPool.resolve_symbol(self: InternPool, sym: Symbol) -> str:
         return ""
     self.state.symbol_texts.get(raw as i64)
 
-pub fn InternPool.intern_type(self: InternPool, key: TypeKey) -> TypeId:
+pub fn InternPool.intern_type(self: &Self, key: TypeKey) -> TypeId:
     let st = self.state
     let canon = type_key_to_string(key)
     let existing = st.type_map.get(canon)
@@ -128,7 +128,7 @@ pub fn InternPool.intern_type(self: InternPool, key: TypeKey) -> TypeId:
     st.type_map.insert(st.strings.store(canon), id)
     type_id_from_raw(id)
 
-pub fn InternPool.resolve_type(self: InternPool, id: TypeId) -> TypeKey:
+pub fn InternPool.resolve_type(self: &Self, id: TypeId) -> TypeKey:
     if not type_id_is_valid(id):
         return type_key_invalid()
     let raw = type_id_raw(id)
@@ -136,7 +136,7 @@ pub fn InternPool.resolve_type(self: InternPool, id: TypeId) -> TypeKey:
         return type_key_invalid()
     self.state.type_keys.get(raw as i64)
 
-pub fn InternPool.intern_value(self: InternPool, key: ValueKey) -> ValueId:
+pub fn InternPool.intern_value(self: &Self, key: ValueKey) -> ValueId:
     let st = self.state
     let canon = value_key_to_string(key)
     let existing = st.value_map.get(canon)
@@ -148,7 +148,7 @@ pub fn InternPool.intern_value(self: InternPool, key: ValueKey) -> ValueId:
     st.value_map.insert(st.strings.store(canon), id)
     value_id_from_raw(id)
 
-pub fn InternPool.resolve_value(self: InternPool, id: ValueId) -> ValueKey:
+pub fn InternPool.resolve_value(self: &Self, id: ValueId) -> ValueKey:
     if not value_id_is_valid(id):
         return value_key_invalid()
     let raw = value_id_raw(id)
@@ -156,11 +156,11 @@ pub fn InternPool.resolve_value(self: InternPool, id: ValueId) -> ValueKey:
         return value_key_invalid()
     self.state.value_keys.get(raw as i64)
 
-pub fn InternPool.symbol_count(self: InternPool) -> i32:
+pub fn InternPool.symbol_count(self: &Self) -> i32:
     (self.state.symbol_texts.len() as i32) - 1
 
-pub fn InternPool.type_count(self: InternPool) -> i32:
+pub fn InternPool.type_count(self: &Self) -> i32:
     (self.state.type_keys.len() as i32) - 1
 
-pub fn InternPool.value_count(self: InternPool) -> i32:
+pub fn InternPool.value_count(self: &Self) -> i32:
     (self.state.value_keys.len() as i32) - 1

@@ -179,14 +179,15 @@ impl[T] Scoped[&T] for MutexGuard[T]:
         let locked = (&raw mut (unsafe *state).locked as *mut i32) as *mut Atomic[i32]
         (unsafe *locked).store(0, .Release)
 
-impl[T] ScopedMut[&mut T] for MutexGuardMut[T]:
-    fn with_enter_mut(self: &Self) -> &mut T:
+impl[T] ScopedMut[T] for MutexGuardMut[T]:
+    fn with_enter_mut(self: &Self) -> T:
         let state = self.ptr as *mut MutexState
-        unsafe { (unsafe *state).value as &mut T }
+        unsafe *((unsafe *state).value as *mut T)
 
-    move fn with_exit_mut(value: &mut T) -> Unit:
-        let _ = value
+    mut fn with_exit_mut(value: T) -> Unit:
         let state = self.ptr as *mut MutexState
+        let value_ptr = (unsafe *state).value as *mut T
+        with_memcpy(value_ptr as *i8, (&raw const (move value) as *const T) as *i8, sizeof[T]() as i64)
         let locked = (&raw mut (unsafe *state).locked as *mut i32) as *mut Atomic[i32]
         (unsafe *locked).store(0, .Release)
 
@@ -279,14 +280,15 @@ impl[T] Scoped[&T] for RwReadGuard[T]:
         let word = (&raw mut (unsafe *state).state as *mut i32) as *mut Atomic[i32]
         let _ = (unsafe *word).fetch_sub(1, .Release)
 
-impl[T] ScopedMut[&mut T] for RwWriteGuard[T]:
-    fn with_enter_mut(self: &Self) -> &mut T:
+impl[T] ScopedMut[T] for RwWriteGuard[T]:
+    fn with_enter_mut(self: &Self) -> T:
         let state = self.ptr as *mut RwLockState
-        unsafe { (unsafe *state).value as &mut T }
+        unsafe *((unsafe *state).value as *mut T)
 
-    move fn with_exit_mut(value: &mut T) -> Unit:
-        let _ = value
+    mut fn with_exit_mut(value: T) -> Unit:
         let state = self.ptr as *mut RwLockState
+        let value_ptr = (unsafe *state).value as *mut T
+        with_memcpy(value_ptr as *i8, (&raw const (move value) as *const T) as *i8, sizeof[T]() as i64)
         let word = (&raw mut (unsafe *state).state as *mut i32) as *mut Atomic[i32]
         (unsafe *word).store(0, .Release)
 

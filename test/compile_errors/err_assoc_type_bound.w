@@ -8,7 +8,7 @@ trait Container:
 
 impl Container for NoEqType:
     type Item = NoEqType
-    fn get(self: NoEqType) -> i32:
+    fn get(self: &Self) -> i32:
         self.x
 
 fn main:

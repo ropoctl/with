@@ -44,10 +44,10 @@ extend UserService:
         }
 
 extend UserServiceBuilder:
-    fn with_config(self: UserServiceBuilder, cfg: ServiceConfig) -> UserServiceBuilder:
+    fn with_config(move self: UserServiceBuilder, cfg: ServiceConfig) -> UserServiceBuilder:
         { self with config: cfg }
 
-    fn build(self: UserServiceBuilder) -> UserService:
+    fn build(self: &Self) -> UserService:
         UserService {
             config: self.config,
             metrics: ServiceMetrics {},

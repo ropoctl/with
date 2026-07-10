@@ -27,7 +27,7 @@ fn test_generic_comparison:
 
 type Box[T] { value: T }
 
-fn Box.get(self: Box[T]) -> T:
+fn Box.get(self: &Self) -> T:
     self.value
 
 fn test_generic_struct:
@@ -38,7 +38,7 @@ fn test_generic_struct:
 
 type Pair[T] { first: T, second: T }
 
-fn Pair.sum(self: Pair[i32]) -> i32:
+fn Pair.sum(self: &Self) -> i32:
     self.first + self.second
 
 fn test_generic_pair:

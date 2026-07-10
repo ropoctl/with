@@ -234,19 +234,20 @@ impl[T: Ord] BTreeSet[T]:
             value_i = value_i + 1
         out
 
-pub fn BTreeSet.union[T: Ord](self: &BTreeSet[T], other: &BTreeSet[T]) -> BTreeSet[T]:
-    let out: BTreeSet[T] = BTreeSet[T].new()
-    var self_i = 0
-    while self_i < self.values.len():
-        let value = self.values.get(self_i)
-        out.insert(value)
-        self_i = self_i + 1
-    var other_i = 0
-    while other_i < other.values.len():
-        let value2 = other.values.get(other_i)
-        out.insert(value2)
-        other_i = other_i + 1
-    out
+impl[T: Ord] BTreeSet[T]:
+    pub fn union(other: &BTreeSet[T]) -> BTreeSet[T]:
+        let out: BTreeSet[T] = BTreeSet[T].new()
+        var self_i = 0
+        while self_i < self.values.len():
+            let value = self.values.get(self_i)
+            out.insert(value)
+            self_i = self_i + 1
+        var other_i = 0
+        while other_i < other.values.len():
+            let value2 = other.values.get(other_i)
+            out.insert(value2)
+            other_i = other_i + 1
+        out
 
 impl[T: Ord] BTreeSet[T]:
     pub fn intersection(other: &BTreeSet[T]) -> BTreeSet[T]:
@@ -283,12 +284,12 @@ pub type Handle[T] {
 
 impl[T] Copy for Handle[T]
 
-impl[T] Eq for Handle[T]:    fn eq(self: Handle[T], other:
-    Handle[T]) -> bool:
+impl[T] Eq for Handle[T]:
+    fn eq(self: &Self, other: Handle[T]) -> bool:
         self.index == other.index and self.generation == other.generation
 
-impl[T] Hash for Handle[T]:    fn hash_value(self:
-    Handle[T]) -> i64:
+impl[T] Hash for Handle[T]:
+    fn hash_value(self: &Self) -> i64:
         ((self.index as i64) << 32) ^ (self.generation as i64)
 
 /// Generational dense-ish storage for long-lived relationships.
@@ -352,13 +353,12 @@ type VecIter[T] ephemeral { data_ptr: i64, len: i64, idx: i64 }
 
 /// Conversion to iterator for allocation-backed collection types.
 pub trait IntoIter[T]:
-    fn iter(self) -> VecIter[T]
+    mut fn iter() -> VecIter[T]
 
 // IntoIter for Vec — enables collection-level async combinators and
 // explicit trait dispatch over Vec-backed collections.
-impl[T] IntoIter[T] for Vec[T]:    fn iter(self:
-    Vec[T]) -> VecIter[T]:
-        self.iter()
+impl[T] IntoIter[T] for Vec[T]:
+    mut fn iter() -> VecIter[T]: self.iter()
 
 /// Lazy iterator adapter produced by `.map(f)`.
 type MapIter[I, T, U] ephemeral { iter: I, f: fn(T) -> U }

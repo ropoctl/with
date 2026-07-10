@@ -62,6 +62,7 @@ impl Copy for CXSourceRange
 type CXToken:
     int_data: [4]u32
     ptr_data: i64
+impl Copy for CXToken
 
 // ── libclang extern fn declarations ─────────────────────────────
 // Index/TU

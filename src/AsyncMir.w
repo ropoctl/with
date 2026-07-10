@@ -56,29 +56,30 @@ fn AsyncMirBody.init(fn_sym: i32, flavor: i32) -> AsyncMirBody:
         suspend_drop_counts: Vec.new(),
     }
 
-fn AsyncMirBody.add_suspend(self: AsyncMirBody, kind: i32, span_start: i32, span_end: i32, resume_bb: i32, live_locals: i32, storage_dead: i32, drop_count: i32) -> Unit:
-    let idx = self.suspend_kinds.len() as i32
-    self.suspend_kinds.push(kind)
-    self.suspend_span_starts.push(span_start)
-    self.suspend_span_ends.push(span_end)
-    self.suspend_resume_bbs.push(resume_bb)
-    self.suspend_state_from.push(idx)
-    self.suspend_state_to.push(idx + 1)
-    self.suspend_live_locals.push(live_locals)
-    self.suspend_storage_dead.push(storage_dead)
-    self.suspend_drop_counts.push(drop_count)
+impl AsyncMirBody:
+    fn add_suspend(kind: i32, span_start: i32, span_end: i32, resume_bb: i32, live_locals: i32, storage_dead: i32, drop_count: i32) -> Unit:
+        let idx = self.suspend_kinds.len() as i32
+        self.suspend_kinds.push(kind)
+        self.suspend_span_starts.push(span_start)
+        self.suspend_span_ends.push(span_end)
+        self.suspend_resume_bbs.push(resume_bb)
+        self.suspend_state_from.push(idx)
+        self.suspend_state_to.push(idx + 1)
+        self.suspend_live_locals.push(live_locals)
+        self.suspend_storage_dead.push(storage_dead)
+        self.suspend_drop_counts.push(drop_count)
 
-fn AsyncMirBody.finalize_states(self: AsyncMirBody):
-    self.state_count = self.suspend_kinds.len() as i32 + 1
+    mut fn finalize_states():
+        self.state_count = self.suspend_kinds.len() as i32 + 1
 
-fn AsyncMirBody.suspend_count(self: AsyncMirBody) -> i32:
-    self.suspend_kinds.len() as i32
+    fn suspend_count() -> i32:
+        self.suspend_kinds.len() as i32
 
-fn AsyncMirBody.has_kind(self: AsyncMirBody, kind: i32) -> bool:
-    for i in 0..self.suspend_kinds.len() as i32:
-        if self.suspend_kinds.get(i as i64) == kind:
-            return true
-    false
+    fn has_kind(kind: i32) -> bool:
+        for i in 0..self.suspend_kinds.len() as i32:
+            if self.suspend_kinds.get(i as i64) == kind:
+                return true
+        false
 
 fn AsyncMirModule.init -> AsyncMirModule:
     AsyncMirModule {
@@ -87,30 +88,31 @@ fn AsyncMirModule.init -> AsyncMirModule:
     }
 
 // No-op: reserved for future manual memory management.
-fn AsyncMirModule.deinit(self: AsyncMirModule):
-    return
+impl AsyncMirModule:
+    fn deinit():
+        return
 
-fn AsyncMirModule.add_body(self: AsyncMirModule, body: AsyncMirBody) -> Unit:
-    self.bodies.push(body)
-    self.body_fn_syms.push(body.fn_sym)
+    fn add_body(body: AsyncMirBody) -> Unit:
+        self.bodies.push(body)
+        self.body_fn_syms.push(body.fn_sym)
 
-fn AsyncMirModule.body_count(self: AsyncMirModule) -> i32:
-    self.bodies.len() as i32
+    fn body_count() -> i32:
+        self.bodies.len() as i32
 
-fn AsyncMirModule.total_suspend_points(self: AsyncMirModule) -> i32:
-    var total = 0
-    for i in 0..self.bodies.len() as i32:
-        total = total + self.bodies.get(i as i64).suspend_count()
-    total
+    fn total_suspend_points() -> i32:
+        var total = 0
+        for i in 0..self.bodies.len() as i32:
+            total = total + self.bodies.get(i as i64).suspend_count()
+        total
 
-fn AsyncMirModule.requires_async_runtime(self: AsyncMirModule) -> bool:
-    for i in 0..self.bodies.len() as i32:
-        let body = self.bodies.get(i as i64)
-        if body.flavor == AsyncBodyKind.Async:
-            return true
-        if body.has_kind(AsyncSuspendKind.Await) or body.has_kind(AsyncSuspendKind.SelectAwait):
-            return true
-    false
+    fn requires_async_runtime() -> bool:
+        for i in 0..self.bodies.len() as i32:
+            let body = self.bodies.get(i as i64)
+            if body.flavor == AsyncBodyKind.Async:
+                return true
+            if body.has_kind(AsyncSuspendKind.Await) or body.has_kind(AsyncSuspendKind.SelectAwait):
+                return true
+        false
 
 fn async_body_flavor_name(flavor: i32) -> str:
     if flavor == AsyncBodyKind.Async:

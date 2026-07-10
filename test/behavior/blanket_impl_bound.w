@@ -8,7 +8,7 @@ trait Parseable:
 
 impl[T:
     Readable] Parseable for T:
-    fn parse(self: T) -> str:
+    fn parse(self: &Self) -> str:
         self.read()
 
 type Opaque { value: i32 }

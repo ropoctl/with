@@ -31,48 +31,48 @@ pub fn Arena.init -> Arena:
     })
     a
 
-pub fn Arena.reset(self: Arena) -> Unit:
-    while self.slots.len() > 1:
-        self.slots.pop()
+impl Arena:
+    pub mut fn reset():
+        while self.slots.len() > 1:
+            self.slots.pop()
 
-pub fn Arena.len(self: Arena) -> i32:
-    self.slots.len() as i32
+    pub fn len(): self.slots.len() as i32
 
-pub fn Arena.alloc_i32(self: Arena, value: i32) -> ArenaId:
-    let id = arena_id_from_raw(self.slots.len() as i32)
-    self.slots.push(ArenaSlot {
-        kind: ARENA_SLOT_I32(),
-        int_value: value,
-        str_value: "",
-    })
-    id
+    pub mut fn alloc_i32(value: i32):
+        let id = arena_id_from_raw(self.slots.len() as i32)
+        self.slots.push(ArenaSlot {
+            kind: ARENA_SLOT_I32(),
+            int_value: value,
+            str_value: "",
+        })
+        id
 
-pub fn Arena.alloc_str(self: Arena, value: str) -> ArenaId:
-    let id = arena_id_from_raw(self.slots.len() as i32)
-    self.slots.push(ArenaSlot {
-        kind: ARENA_SLOT_STR(),
-        int_value: 0,
-        str_value: value,
-    })
-    id
+    pub mut fn alloc_str(value: str):
+        let id = arena_id_from_raw(self.slots.len() as i32)
+        self.slots.push(ArenaSlot {
+            kind: ARENA_SLOT_STR(),
+            int_value: 0,
+            str_value: value,
+        })
+        id
 
-pub fn Arena.contains(self: Arena, id: ArenaId) -> bool:
-    if not arena_id_is_valid(id):
-        return false
-    let raw = arena_id_raw(id)
-    raw > 0 and raw < self.slots.len() as i32
+    pub fn contains(id: ArenaId):
+        if not arena_id_is_valid(id):
+            return false
+        let raw = arena_id_raw(id)
+        raw > 0 and raw < self.slots.len() as i32
 
-pub fn Arena.kind(self: Arena, id: ArenaId) -> i32:
-    if not self.contains(id):
-        return ARENA_SLOT_EMPTY()
-    self.slots.get(arena_id_raw(id) as i64).kind
+    pub fn kind(id: ArenaId):
+        if not self.contains(id):
+            return ARENA_SLOT_EMPTY()
+        self.slots.get(arena_id_raw(id) as i64).kind
 
-pub fn Arena.get_i32(self: Arena, id: ArenaId) -> i32:
-    if self.kind(id) != ARENA_SLOT_I32():
-        return 0
-    self.slots.get(arena_id_raw(id) as i64).int_value
+    pub fn get_i32(id: ArenaId):
+        if self.kind(id) != ARENA_SLOT_I32():
+            return 0
+        self.slots.get(arena_id_raw(id) as i64).int_value
 
-pub fn Arena.get_str(self: Arena, id: ArenaId) -> str:
-    if self.kind(id) != ARENA_SLOT_STR():
-        return ""
-    self.slots.get(arena_id_raw(id) as i64).str_value
+    pub fn get_str(id: ArenaId):
+        if self.kind(id) != ARENA_SLOT_STR():
+            return ""
+        self.slots.get(arena_id_raw(id) as i64).str_value
