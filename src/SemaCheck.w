@@ -17239,6 +17239,7 @@ impl Sema:
         let mc_owner_sym_for_effect = self.method_owner_symbol_for_type(obj_type as i32)
         let mc_sig_idx_for_effect = if mc_owner_sym_for_effect != 0: self.lookup_method_sig(mc_owner_sym_for_effect, field) else: -1
         let mc_method_fn_for_resolution = if mc_owner_sym_for_effect != 0: self.lookup_method_fn(mc_owner_sym_for_effect, field) else: 0
+        self.trace_method_resolution(node, obj_type as i32, mc_owner_sym_for_effect, field, mc_sig_idx_for_effect, mc_method_fn_for_resolution)
         let arg_types: Vec[i32] = Vec.new()
         // docs/mut.md Rev 8 §15.8 — see check_call.
         let mc_iter_borrow_idxs: Vec[i32] = Vec.new()
@@ -20302,6 +20303,42 @@ impl Sema:
         if ext >= 0:
             return ext
         -1
+
+    // Tool Gap #2 — record the production method-resolution decision for one
+    // checked call site: inherent-registry hit, extension candidacy and
+    // visibility, and the selected signature/function. The row mirrors what
+    // lookup_method_sig/lookup_method_fn just decided; it never re-decides.
+    mut fn trace_method_resolution(node: i32, recv_type: i32, owner_sym: i32, method_sym: i32, sig_idx: i32, fn_sym: i32):
+        if owner_sym == 0 or method_sym == 0:
+            return
+        let key = sema_pair_key(owner_sym, method_sym)
+        let inherent = if self.method_lookup.sig_lookup.contains(key): 1 else: 0
+        var total = 0
+        var visible = 0
+        for i in 0..self.extension_method_owner_syms.len() as i32:
+            if self.extension_method_owner_syms.get(i as i64) != owner_sym or self.extension_method_syms.get(i as i64) != method_sym:
+                continue
+            total = total + 1
+            if self.extension_candidate_visible(i) != 0:
+                visible = visible + 1
+        var flags = 0
+        if inherent != 0:
+            flags = flags | 1
+        if sig_idx >= 0 and inherent == 0:
+            flags = flags | 2
+        if visible > 1:
+            flags = flags | 4
+        if total > 0 and visible == 0:
+            flags = flags | 8
+        self.mres_nodes.push(node)
+        self.mres_recv_types.push(recv_type)
+        self.mres_owner_syms.push(owner_sym)
+        self.mres_method_syms.push(method_sym)
+        self.mres_sigs.push(sig_idx)
+        self.mres_fn_syms.push(fn_sym)
+        self.mres_flags.push(flags)
+        self.mres_cands_total.push(total)
+        self.mres_cands_visible.push(visible)
 
     fn lookup_method_fn(type_sym: i32, method_sym: i32) -> i32:
         if type_sym <= 0 or method_sym <= 0:

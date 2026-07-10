@@ -8791,6 +8791,13 @@ impl MirBuilder:
         // Route through MirIntrinsic.GENERIC_CALL so codegen's gen_call handles it
         // (disc enums, from_int, Option methods, concrete/generic struct methods, etc.).
         let recorded_method_sig = self.sema.resolved_call_sigs.get(node)
+        // Scope-handle machinery (`s.track(...)`) is checked by the async-scope
+        // special path and never carries a resolved signature. It still routes
+        // through GENERIC_CALL — codegen dispatches it by name to
+        // with_scope_track — but no specialization contract can exist for it,
+        // so it must not be contract-required (the ownership validator would
+        // reject sig=-1/mono=0).
+        let scope_machinery_method = method_sym == self.sema.syms.track and not recorded_method_sig.is_some()
         let method_is_unresolved = callee_sym == method_sym and not recorded_method_sig.is_some()
         if method_is_unresolved or self.sym_is_generic_fn(callee_sym):
                 let gc_fn_op = self.const_operand(ConstKind.CK_FN, callee_sym, 0)
@@ -8832,7 +8839,8 @@ impl MirBuilder:
                         gc_args.push(self.const_operand(ConstKind.CK_INT, 0, self.sema.ty_i32))
                 let gc_args_id = self.body.new_call_args(gc_args)
                 self.body.set_call_intrinsic(gc_args_id, MirIntrinsic.GENERIC_CALL)
-                self.body.require_call_contract(gc_args_id)
+                if not scope_machinery_method:
+                    self.body.require_call_contract(gc_args_id)
                 self.body.set_call_ast_node(gc_args_id, node)
                 self.record_call_contract(gc_args_id, node, gc_sig_idx)
                 var gc_ret_ty = self.expr_type(node)

@@ -402,6 +402,20 @@ type Sema {
     // pointer value, while `mut self: Self` / value owner params are With values
     // whose native ABI passes an address.
     sig_value_ref_abi_params: Vec[i32],
+    // Tool Gap #2 — production method-resolution trace, one row per checked
+    // method call: which owner/method was looked up, whether the inherent
+    // registry hit, how many extension candidates existed and were visible,
+    // and the selected signature/function. `with analyze` renders these as
+    // kind=method-resolution facts; nothing downstream re-derives lookup.
+    mres_nodes: Vec[i32],
+    mres_recv_types: Vec[i32],
+    mres_owner_syms: Vec[i32],
+    mres_method_syms: Vec[i32],
+    mres_sigs: Vec[i32],
+    mres_fn_syms: Vec[i32],
+    mres_flags: Vec[i32],
+    mres_cands_total: Vec[i32],
+    mres_cands_visible: Vec[i32],
     // D7 receiver contracts are stored separately from ABI effects. The mode is
     // declaration syntax; required effects are derived from the checked body and
     // completed call graph. This keeps migration analysis from changing ABI policy.
@@ -1584,6 +1598,15 @@ fn sema_empty_state(pool: InternPool, diags: DiagnosticList, ast: AstPool) -> Se
         sig_param_view_origins: Vec.new(),
         sig_param_eff_starts: Vec.new(),
         sig_value_ref_abi_params: Vec.new(),
+        mres_nodes: Vec.new(),
+        mres_recv_types: Vec.new(),
+        mres_owner_syms: Vec.new(),
+        mres_method_syms: Vec.new(),
+        mres_sigs: Vec.new(),
+        mres_fn_syms: Vec.new(),
+        mres_flags: Vec.new(),
+        mres_cands_total: Vec.new(),
+        mres_cands_visible: Vec.new(),
         sig_receiver_modes: Vec.new(),
         sig_receiver_required_effects: Vec.new(),
         effect_flow_edges: Vec.new(),

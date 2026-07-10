@@ -35,6 +35,7 @@ pub enum AnalysisFactKind: i32:
     Expression = 21
     AstNode = 22
     MethodRegistration = 23
+    MethodResolution = 24
 
 // Stable analysis-domain receiver modes. Keep tools on this public schema rather
 // than exposing Sema's internal ReceiverMode representation.
@@ -240,6 +241,7 @@ fn analysis_kind_name(kind: AnalysisFactKind) -> str:
     if kind == AnalysisFactKind.Expression: return "expression"
     if kind == AnalysisFactKind.AstNode: return "ast-node"
     if kind == AnalysisFactKind.MethodRegistration: return "method-registration"
+    if kind == AnalysisFactKind.MethodResolution: return "method-resolution"
     "unknown"
 
 fn analysis_slice(text: str, start: i32, end: i32): text.slice(start as i64, end as i64)
@@ -399,11 +401,12 @@ impl AnalysisReport:
             AnalysisFactKind.Phase, AnalysisFactKind.Invariant, AnalysisFactKind.SourceMatch,
             AnalysisFactKind.Type, AnalysisFactKind.Field, AnalysisFactKind.Expression,
             AnalysisFactKind.AstNode, AnalysisFactKind.MethodRegistration,
+            AnalysisFactKind.MethodResolution,
         ]
         let stage_counts: Vec[i32] = Vec.new()
         let kind_counts: Vec[i32] = Vec.new()
         for i in 0..8: stage_counts.push(0)
-        for i in 0..24: kind_counts.push(0)
+        for i in 0..25: kind_counts.push(0)
         var total = 0
         for i in 0..self.facts.len() as i32:
             let fact = self.facts.get(i as i64)

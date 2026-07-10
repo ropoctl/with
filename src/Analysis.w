@@ -603,6 +603,61 @@ fn analysis_collect_resolved_calls(report: &AnalysisReport, sema: &Sema, source_
         fact = analysis_with_node_location(move fact, sema, node, source_path, source_text)
         report.add(fact)
 
+// Tool Gap #2 — production method-resolution decisions, one fact per checked
+// method call: receiver type, owner, method, inherent-vs-extension source,
+// candidate/visibility counts, and the selected signature/function. The
+// verdict text names the rejection reason for misses so lookup failures are
+// diagnosable without re-deriving resolution from source.
+fn analysis_collect_method_resolutions(report: &AnalysisReport, sema: &Sema, source_path: str, source_text: str):
+    for i in 0..sema.mres_nodes.len() as i32:
+        let owner = sema.mres_owner_syms.get(i as i64)
+        let method = sema.mres_method_syms.get(i as i64)
+        let sig = sema.mres_sigs.get(i as i64)
+        let fn_sym = sema.mres_fn_syms.get(i as i64)
+        let flags = sema.mres_flags.get(i as i64)
+        let total = sema.mres_cands_total.get(i as i64)
+        let visible = sema.mres_cands_visible.get(i as i64)
+        let inherent = (flags & 1) != 0
+        let via_extension = (flags & 2) != 0
+        // The recorder captured the direct owner-registry probe; builtin,
+        // generic, and trait-routed methods resolve later. Join against the
+        // final resolved-call sidecar so the verdict reflects the selection
+        // the program actually got, and keep the probe fields as the
+        // inherent/extension diagnostics.
+        let mres_node = sema.mres_nodes.get(i as i64)
+        let final_sig_opt = sema.resolved_call_sigs.get(mres_node)
+        let final_sig = if final_sig_opt.is_some(): final_sig_opt.unwrap() else: sig
+        let final_mono_opt = sema.resolved_call_mono_syms.get(mres_node)
+        let final_mono = if final_mono_opt.is_some(): final_mono_opt.unwrap() else: fn_sym
+        let verdict = if sig >= 0:
+            if inherent: "inherent" else: "extension"
+        else if final_sig >= 0:
+            "late-resolved"
+        else if (flags & 4) != 0:
+            "ambiguous-extensions"
+        else if (flags & 8) != 0:
+            "candidates-not-visible"
+        else:
+            // The compile succeeded, so a miss in both the registry probe and
+            // the resolved-call sidecar means the method resolved through a
+            // surface outside the signature registry (builtin containers,
+            // trait dispatch, deref chains, language machinery like
+            // scope.track) — not an unknown method.
+            "outside-registry"
+        var fact = AnalysisFact.new(AnalysisStage.Sema, AnalysisFactKind.MethodResolution)
+        fact.id = i
+        fact.parent = final_sig
+        fact.node = mres_node
+        fact.symbol = method
+        fact.owner = owner
+        fact.index = if final_mono != 0: final_mono else: fn_sym
+        fact.type_id = sema.mres_recv_types.get(i as i64)
+        fact.flags = flags
+        fact.name = sema.pool_resolve(owner) ++ "." ++ sema.pool_resolve(method)
+        fact.detail = f"sig={final_sig} fn={fact.index} verdict={verdict} probe-sig={sig} inherent={inherent} via-extension={via_extension} candidates={total} visible={visible} recv-type={fact.type_id}"
+        fact = analysis_with_node_location(move fact, sema, mres_node, source_path, source_text)
+        report.add(fact)
+
 fn analysis_collect_diagnostics(report: &AnalysisReport, sema: &Sema):
     for i in 0..sema.diags.items.len() as i32:
         let diag = sema.diags.items.get(i as i64)
@@ -652,6 +707,7 @@ fn analysis_collect_sema(report: &AnalysisReport, sema: &Sema, source_path: str,
     analysis_collect_effect_edges(report, sema)
     analysis_collect_specializations(report, sema, source_path)
     analysis_collect_resolved_calls(report, sema, source_path, source_text)
+    analysis_collect_method_resolutions(report, sema, source_path, source_text)
     analysis_collect_diagnostics(report, sema)
 
 fn analysis_operand_kind_name(kind: i32) -> str:
@@ -1138,6 +1194,7 @@ fn analysis_fact_explain_query(kind: str, wanted: str) -> str:
     if kind == "expression": return "kind=expression,detail~" ++ wanted
     if kind == "node": return "kind=ast-node"
     if kind == "method": return "kind=method-registration,name~" ++ wanted
+    if kind == "resolution": return "kind=method-resolution,name~" ++ wanted
     wanted
 
 fn analysis_explain_request(request: str) -> str:

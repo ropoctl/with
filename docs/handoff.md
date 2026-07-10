@@ -240,6 +240,34 @@ staleness is also a plausible cause of finding B's method-registry delta.
 Lesson: after editing `lib/std/*` in a targeted-build workflow, regenerate
 `:compat-runtime-source` before rebuilding.
 
+## NEXT LOOP (diagnosed, unfixed): Box transparent-receiver autoref regression
+
+Gate 4 (build PASS, **fixpoint PASS — 4th consecutive**, async test now
+green) surfaced the next cache stratum: `behav_box_as_ptr/as_ref/
+as_ref_struct` SIGSEGV (139). Diagnosis complete, fix not started:
+
+- IR (box-ref repro): `Box.new` returns the payload ptr; caller passes it
+  DIRECTLY to `Box.as_ref__receiver__324_3(ptr %0)`; the body double-derefs
+  (`load ptr, ptr %0`) per its `&Self` contract → loads 42-as-address →
+  caller loads from it → SEGV. One indirection too shallow — #627's exact
+  class, reintroduced for the MIGRATED `impl[T] Box[T]:` synthetic-read
+  receiver form (old top-level `fn Box.as_ref[T](self: &Self)` worked).
+- `--dump-abi`: instantiated `Box.as_ref__receiver__324_3` param[0]
+  ty=326 eff=[read] value_ref_abi=0 → COPY — the `&Self` receiver arrives
+  as a plain pointer VALUE and the call site binds the box value, not the
+  box slot's address. The `__receiver__` mangled instantiation path skips
+  the autoref the explicit-`&Self` path performs.
+- method-resolution fact: verdict=late-resolved sig=172 recv-type=324 —
+  resolution is fine; the defect is call-site receiver marshalling.
+- Suspect surface: `lower_receiver_with_method_autoderef_for_method` (and
+  the generic `__receiver__` instantiation's receiver binding) — for a
+  transparent std Box (sema_type_to_llvm special-cases Box[T] → ptr), the
+  "already a pointer" shape must not be mistaken for "already a
+  reference"; the decision must key on SEMA types (recv 324 = Box inst vs
+  param 326 = &Box) and take the receiver PLACE address.
+- After the fix: /drop-audit is mandatory (receiver-lowering change), then
+  the three box tests, then gates.
+
 ## Remaining Work (in order)
 
 1. ~~Trait instance/associated syntax ruling~~ — **resolved by the existing
@@ -253,10 +281,26 @@ Lesson: after editing `lib/std/*` in a targeted-build workflow, regenerate
    nodes before codegen, shifting pool extras, so the misaligned 6-wide
    reads yielded different garbage per pipeline. No pipeline-selection
    divergence exists.
-3. **Tool Gap #2:** per-call method-resolution/visibility facts at
-   production lookup (`method_lookup.sig_lookup` +
-   `unique_visible_extension_sig`, `SemaCheck.w` ~20292) via a Sema-side
-   resolution trace + collector.
+3. ~~Tool Gap #2~~ — **DONE (night 2026-07-10).** Sema records a
+   method-resolution trace row per checked call
+   (`trace_method_resolution` in `SemaCheck.w`, called from
+   `check_method_call_parts`'s resolution point): receiver type, owner,
+   method, inherent-registry hit, extension candidate/visibility counts,
+   selected sig/fn. `analysis_collect_method_resolutions` joins each row
+   against the final `resolved_call_sigs` sidecar and renders
+   `kind=method-resolution` facts with verdicts: `inherent`, `extension`,
+   `late-resolved`, `ambiguous-extensions`, `candidates-not-visible`,
+   `outside-registry` (compiled but resolved via builtin/trait/deref/
+   machinery surfaces), `unknown-method`. Requests: `select:kind=
+   method-resolution`, `explain:resolution:<name>` — both
+   semantic-snapshot-safe. **First field use:** proved in one query that
+   `s.track(...)` carries no Sema resolution (by design), which pinned gate
+   3's async-scope contract abort to MirLower's new `method_is_unresolved`
+   guard dragging language machinery into the generic-contract branch —
+   fixed by keeping `track` on GENERIC_CALL (codegen name-dispatches
+   `with_scope_track`) while waiving only the impossible contract
+   requirement. Whole-tree audit with the new facts: 2,144,752 facts,
+   0 violations.
 4. Focused tests per handoff D (cross-file inherent impl, scoped extend
    visibility, same-named methods on different owners, generic owner
    identity, comptime impl-kind preservation, return-ABI consistency,
