@@ -645,6 +645,38 @@ The seven, with everything known:
   iter_pipeline_local — frozen-base BUG at resolve_generic_type_frozen
   (SemaCheck.w:739) still unexplored.
 
+## Loop session close (2026-07-11 ~08:00): 27 → 3, provenance rule absolute
+
+Gate thirteen measured **4 of 849** (fixpoint tenth-consecutive). Since:
+iter_pipeline_local FIXED (frozen generic-base resolution falls back to
+the raw type registry — the frozen twin recovers TYPE IDENTITY, it does
+not re-police visibility; 68609808). Suite debt now **three**:
+
+1. **extension_coherence** — after the registration dedupe (40b20fc6) the
+   ambiguity STILL lists w.label ×3 with three DIFFERENT raw source paths
+   sharing one display name: the `w` support module is checked under
+   multiple path spellings (module-identity/normalization upstream of the
+   extension registry). Probe: print extension_method_paths raw at the
+   ambiguity site, then find who checks the module thrice.
+2. **generic_nested_type_param** — struct-literal field expected type does
+   not propagate into a bare generic ctor (`Pair { a: v, b: Vec.new() }`
+   → "saw Vec[i64] and Vec").
+3. **blanket_impl_basic** — blanket `impl[T] for T` read receiver
+   specializes to &i32 for Copy T; `int_to_string(self)` rejects &i32
+   (needs &Copy→Copy arg coercion or Copy-receiver reclassification in
+   concrete checks).
+
+**PROVENANCE RULE IS NOW ABSOLUTE (2421cc6c):** the bridge was caught
+miscompiling the noalias-guard code ITSELF — gen-1 binaries crash on
+shapes gen-2 runs perfectly (mx1 40, guard ok). Verify NOTHING under
+bridge-built (gen-1) binaries; every verification builds two generations
+and trusts only gen-2. The defensive noalias walk (non-function bail,
+negative/OOB index skip, WITH_MIR_AUDIT prints) stays as a real
+invariant guard regardless. The reseed retires the whole hazard class —
+it is the top of the queue after the three singletons (or before, at the
+maintainer's call: every remaining red is pure sema, reproducible
+post-reseed).
+
 ## Remaining Work (in order)
 
 1. ~~Trait instance/associated syntax ruling~~ — **resolved by the existing
