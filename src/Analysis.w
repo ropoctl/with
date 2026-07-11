@@ -1327,7 +1327,7 @@ fn analysis_help() -> str:
         "  matrix:<query>                          compact cross-stage fact matrix\n" ++
         "  explain:call|value|effect|specialization|diagnostic|type|field|expression|method:<text>\n" ++
         "  explain:node:<id>                       bounded AST + Sema type/resolution tree\n" ++
-        "  audit:calls|effects|storage|methods|mir|returns|receivers|receiver-surface|phase|codegen|all\n" ++
+        "  audit:calls|effects|storage|methods|mir|returns|receivers|receiver-surface|phase|codegen|trait-tables|all\n" ++
         "  path:call:<from>:<to>                   shortest live MIR call path\n" ++
         "  closure:call:<root>                     live MIR call closure\n" ++
         "  lldb:<query>                            breakpoints derived from matching facts\n" ++
@@ -1354,6 +1354,7 @@ fn compiler_analysis_render(report: &AnalysisReport, request: str) -> str:
     if request == "audit:receivers": return report.render_verdict("receiver-audit")
     if request == "audit:receiver-surface": return report.render_verdict("receiver-surface-audit")
     if request == "audit:codegen": return report.render_verdict("codegen-contract-audit")
+    if request == "audit:trait-tables": return report.render_verdict("trait-table-audit")
     if request == "audit:all": return report.render_verdict("compiler-analysis-audit")
     if request.starts_with("path:call:"):
         let endpoints = analysis_slice(request, 10, request.len() as i32)
@@ -1401,6 +1402,9 @@ fn compiler_analysis_run(sema: &Sema, mir_mod: &MirModule, pool: &InternPool, so
     else if request == "audit:receiver-surface":
         analysis_audit_receiver_surface(&report, sema)
     else if request == "audit:codegen":
+        needs_codegen = true
+        codegen_query = "audit"
+    else if request == "audit:trait-tables":
         needs_codegen = true
         codegen_query = "audit"
     else if request == "audit:all":

@@ -6,6 +6,7 @@ use InternPool
 use Diagnostic
 use Source
 use Overflow
+use AnalysisTypes
 use compiler.TrackedInputs
 
 extern fn with_eprint(s: str) -> Unit
@@ -69,6 +70,125 @@ impl Codegen:
         self.trait_map.insert(name_sym, trait_idx)
         self.trait_idx_syms.push(name_sym)
         self.trait_decl_nodes.insert(name_sym, trait_node)
+
+    fn audit_trait_method_row(trait_name: str, trait_node: i32, trait_idx: i32, method_start: i32, method_idx: i32):
+        let row = method_start + method_idx
+        let ast_name = self.pool.trait_method_field(trait_node, method_idx, TRAIT_METHOD_NAME)
+        let ast_flags = self.pool.trait_method_field(trait_node, method_idx, TRAIT_METHOD_FLAGS)
+        let ast_param_start = self.pool.trait_method_field(trait_node, method_idx, TRAIT_METHOD_PARAM_START)
+        let ast_param_count = self.pool.trait_method_field(trait_node, method_idx, TRAIT_METHOD_PARAM_COUNT)
+        let ast_ret_node = self.pool.trait_method_field(trait_node, method_idx, TRAIT_METHOD_RETURN_TYPE)
+        let ast_default_body = self.pool.trait_method_field(trait_node, method_idx, TRAIT_METHOD_DEFAULT_BODY)
+        let collected_name = self.trait_method_names.get(row as i64)
+        let collected_flags = self.trait_method_flags.get(row as i64)
+        let collected_param_start = self.trait_method_param_starts.get(row as i64)
+        let collected_param_count = self.trait_method_param_counts.get(row as i64)
+        let collected_ret_node = self.trait_method_ret_nodes.get(row as i64)
+        let collected_default_body = self.trait_method_default_bodies.get(row as i64)
+        if collected_name != ast_name:
+            self.analysis_fail(f"trait table {trait_name} index={trait_idx} method={method_idx}: name={collected_name} AST={ast_name}")
+        if collected_flags != ast_flags:
+            self.analysis_fail(f"trait table {trait_name} index={trait_idx} method={method_idx}: flags={collected_flags} AST={ast_flags}")
+        if collected_param_start != ast_param_start:
+            self.analysis_fail(f"trait table {trait_name} index={trait_idx} method={method_idx}: param-start={collected_param_start} AST={ast_param_start}")
+        if collected_param_count != ast_param_count:
+            self.analysis_fail(f"trait table {trait_name} index={trait_idx} method={method_idx}: param-count={collected_param_count} AST={ast_param_count}")
+        if collected_ret_node != ast_ret_node:
+            self.analysis_fail(f"trait table {trait_name} index={trait_idx} method={method_idx}: return-node={collected_ret_node} AST={ast_ret_node}")
+        if collected_default_body != ast_default_body:
+            self.analysis_fail(f"trait table {trait_name} index={trait_idx} method={method_idx}: default-body={collected_default_body} AST={ast_default_body}")
+
+    // Prove that codegen's denormalized trait metadata is an exact projection of
+    // the canonical AST records. This permanently catches record-stride drift:
+    // table lengths can stay parallel while every method after the first points
+    // at the wrong AST fields.
+    fn audit_trait_table_contracts():
+        if self.analysis_enabled == 0:
+            return
+        let trait_count = self.trait_idx_syms.len() as i32
+        let method_count = self.trait_method_names.len() as i32
+        let trait_tables_parallel =
+            self.trait_vtable_types.len() as i32 == trait_count and
+            self.trait_method_starts.len() as i32 == trait_count and
+            self.trait_method_counts.len() as i32 == trait_count
+        if not trait_tables_parallel:
+            self.analysis_fail(f"trait tables are not parallel: symbols={trait_count} vtables={self.trait_vtable_types.len() as i32} starts={self.trait_method_starts.len() as i32} counts={self.trait_method_counts.len() as i32}")
+        let method_tables_parallel =
+            self.trait_method_flags.len() as i32 == method_count and
+            self.trait_method_ret_types.len() as i32 == method_count and
+            self.trait_method_param_counts.len() as i32 == method_count and
+            self.trait_method_param_starts.len() as i32 == method_count and
+            self.trait_method_ret_nodes.len() as i32 == method_count and
+            self.trait_method_default_bodies.len() as i32 == method_count
+        if not method_tables_parallel:
+            self.analysis_fail(f"trait method tables are not parallel: names={method_count} flags={self.trait_method_flags.len() as i32} ret-types={self.trait_method_ret_types.len() as i32} param-counts={self.trait_method_param_counts.len() as i32} param-starts={self.trait_method_param_starts.len() as i32} ret-nodes={self.trait_method_ret_nodes.len() as i32} defaults={self.trait_method_default_bodies.len() as i32}")
+        if self.trait_map.len() as i32 != trait_count:
+            self.analysis_fail(f"trait map size={self.trait_map.len() as i32} indexed-symbols={trait_count}")
+
+        let mapped_syms = self.trait_map.keys()
+        for ki in 0..mapped_syms.len() as i32:
+            let trait_sym = mapped_syms.get(ki as i64)
+            let trait_idx = self.trait_map.get(trait_sym).unwrap()
+            if trait_idx < 0 or trait_idx >= trait_count:
+                self.analysis_fail(f"trait map symbol={trait_sym}: index={trait_idx} is out of range 0..{trait_count}")
+            else if self.trait_idx_syms.get(trait_idx as i64) != trait_sym:
+                self.analysis_fail(f"trait map symbol={trait_sym}: index={trait_idx} points to symbol={self.trait_idx_syms.get(trait_idx as i64)}")
+
+        var canonical_method_start = 0
+        for trait_idx in 0..trait_count:
+            let trait_sym = self.trait_idx_syms.get(trait_idx as i64)
+            let trait_name = self.intern.resolve(trait_sym)
+            let mapped_idx = self.trait_map.get(trait_sym)
+            if not mapped_idx.is_some():
+                self.analysis_fail(f"trait index={trait_idx} symbol={trait_sym}: missing inverse map entry")
+            else if mapped_idx.unwrap() != trait_idx:
+                self.analysis_fail(f"trait index={trait_idx} symbol={trait_sym}: inverse map index={mapped_idx.unwrap()}")
+            if not trait_tables_parallel:
+                continue
+            let decl = self.trait_decl_nodes.get(trait_sym)
+            if not decl.is_some():
+                self.analysis_fail(f"trait table {trait_name} index={trait_idx}: missing AST declaration")
+                continue
+            let trait_node = decl.unwrap()
+            if self.pool.kind(trait_node) != NodeKind.NK_TRAIT_DECL:
+                self.analysis_fail(f"trait table {trait_name} index={trait_idx}: node={trait_node} is not a trait declaration")
+                continue
+            if self.pool.get_data0(trait_node) != trait_sym:
+                self.analysis_fail(f"trait table {trait_name} index={trait_idx}: declaration symbol={self.pool.get_data0(trait_node)} expected={trait_sym}")
+            let ast_method_count = self.pool.trait_method_count(trait_node)
+            let collected_start = self.trait_method_starts.get(trait_idx as i64)
+            let collected_count = self.trait_method_counts.get(trait_idx as i64)
+            if collected_start != canonical_method_start:
+                self.analysis_fail(f"trait table {trait_name} index={trait_idx}: method-start={collected_start} expected={canonical_method_start}")
+            if collected_count != ast_method_count:
+                self.analysis_fail(f"trait table {trait_name} index={trait_idx}: method-count={collected_count} AST={ast_method_count}")
+            let vtable_ty = self.trait_vtable_types.get(trait_idx as i64)
+            var vtable_slots = -1
+            if vtable_ty == 0 or wl_get_type_kind(vtable_ty) != wl_struct_type_kind():
+                self.analysis_fail(f"trait table {trait_name} index={trait_idx}: vtable type is not an LLVM struct")
+            else:
+                vtable_slots = wl_count_struct_elem_types(vtable_ty)
+                if vtable_slots != ast_method_count:
+                    self.analysis_fail(f"trait table {trait_name} index={trait_idx}: vtable-slots={vtable_slots} AST methods={ast_method_count}")
+            let row_range_valid = collected_start >= 0 and collected_count >= 0 and collected_start + collected_count <= method_count
+            if not row_range_valid:
+                self.analysis_fail(f"trait table {trait_name} index={trait_idx}: row range start={collected_start} count={collected_count} rows={method_count}")
+            else if method_tables_parallel and collected_count == ast_method_count:
+                for method_idx in 0..ast_method_count:
+                    self.audit_trait_method_row(trait_name, trait_node, trait_idx, collected_start, method_idx)
+            var fact = AnalysisFact.new(AnalysisStage.Codegen, AnalysisFactKind.Invariant)
+            fact.id = trait_idx
+            fact.parent = trait_node
+            fact.node = trait_node
+            fact.symbol = trait_sym
+            fact.index = collected_start
+            fact.flags = 256
+            fact.name = trait_name
+            fact.detail = f"trait-table methods={collected_count} ast-methods={ast_method_count} vtable-slots={vtable_slots}"
+            self.analysis_add(fact)
+            canonical_method_start = canonical_method_start + ast_method_count
+        if canonical_method_start != method_count:
+            self.analysis_fail(f"trait method rows={method_count} canonical AST rows={canonical_method_start}")
 
     fn find_trait_method_offset(trait_idx: i32, method_sym: i32) -> i32:
         let start = self.trait_method_starts.get(trait_idx as i64)

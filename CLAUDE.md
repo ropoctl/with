@@ -679,11 +679,12 @@ Requests:
 - `select:<query>`, `summary[:<query>]`, `matrix:<query>`: query the same fact
   database. Queries are comma-separated `field=value`, `field!=value`, or
   `field~substring` predicates; run `with analyze file.w help` for fields.
-- `audit:calls|effects|storage|methods|mir|returns|receivers|phase|codegen|all`: hard invariants. `all`
+- `audit:calls|effects|storage|methods|mir|returns|receivers|receiver-surface|phase|codegen|trait-tables|all`: hard invariants. `all`
   includes typed/ownership MIR validators, receiver declarations/contracts,
   fixed-point effects, freeze/eager-cache/specialization checks, frozen-phase
   mutable-Sema re-entry, LLVM declaration ABI, caller marshalling, callee aliasing,
-  instrumentation coverage, and AST-indexed storage bounds/key-capacity checks.
+  instrumentation coverage, AST-indexed storage bounds/key-capacity checks, and
+  codegen trait-table/vtable agreement with canonical AST method records.
   `audit:storage` permanently checks the resolved-call table/key class that once
   overflowed when AST node IDs crossed 32767/65535.
 - `path:call` / `closure:call`: operate on the live MIR call graph; use these in

@@ -129,6 +129,7 @@ impl Zcu:
         let rc = cg.gen_module_from_mir(move backend_mir, backend_pool)
         cg.audit_declared_share_place_contracts()
         cg.audit_return_shape_contracts()
+        cg.audit_trait_table_contracts()
         cg.audit_codegen_call_coverage()
         if rc != 0:
             cg.analysis_fail("code generation failed during integrated analysis")
