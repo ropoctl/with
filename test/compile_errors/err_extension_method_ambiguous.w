@@ -1,4 +1,4 @@
-//! expect-error: ambiguous extension method 'tag'
+//! expect-error: ambiguous extension method 'tag'; candidates: slug.tag, url.tag
 
 use extension_coherence.base
 use extension_coherence.slug

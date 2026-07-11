@@ -20449,7 +20449,7 @@ impl Sema:
             flags = flags | 1
         if sig_idx >= 0 and inherent == 0:
             flags = flags | 2
-        if visible > 1:
+        if self.visible_extension_candidate_count(owner_sym, method_sym) > 1:
             flags = flags | 4
         if total > 0 and visible == 0:
             flags = flags | 8
@@ -20475,7 +20475,7 @@ fn sema_module_display_name(path: str) -> str:
     var start = 0
     for i in 0..path.len() as i32:
         let ch = path.byte_at(i as i64)
-        if ch == 46 or ch == 47 or ch == 92:
+        if ch == 47 or ch == 92:
             start = i + 1
     var end = path.len()
     if end - start > 2 and path.slice(end - 2, end) == ".w":
@@ -20485,7 +20485,12 @@ fn sema_module_display_name(path: str) -> str:
 fn sema_import_alias_matches(import_text: str, alias: str) -> i32:
     if import_text == alias:
         return 1
-    if sema_module_display_name(import_text) == alias:
+    var start = 0
+    for i in 0..import_text.len() as i32:
+        let ch = import_text.byte_at(i as i64)
+        if ch == 46 or ch == 47 or ch == 92:
+            start = i + 1
+    if import_text.slice(start, import_text.len()) == alias:
         return 1
     0
 
@@ -20541,7 +20546,22 @@ impl Sema:
             return 0
         self.extension_path_visible_from_current(self.extension_method_paths.get(idx as i64))
 
+    // §11.4: an extension declared beside its type is inherent-equivalent
+    // and wins over extensions imported from other modules.
+    fn inherent_equivalent_extension_candidate(owner_sym: i32, method_sym: i32) -> i32:
+        let owner_path = self.type_decl_source_path(owner_sym)
+        if owner_path.len() == 0:
+            return -1
+        for i in 0..self.extension_method_owner_syms.len() as i32:
+            if self.extension_method_owner_syms.get(i as i64) != owner_sym or self.extension_method_syms.get(i as i64) != method_sym:
+                continue
+            if self.extension_candidate_visible(i) != 0 and self.extension_method_paths.get(i as i64) == owner_path:
+                return i
+        -1
+
     fn visible_extension_candidate_count(owner_sym: i32, method_sym: i32) -> i32:
+        if self.inherent_equivalent_extension_candidate(owner_sym, method_sym) >= 0:
+            return 1
         var count = 0
         for i in 0..self.extension_method_owner_syms.len() as i32:
             if self.extension_method_owner_syms.get(i as i64) == owner_sym and self.extension_method_syms.get(i as i64) == method_sym and self.extension_candidate_visible(i) != 0:
@@ -20549,6 +20569,9 @@ impl Sema:
         count
 
     fn unique_visible_extension_sig(owner_sym: i32, method_sym: i32) -> i32:
+        let inherent = self.inherent_equivalent_extension_candidate(owner_sym, method_sym)
+        if inherent >= 0:
+            return self.extension_method_sig_idxs.get(inherent as i64)
         var found = -1
         var count = 0
         for i in 0..self.extension_method_owner_syms.len() as i32:
@@ -20563,6 +20586,9 @@ impl Sema:
         -1
 
     fn unique_visible_extension_fn(owner_sym: i32, method_sym: i32) -> i32:
+        let inherent = self.inherent_equivalent_extension_candidate(owner_sym, method_sym)
+        if inherent >= 0:
+            return self.extension_method_fn_syms.get(inherent as i64)
         var found = 0
         var count = 0
         for i in 0..self.extension_method_owner_syms.len() as i32:
