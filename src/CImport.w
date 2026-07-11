@@ -1975,11 +1975,22 @@ fn ci_emit_member_fn_wrapper(session: i64, idx: i32, struct_name: str, method_na
     if ci_starts_with(ret, "__UNSUPPORTED:"):
         return ""
 
-    // Build parameter list: self + remaining params
+    // D7: instance methods are impl-block methods with a keyword receiver
+    // mode — the pre-D7 top-level `fn S.m(self: *T, ...)` explicit-self form
+    // now fails receiver-mode enforcement. The C pointer constness picks the
+    // mode (`const T*` → `fn`, `T*` → `mut fn`), and the body rebuilds the
+    // raw receiver pointer with `&raw` (C PODs are Copy, so the raw-ref
+    // escape rule stays quiet; a stronger-than-required declared mode is
+    // accepted by enforcement).
     let self_type = ci_pointer_type_explicit_mut(first_param_type)
     var raw_wrapper = ci_cimport_type_is_raw_abi(self_type) or ci_cimport_type_is_raw_abi(ret)
-    var params = "self: " ++ self_type
-    var call_args = "self"
+    let recv_mut = ci_starts_with(self_type, "*mut ")
+    var params = ""
+    // `self as *const T` peels the receiver alias to the place address
+    // (`&raw const self` would take the address of the reference cell —
+    // *const &T). Cast-to-raw of a non-Box source neither consumes nor
+    // escapes, so the receiver mode stays consistent with effects.
+    var call_args = "(self as " ++ self_type ++ ")"
     pi = 1
     while pi < param_count:
         let pname = with_cimport_fn_param_name(session, idx, pi)
@@ -1987,13 +1998,19 @@ fn ci_emit_member_fn_wrapper(session: i64, idx: i32, struct_name: str, method_na
         if ci_cimport_param_type_requires_raw_abi(ptype):
             raw_wrapper = true
         let actual_name = if pname.len() > 0: ci_escape_reserved(pname) else: f"p{pi}"
-        params = params ++ ", " ++ actual_name ++ ": " ++ ptype
+        if params.len() > 0:
+            params = params ++ ", "
+        params = params ++ actual_name ++ ": " ++ ptype
         call_args = call_args ++ ", " ++ actual_name
         pi = pi + 1
 
     let ret_prefix = if ret == "Unit": "" else: "return "
-    let fn_kw = if raw_wrapper: "unsafe fn " else: "fn "
-    ci_render_generated_fn_body(fn_kw ++ safe_struct ++ "." ++ safe_method ++ "(" ++ params ++ ") -> " ++ ret, "    " ++ ret_prefix ++ safe_fn_name ++ "(" ++ call_args ++ ")") ++ "\n"
+    let mode_kw = if recv_mut: "mut fn " else: "fn "
+    let fn_kw = (if raw_wrapper: "unsafe " else: "") ++ mode_kw
+    let method_text = ci_render_generated_fn_body("    " ++ fn_kw ++ safe_method ++ "(" ++ params ++ ") -> " ++ ret, "        " ++ ret_prefix ++ safe_fn_name ++ "(" ++ call_args ++ ")")
+    if migrate_prefer_brace():
+        return "impl " ++ safe_struct ++ " {\n" ++ method_text ++ "\n}\n"
+    "impl " ++ safe_struct ++ ":\n" ++ method_text ++ "\n"
 
 // Emit a constructor wrapper: fn StructName.new(params...) -> Ret: fn_name(params...)
 fn ci_emit_constructor_wrapper(session: i64, idx: i32, struct_name: str, method_name: str) -> str:

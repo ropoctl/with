@@ -3129,7 +3129,7 @@ impl Parser:
         let extra_start = self.pool.extra_len()
         var method_count = 0
 
-        while self.peek() == TokenKind.TK_AT or self.peek() == TokenKind.TK_KW_FN or self.peek() == TokenKind.TK_KW_PUB or self.peek() == TokenKind.TK_KW_ASYNC or self.peek() == TokenKind.TK_KW_MUT or self.peek() == TokenKind.TK_KW_MOVE or self.peek() == TokenKind.TK_KW_TYPE or (impl_braced and self.peek() == TokenKind.TK_R_BRACE):
+        while self.peek() == TokenKind.TK_AT or self.peek() == TokenKind.TK_KW_FN or self.peek() == TokenKind.TK_KW_PUB or self.peek() == TokenKind.TK_KW_UNSAFE or self.peek() == TokenKind.TK_KW_ASYNC or self.peek() == TokenKind.TK_KW_MUT or self.peek() == TokenKind.TK_KW_MOVE or self.peek() == TokenKind.TK_KW_TYPE or (impl_braced and self.peek() == TokenKind.TK_R_BRACE):
             if impl_braced and self.peek() == TokenKind.TK_R_BRACE:
                 break
             if not impl_braced:
@@ -3158,6 +3158,16 @@ impl Parser:
             let method_start = self.current_start()
             if self.peek() == TokenKind.TK_KW_PUB:
                 method_vis = Visibility.Public
+                self.advance()
+            // Unsafe instance methods: `[pub] unsafe [mut|move] fn name(...)`.
+            // Same ordering as top-level `pub unsafe fn`; same semantics as the
+            // top-level form (body wrapped in an FN_BODY-origin unsafe block, so
+            // callers need an unsafe context). The flag-day removal of top-level
+            // explicit-self methods left unsafe instance methods with no
+            // spelling — c_import's auto-method wrappers are the first users.
+            var m_unsafe = 0
+            if self.peek() == TokenKind.TK_KW_UNSAFE:
+                m_unsafe = 1
                 self.advance()
             var m_async = 0
             if self.peek() == TokenKind.TK_KW_ASYNC:
@@ -3235,7 +3245,10 @@ impl Parser:
             if m_async != 0:
                 flags = flags + FnFlags.ASYNC
 
-            let fn_node = self.pool.add_node(NodeKind.NK_FN_DECL, method_start, self.prev_end(), mangled, body, flags)
+            var final_method_body = body
+            if m_unsafe != 0:
+                final_method_body = self.pool.add_node(NodeKind.NK_UNSAFE_BLOCK, self.pool.get_start(body), self.pool.get_end(body), body, UNSAFE_KIND_BLOCK, UNSAFE_ORIGIN_FN_BODY)
+            let fn_node = self.pool.add_node(NodeKind.NK_FN_DECL, method_start, self.prev_end(), mangled, final_method_body, flags)
             let meta_flags = flags + required_param_count * FN_META_REQUIRED_UNIT
             let final_m_tp_start = if m_tp_count > 0: m_tp_start else: 0
             self.pool.add_fn_meta(fn_node, meta_flags, ret_type, m_params_start, param_count, final_m_tp_start, m_tp_count)
