@@ -4323,7 +4323,10 @@ impl MirBuilder:
         self.body.push_stmt(self.cur_bb, StmtKind.Assign, recv_place, rv, self.ast.get_start(node))
         let args: Vec[i32] = Vec.new()
         args.push(self.body.new_operand(OperandKind.OK_COPY, recv_place))
-        let deref_op = self.lower_resolved_call_with_operand_args(deref_info.deref_fn, args, result_ref_ty, node, false)
+        // Sema records the concrete deref specialization on the base expr
+        // (ensure_user_deref_specialization), so the dispatch keeps the full
+        // contract requirement.
+        let deref_op = self.lower_resolved_call_with_operand_args(deref_info.deref_fn, args, result_ref_ty, node)
         self.materialize_operand(deref_op, result_ref_ty, self.ast.get_start(node))
 
     mut fn lower_field_base_place_for_field(base_expr: i32, field: i32) -> i32:

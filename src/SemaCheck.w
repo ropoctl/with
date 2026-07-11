@@ -9418,7 +9418,7 @@ impl Sema:
             return self.pipeline_generic_builtin_method_exists(owner, method)
         0
 
-    mut fn autoderef_next_type(current: TypeId, node: i32, step_fns: Vec[i32], step_tys: Vec[i32]) -> TypeId:
+    mut fn autoderef_next_type(current: TypeId, node: i32, expr: i32, step_fns: Vec[i32], step_tys: Vec[i32]) -> TypeId:
         let tk = self.get_type_kind(current)
         if tk == TypeKind.TY_PTR or tk == TypeKind.TY_REF:
             let inner = self.get_type_d0(current)
@@ -9431,6 +9431,7 @@ impl Sema:
         let deref_info = self.resolve_user_deref_info(current as i32, node)
         if deref_info.ok == 0:
             return current
+        self.ensure_user_deref_specialization(deref_info.deref_fn, current as i32, expr)
         step_fns.push(deref_info.deref_fn)
         step_tys.push(deref_info.result_ref_ty)
         self.resolve_alias(deref_info.result_ref_ty as TypeId)
@@ -9451,7 +9452,7 @@ impl Sema:
                 self.emit_error("auto-deref cycle through Deref implementation", node)
                 return current
             seen.push(current as i32)
-            let next = self.autoderef_next_type(current, node, step_fns, step_tys)
+            let next = self.autoderef_next_type(current, node, expr, step_fns, step_tys)
             if next == current:
                 return current
             current = next
@@ -9473,7 +9474,7 @@ impl Sema:
                 self.emit_error("auto-deref cycle through Deref implementation", node)
                 return current
             seen.push(current as i32)
-            let next = self.autoderef_next_type(current, node, step_fns, step_tys)
+            let next = self.autoderef_next_type(current, node, expr, step_fns, step_tys)
             if next == current:
                 return current
             current = next
@@ -15150,6 +15151,60 @@ impl Sema:
                 sema_phase_bug(f"BUG: failed to specialize Drop.drop for concrete generic type {resolved}")
             self.concrete_drop_sigs.insert(resolved, sig_idx)
             self.concrete_drop_mono_syms.insert(resolved, mono_sym)
+
+    // Autoderef's user-Deref dispatch: specialize deref for the concrete
+    // receiver and RECORD the resolution on the base expression node —
+    // exactly the recipe register_generic_drop_specializations uses for
+    // Drop. MirLower keys the dispatch call on the base expr, so codegen's
+    // ensure_concrete_mir_function finds sig+mono there and the generic
+    // call keeps its full contract requirement (no machinery waiver).
+    mut fn ensure_user_deref_specialization(deref_fn: i32, source_ty: i32, expr: i32):
+        if expr == 0 or deref_fn == 0 or self.resolved_call_sigs.contains(expr):
+            return
+        let fn_node = self.generic_fn_node_for_symbol(deref_fn)
+        if fn_node == 0:
+            let plain_sig = self.get_sig(deref_fn)
+            if plain_sig >= 0:
+                self.resolved_call_sigs.insert(expr, plain_sig)
+                self.resolved_call_mono_syms.insert(expr, deref_fn)
+            return
+        if not self.method_impl_nodes.contains(deref_fn):
+            return
+        let impl_node = self.method_impl_nodes.get(deref_fn).unwrap()
+        let resolved = self.resolve_alias(source_ty as TypeId) as i32
+        if self.get_type_kind(resolved) != TypeKind.TY_GENERIC_INST:
+            return
+        let target = self.impl_target_match(impl_node, resolved)
+        if target.ok == 0:
+            return
+        let subst_names: Vec[i32] = Vec.new()
+        let subst_types: Vec[i32] = Vec.new()
+        for si in 0..target.subst_names.len() as i32:
+            sema_push_concrete_subst(subst_names, subst_types, target.subst_names.get(si as i64), target.subst_types.get(si as i64))
+        let owner_sym = self.get_generic_inst_base(resolved)
+        if self.type_decl_nodes.contains(owner_sym):
+            let owner_decl = self.type_decl_nodes.get(owner_sym).unwrap()
+            var tp_pos = self.type_decl_tp_start(owner_decl)
+            let owner_tp_count = self.type_decl_tp_count(owner_decl)
+            if owner_tp_count == self.get_generic_inst_arg_count(resolved):
+                for ti in 0..owner_tp_count:
+                    let tp_sym = self.ast.get_extra(tp_pos)
+                    let bound_count = self.ast.get_extra(tp_pos + 1)
+                    sema_push_concrete_subst(subst_names, subst_types, tp_sym, self.get_generic_inst_arg(resolved, ti))
+                    tp_pos = tp_pos + 2 + bound_count
+        sema_push_concrete_subst(subst_names, subst_types, self.syms.self_type, resolved)
+        var mono_text = f"{self.pool_resolve(deref_fn)}__receiver__{resolved}"
+        for ai in 0..self.get_generic_inst_arg_count(resolved):
+            mono_text = f"{mono_text}_{self.get_generic_inst_arg(resolved, ai)}"
+        let mono_sym = self.pool_intern(mono_text)
+        var sig_idx = self.get_sig(mono_sym)
+        if sig_idx < 0:
+            let concrete_params: Vec[i32] = Vec.new()
+            sig_idx = self.check_fn_body_concrete(fn_node, subst_names, subst_types, mono_sym, concrete_params)
+        if sig_idx < 0:
+            return
+        self.resolved_call_sigs.insert(expr, sig_idx)
+        self.resolved_call_mono_syms.insert(expr, mono_sym)
 
     mut fn check_generic_method_call(owner_sym: i32, owner_type: i32, method_fn_sym: i32, is_static: i32, recv_node: i32, arg_types: &Vec[i32], extra_start: i32, arg_count: i32, node: i32) -> i32:
         if method_fn_sym == 0:
