@@ -2188,10 +2188,15 @@ fn ci_translate_struct(session: i64, idx: i32, is_union: bool, known_structs: st
             let accessor_name = if last_fname.len() > 0: last_fname else: "data"
             // Rename the field to _name in field_str by replacing the last occurrence
             field_str = ci_str_replace_last_field(field_str, ci_escape_reserved(accessor_name), "_" ++ ci_escape_reserved(accessor_name))
-            // Emit accessor method
+            // Emit accessor method (D7: impl-block method with keyword mode;
+            // the legacy top-level explicit-self form fails receiver-mode
+            // enforcement).
             let accessor_expr = "((&self._" ++ ci_escape_reserved(accessor_name) ++ ") as *" ++ elem_type ++ ")"
-            let accessor_body = "    " ++ accessor_expr
-            flex_accessor = ci_render_generated_fn_body("unsafe fn " ++ ci_escape_reserved(accessor_name) ++ "(self: *" ++ safe_name ++ ") -> *" ++ elem_type, accessor_body) ++ "\n"
+            let accessor_method = ci_render_generated_fn_body("    unsafe fn " ++ ci_escape_reserved(accessor_name) ++ "() -> *" ++ elem_type, "        " ++ accessor_expr)
+            flex_accessor = if migrate_prefer_brace():
+                "impl " ++ safe_name ++ " {\n" ++ accessor_method ++ "\n}\n"
+            else:
+                "impl " ++ safe_name ++ ":\n" ++ accessor_method ++ "\n"
 
     let packed_prefix = if is_really_packed: "@[packed]\n" else: ""
     let part1 = "type " ++ safe_name
