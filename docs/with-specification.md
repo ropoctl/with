@@ -923,6 +923,13 @@ this mistake (for example, a view of a consumed parameter escaping
 through the return value), it emits a directed suggestion naming the
 parameter and the `&T` fix.
 
+When a plain by-value parameter expects a `Copy` type and the argument is a
+shared reference to that type, the compiler copies the pointee. Ordinary value
+coercions then apply, so an `&i32` may satisfy an `i64` parameter. This is a
+call-site value read, not a receiver-ABI change: the reference remains borrowed,
+and `&T` never implicitly produces an owned non-`Copy` `T`. Raw pointers do not
+participate; dereferencing one still requires `unsafe` (§19).
+
 **The vibe:** "The function just wants to look at the data. I
 shouldn't have to manually type `&`."
 

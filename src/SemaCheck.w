@@ -253,6 +253,21 @@ impl Sema:
                 return 1
         0
 
+    fn builtin_arg_type_compatible_frozen(expected: i32, actual: i32) -> i32:
+        if expected == 0 or actual == 0:
+            return 1
+        if self.types_compatible_frozen(expected, actual) != 0:
+            return 1
+        if self.arithmetic_result_type(expected, actual) != 0:
+            return 1
+        let actual_unwrapped = self.unwrap_builtin_arg_distinct(actual)
+        if actual_unwrapped != actual:
+            if self.types_compatible_frozen(expected, actual_unwrapped) != 0:
+                return 1
+            if self.arithmetic_result_type(expected, actual_unwrapped) != 0:
+                return 1
+        0
+
     // §16.3c: a `*const c_char` (i.e. `*const i8`) parameter is the modeled
     // input-C-string boundary that a `str` argument auto-coerces across.
     fn sema_type_is_c_char_pointer(sema_ty: i32) -> i32:
@@ -335,17 +350,63 @@ impl Sema:
             return self.types_compatible_frozen(pointee, actual)
         0
 
-    mut fn call_arg_type_compatible(expected: i32, actual: i32) -> i32:
+    mut fn can_auto_copy_ref_arg(expected: i32, actual: i32) -> i32:
+        if expected == 0 or actual == 0:
+            return 0
+        let expected_resolved = self.resolve_alias(expected as TypeId)
+        let expected_kind = self.get_type_kind(expected_resolved)
+        if expected_kind == TypeKind.TY_REF or expected_kind == TypeKind.TY_PTR:
+            return 0
+        let actual_resolved = self.resolve_alias(actual as TypeId)
+        if self.get_type_kind(actual_resolved) != TypeKind.TY_REF or self.get_type_d1(actual_resolved) != 0:
+            return 0
+        let pointee = self.get_type_d0(actual_resolved)
+        if pointee == 0 or self.is_copy(pointee as TypeId) == 0:
+            return 0
+        self.builtin_arg_type_compatible(expected, pointee)
+
+    fn can_auto_copy_ref_arg_frozen(expected: i32, actual: i32) -> i32:
+        if expected == 0 or actual == 0:
+            return 0
+        let expected_resolved = self.resolve_alias(expected as TypeId)
+        let expected_kind = self.get_type_kind(expected_resolved)
+        if expected_kind == TypeKind.TY_REF or expected_kind == TypeKind.TY_PTR:
+            return 0
+        let actual_resolved = self.resolve_alias(actual as TypeId)
+        if self.get_type_kind(actual_resolved) != TypeKind.TY_REF or self.get_type_d1(actual_resolved) != 0:
+            return 0
+        let pointee = self.get_type_d0(actual_resolved)
+        if pointee == 0 or self.is_copy_frozen(pointee as TypeId) == 0:
+            return 0
+        self.builtin_arg_type_compatible_frozen(expected, pointee)
+
+    mut fn call_arg_type_compatible_base(expected: i32, actual: i32) -> i32:
         if self.builtin_arg_type_compatible(expected, actual) != 0:
             return 1
         self.can_auto_ref_arg(expected, actual)
 
-    mut fn note_auto_ref_call_arg(expected: i32, actual: i32, arg_node: i32, err_node: i32):
-        if self.can_auto_ref_arg(expected, actual) == 0:
+    mut fn call_arg_type_compatible(expected: i32, actual: i32) -> i32:
+        if self.call_arg_type_compatible_base(expected, actual) != 0:
+            return 1
+        self.can_auto_copy_ref_arg(expected, actual)
+
+    mut fn note_call_arg_coercion(expected: i32, actual: i32, arg_node: i32, err_node: i32):
+        if self.can_auto_ref_arg(expected, actual) != 0:
+            if arg_node <= 0:
+                return
+            self.check_borrow_create(arg_node, BorrowKind.SHARED, if err_node > 0: err_node else: arg_node)
             return
-        if arg_node <= 0:
-            return
-        self.check_borrow_create(arg_node, BorrowKind.SHARED, if err_node > 0: err_node else: arg_node)
+        if arg_node > 0 and self.can_auto_copy_ref_arg(expected, actual) != 0:
+            self.auto_copy_ref_args.insert(arg_node, actual)
+
+    mut fn check_builtin_method_call_arg(call_name: str, arg_index: i32, expected: i32, actual: i32, arg_node: i32) -> i32:
+        if expected == 0 or actual == 0:
+            return 1
+        if self.call_arg_type_compatible(expected, actual) == 0:
+            self.emit_argument_type_mismatch(call_name, 0, arg_index, arg_index, expected, actual, arg_node)
+            return 0
+        self.note_call_arg_coercion(expected, actual, arg_node, arg_node)
+        1
 
     // #604 stage 1: a Vec/array argument coerces to a []T / []mut T parameter.
     // Returns 0 when the coercion does not apply (caller emits the ordinary
@@ -7032,9 +7093,9 @@ impl Sema:
             return sema_operator_candidate_none()
         let self_ty = self.sig_param_type(sig, 0)
         let rhs_ty = self.sig_param_type(sig, 1)
-        if self.call_arg_type_compatible(self_ty, owner_ty) == 0:
+        if self.call_arg_type_compatible_base(self_ty, owner_ty) == 0:
             return sema_operator_candidate_none()
-        if self.call_arg_type_compatible(rhs_ty, peer_ty) == 0:
+        if self.call_arg_type_compatible_base(rhs_ty, peer_ty) == 0:
             return sema_operator_candidate_none()
         let fn_sym = self.lookup_method_fn(owner_sym, method_sym)
         if fn_sym == 0:
@@ -7065,7 +7126,7 @@ impl Sema:
         if self.sig_get_param_count(sig) != 1:
             return sema_operator_candidate_none()
         let self_ty = self.sig_param_type(sig, 0)
-        if self.call_arg_type_compatible(self_ty, owner_ty) == 0:
+        if self.call_arg_type_compatible_base(self_ty, owner_ty) == 0:
             return sema_operator_candidate_none()
         let fn_sym = self.lookup_method_fn(owner_sym, method_sym)
         if fn_sym == 0:
@@ -7173,7 +7234,7 @@ impl Sema:
     mut fn validate_special_membership_element(lhs_node: i32, lhs_ty: i32, elem_ty: i32, label: str) -> i32:
         if lhs_ty == 0 or elem_ty == 0:
             return 1
-        if self.call_arg_type_compatible(elem_ty, lhs_ty) != 0:
+        if self.call_arg_type_compatible_base(elem_ty, lhs_ty) != 0:
             return 1
         self.emit_error("`in` left operand type '" ++ self.type_name(lhs_ty) ++ "' is not compatible with " ++ label ++ " type '" ++ self.type_name(elem_ty) ++ "'", lhs_node)
         0
@@ -8246,6 +8307,8 @@ impl Sema:
         var out = out0
         if node == 0:
             return out
+        if self.auto_copy_ref_args.contains(node):
+            return out
         let kind = self.ast.kind(node)
         if kind == NodeKind.NK_IDENT:
             let sym = self.ast.get_data0(node)
@@ -8314,6 +8377,8 @@ impl Sema:
 
     fn compute_expr_view_origin_mask(node: i32) -> i32:
         if node == 0:
+            return 0
+        if self.auto_copy_ref_args.contains(node):
             return 0
         let kind = self.ast.kind(node)
         if kind == NodeKind.NK_IDENT:
@@ -12846,7 +12911,7 @@ impl Sema:
                     if self.call_arg_type_compatible(expected_ty, arg_ty) == 0:
                         self.emit_argument_type_mismatch(call_name, 0, ai, param_i, expected_ty, arg_ty, if err_arg_node > 0: err_arg_node else: node)
                     else:
-                        self.note_auto_ref_call_arg(expected_ty, arg_ty, err_arg_node, node)
+                        self.note_call_arg_coercion(expected_ty, arg_ty, err_arg_node, node)
             let eph_arg_node = if has_resolved != 0: self.get_resolved_call_arg(node, ai) else: self.ast.get_extra(extra_start + ai)
             self.check_ephemeral_task_arg_escape(eph_arg_node, expected_ty, 0, 0, param_i)
 
@@ -12935,7 +13000,7 @@ impl Sema:
                 if self.call_arg_type_compatible(expected_ty, actual_ty) == 0:
                     self.emit_argument_type_mismatch(pkg_name ++ "." ++ method_name, fn_sym, ai, ai, expected_ty, actual_ty, arg_node)
                 else:
-                    self.note_auto_ref_call_arg(expected_ty, actual_ty, arg_node, node)
+                    self.note_call_arg_coercion(expected_ty, actual_ty, arg_node, node)
         self.comp_resolved.insert(node, fn_sym)
         self.qualified_extension_call_nodes.insert(node, 1)
         self.propagate_method_call_param_effects(node, sig_idx, 0, 0, extra_start, arg_count, 0)
@@ -13440,7 +13505,7 @@ impl Sema:
                                 if not (self.ci_syms.contains(fn_sym) and self.try_ci_coercion(fn_sym, arg_ty, expected_ty) != 0):
                                     self.emit_argument_type_mismatch(self.safe_symbol_text(fn_sym), fn_sym, ai, param_i, expected_ty, arg_ty, if err_arg_node > 0: err_arg_node else: node)
                         else:
-                            self.note_auto_ref_call_arg(expected_ty, arg_ty, err_arg_node, node)
+                            self.note_call_arg_coercion(expected_ty, arg_ty, err_arg_node, node)
                 let eph_arg_node = if has_resolved != 0: self.get_resolved_call_arg(node, ai) else: self.ast.get_extra(resolved_extra_start + ai)
                 sc_all_args.push(eph_arg_node)
                 self.check_ephemeral_task_arg_escape(eph_arg_node, expected_ty, if self.extern_fn_names.contains(fn_sym): 1 else: 0, fn_sym, param_i)
@@ -15367,7 +15432,7 @@ impl Sema:
                 if self.call_arg_type_compatible(expected_ty, actual_ty) == 0:
                     self.emit_argument_type_mismatch(self.safe_symbol_text(method_fn_sym), method_fn_sym, ai3, pi3, expected_ty, actual_ty, gen_method_arg)
                 else:
-                    self.note_auto_ref_call_arg(expected_ty, actual_ty, gen_method_arg, node)
+                    self.note_call_arg_coercion(expected_ty, actual_ty, gen_method_arg, node)
 
         let ret_node = self.ast.fn_meta_ret(meta)
         let ret_ty = self.resolve_type_node_with_current_subst(ret_node, concrete_owner)
@@ -16118,8 +16183,8 @@ impl Sema:
         let err_ty = self.get_generic_inst_arg(recv_type, 1)
         if method_name == "context":
             let msg_ty = arg_types.get(0)
-            if msg_ty != 0 and self.builtin_arg_type_compatible(self.ty_str as i32, msg_ty) == 0:
-                self.emit_argument_type_mismatch("Result.context", 0, 0, 0, self.ty_str as i32, msg_ty, node)
+            let msg_node = if self.has_resolved_call_args(node) != 0: self.get_resolved_call_arg(node, 0) else: self.ast.get_extra(self.ast.get_data1(node))
+            let _ = self.check_builtin_method_call_arg("Result.context", 0, self.ty_str as i32, msg_ty, msg_node)
             return self.ensure_result_type_for(ok_ty, self.ensure_context_error_type_for(err_ty))
         if method_name == "with_context":
             let fn_ty = self.callable_fn_type(arg_types.get(0) as TypeId)
@@ -17115,7 +17180,7 @@ impl Sema:
                     self.emit_argument_type_mismatch(self.pool_resolve(found_trait) ++ "." ++ self.pool_resolve(method_sym), found_fn, ai, param_i, expected_ty, actual_ty, if err_arg > 0: err_arg else: node)
                 else:
                     let note_arg = if has_resolved_args != 0: self.get_resolved_call_arg(node, ai) else: self.ast.get_extra(extra_start + ai)
-                    self.note_auto_ref_call_arg(expected_ty, actual_ty, note_arg, node)
+                    self.note_call_arg_coercion(expected_ty, actual_ty, note_arg, node)
 
         self.comp_resolved.insert(node, found_fn)
         if self.fn_decl_nodes.contains(found_fn) or self.generic_fn_node_for_symbol(found_fn) != 0:
@@ -17477,6 +17542,10 @@ impl Sema:
                 mc_expected = mc_static_variant_payload_tys.get(ai as i64)
             let mc_arg_ty = if mc_expected != 0: self.check_expr_with_expected(mc_arg_node, mc_expected as TypeId) else: self.check_expr(mc_arg_node)
             arg_types.push(mc_arg_ty as i32)
+            // Record the value read before viral view-origin propagation below:
+            // storing a copied pointee stores T, not the argument's &T view.
+            if mc_expected != 0 and self.can_auto_copy_ref_arg(mc_expected, mc_arg_ty as i32) != 0:
+                self.auto_copy_ref_args.insert(mc_arg_node, mc_arg_ty as i32)
             // §17.6a: numeric min/max/mul_add require same-typed operands. A literal
             // argument adapts to the receiver type (so mc_arg_ty already matches),
             // but a concrete operand of a different width/signedness must be an
@@ -17866,7 +17935,7 @@ impl Sema:
                                 if mc_compat == 0:
                                     self.emit_argument_type_mismatch(mc_plain_name, method_fn_sym, mc_pai, mc_plain_pi, mc_exp_ty, mc_act_ty, if mc_perr_arg > 0: mc_perr_arg else: node)
                                 else:
-                                    self.note_auto_ref_call_arg(mc_exp_ty, mc_act_ty, mc_perr_arg, node)
+                                    self.note_call_arg_coercion(mc_exp_ty, mc_act_ty, mc_perr_arg, node)
                 if mc_resolved_tk == TypeKind.TY_GENERIC_INST:
                     // Check argument types against substituted parameter types
                     let mc_method_name = self.pool_resolve(type_name_sym) ++ "." ++ self.pool_resolve(field)
@@ -17894,7 +17963,7 @@ impl Sema:
                                     if self.call_arg_type_compatible(exp_ty, arg_ty) == 0:
                                         self.emit_argument_type_mismatch(mc_method_name, method_fn_sym, mc_ai, mc_sig_pi, exp_ty, arg_ty, if mc_err_arg > 0: mc_err_arg else: node)
                                     else:
-                                        self.note_auto_ref_call_arg(exp_ty, arg_ty, mc_err_arg, node)
+                                        self.note_call_arg_coercion(exp_ty, arg_ty, mc_err_arg, node)
                     self.generic_subst_param_syms = saved_mc_subst_syms
                     self.generic_subst_type_ids = saved_mc_subst_tys
                     let mc_subst_ret = self.substitute_method_return_for_generic_inst(recv_type, type_name_sym, field, method_fn_sym, mc_ret)
@@ -17931,8 +18000,7 @@ impl Sema:
                     let elem_ty = self.get_generic_inst_arg(recv_type, 0)
                     let a0_ty = arg_types.get(0)
                     if elem_ty != 0 and a0_ty != 0:
-                        if self.builtin_arg_type_compatible(elem_ty, a0_ty) == 0:
-                                self.emit_argument_type_mismatch(mc_call_name, 0, 0, 0, elem_ty, a0_ty, self.ast.get_extra(extra_start))
+                        let _ = self.check_builtin_method_call_arg(mc_call_name, 0, elem_ty, a0_ty, self.ast.get_extra(extra_start))
             else if field == self.syms.insert:
                 // HashMap.insert(key: K, value: V) — arg[0] must be K, arg[1] must be V
                 let gi_argc = self.get_generic_inst_arg_count(recv_type)
@@ -17942,19 +18010,16 @@ impl Sema:
                     let a0_ty = arg_types.get(0)
                     let a1_ty = arg_types.get(1)
                     if key_ty != 0 and a0_ty != 0:
-                        if self.builtin_arg_type_compatible(key_ty, a0_ty) == 0:
-                                self.emit_argument_type_mismatch(mc_call_name, 0, 0, 0, key_ty, a0_ty, self.ast.get_extra(extra_start))
+                        let _ = self.check_builtin_method_call_arg(mc_call_name, 0, key_ty, a0_ty, self.ast.get_extra(extra_start))
                     if val_ty != 0 and a1_ty != 0:
-                        if self.builtin_arg_type_compatible(val_ty, a1_ty) == 0:
-                                self.emit_argument_type_mismatch(mc_call_name, 0, 1, 1, val_ty, a1_ty, self.ast.get_extra(extra_start + 1))
+                        let _ = self.check_builtin_method_call_arg(mc_call_name, 1, val_ty, a1_ty, self.ast.get_extra(extra_start + 1))
             else if type_name_sym == self.syms.vec and (field == self.syms.get or field == self.syms.remove):
                 // Vec.get(index) / Vec.remove(index) — arg[0] must be integer-ish
                 if arg_count >= 1:
                     let a0_ty = arg_types.get(0)
                     if a0_ty != 0:
                         let index_ty = self.ty_i64 as i32
-                        if self.builtin_arg_type_compatible(index_ty, a0_ty) == 0:
-                                self.emit_argument_type_mismatch(mc_call_name, 0, 0, 0, index_ty, a0_ty, self.ast.get_extra(extra_start))
+                        let _ = self.check_builtin_method_call_arg(mc_call_name, 0, index_ty, a0_ty, self.ast.get_extra(extra_start))
             else if (type_name_sym == self.syms.vec or type_name_sym == self.syms.vecrange) and (field == self.syms.split_at or field == self.syms.split_at_mut):
                 if arg_count != 1:
                     self.emit_error(mc_method_name_raw ++ "() expects exactly one index argument", node)
@@ -17962,46 +18027,40 @@ impl Sema:
                     let split_arg_ty = arg_types.get(0)
                     if split_arg_ty != 0:
                         let split_index_ty = self.ty_i64 as i32
-                        if self.builtin_arg_type_compatible(split_index_ty, split_arg_ty) == 0:
-                            self.emit_argument_type_mismatch(mc_call_name, 0, 0, 0, split_index_ty, split_arg_ty, self.ast.get_extra(extra_start))
+                        let _ = self.check_builtin_method_call_arg(mc_call_name, 0, split_index_ty, split_arg_ty, self.ast.get_extra(extra_start))
             else if type_name_sym == self.syms.vec and field == self.syms.contains:
                 // Vec.contains(value: T) — arg[0] must be T
                 if arg_count >= 1:
                     let elem_ty = self.get_generic_inst_arg(recv_type, 0)
                     let a0_ty = arg_types.get(0)
                     if elem_ty != 0 and a0_ty != 0:
-                        if self.builtin_arg_type_compatible(elem_ty, a0_ty) == 0:
-                                self.emit_argument_type_mismatch(mc_call_name, 0, 0, 0, elem_ty, a0_ty, self.ast.get_extra(extra_start))
+                        let _ = self.check_builtin_method_call_arg(mc_call_name, 0, elem_ty, a0_ty, self.ast.get_extra(extra_start))
             else if type_name_sym == self.syms.hashmap and (field == self.syms.get or field == self.syms.contains or field == self.syms.remove):
                 // HashMap.get/contains/remove(key: K) — arg[0] must be K
                 if arg_count >= 1:
                     let key_ty = self.get_generic_inst_arg(recv_type, 0)
                     let a0_ty = arg_types.get(0)
                     if key_ty != 0 and a0_ty != 0:
-                        if self.builtin_arg_type_compatible(key_ty, a0_ty) == 0:
-                                self.emit_argument_type_mismatch(mc_call_name, 0, 0, 0, key_ty, a0_ty, self.ast.get_extra(extra_start))
+                        let _ = self.check_builtin_method_call_arg(mc_call_name, 0, key_ty, a0_ty, self.ast.get_extra(extra_start))
             else if type_name_sym == self.syms.hashmap and (mc_method_name_raw == "increment" or mc_method_name_raw == "decrement"):
                 // HashMap.increment/decrement(key: K) — arg[0] must be K
                 if arg_count >= 1:
                     let inc_key_ty = self.get_generic_inst_arg(recv_type, 0)
                     let inc_a0_ty = arg_types.get(0)
                     if inc_key_ty != 0 and inc_a0_ty != 0:
-                        if self.builtin_arg_type_compatible(inc_key_ty, inc_a0_ty) == 0:
-                                self.emit_argument_type_mismatch(mc_call_name, 0, 0, 0, inc_key_ty, inc_a0_ty, self.ast.get_extra(extra_start))
+                        let _ = self.check_builtin_method_call_arg(mc_call_name, 0, inc_key_ty, inc_a0_ty, self.ast.get_extra(extra_start))
             else if type_name_sym == self.syms.hashmap and mc_method_name_raw == "update":
                 // HashMap.update(key: K, default: V, f: fn(V) -> V)
                 if arg_count >= 1:
                     let update_key_ty = self.get_generic_inst_arg(recv_type, 0)
                     let update_a0_ty = arg_types.get(0)
                     if update_key_ty != 0 and update_a0_ty != 0:
-                        if self.builtin_arg_type_compatible(update_key_ty, update_a0_ty) == 0:
-                                self.emit_argument_type_mismatch(mc_call_name, 0, 0, 0, update_key_ty, update_a0_ty, self.ast.get_extra(extra_start))
+                        let _ = self.check_builtin_method_call_arg(mc_call_name, 0, update_key_ty, update_a0_ty, self.ast.get_extra(extra_start))
                 if arg_count >= 2:
                     let update_val_ty = self.get_generic_inst_arg(recv_type, 1)
                     let update_a1_ty = arg_types.get(1)
                     if update_val_ty != 0 and update_a1_ty != 0:
-                        if self.builtin_arg_type_compatible(update_val_ty, update_a1_ty) == 0:
-                                self.emit_argument_type_mismatch(mc_call_name, 0, 1, 1, update_val_ty, update_a1_ty, self.ast.get_extra(extra_start + 1))
+                        let _ = self.check_builtin_method_call_arg(mc_call_name, 1, update_val_ty, update_a1_ty, self.ast.get_extra(extra_start + 1))
                 if arg_count >= 3:
                     let update_val_ty2 = self.get_generic_inst_arg(recv_type, 1)
                     let updater_ty = self.resolve_alias(arg_types.get(2) as TypeId)
@@ -18017,8 +18076,7 @@ impl Sema:
                     let elem_ty = self.get_generic_inst_arg(recv_type, 0)
                     let a0_ty = arg_types.get(0)
                     if elem_ty != 0 and a0_ty != 0:
-                        if self.builtin_arg_type_compatible(elem_ty, a0_ty) == 0:
-                                self.emit_argument_type_mismatch(mc_call_name, 0, 0, 0, elem_ty, a0_ty, self.ast.get_extra(extra_start))
+                        let _ = self.check_builtin_method_call_arg(mc_call_name, 0, elem_ty, a0_ty, self.ast.get_extra(extra_start))
             else if type_name_sym == self.syms.slotmap:
                 let sm_elem_ty = self.get_generic_inst_arg(recv_type, 0)
                 let sm_handle_ty = self.ensure_handle_type_for(sm_elem_ty)
@@ -18026,54 +18084,46 @@ impl Sema:
                     if arg_count >= 1:
                         let a0_ty = arg_types.get(0)
                         if sm_elem_ty != 0 and a0_ty != 0:
-                            if self.builtin_arg_type_compatible(sm_elem_ty, a0_ty) == 0:
-                                self.emit_argument_type_mismatch(mc_call_name, 0, 0, 0, sm_elem_ty, a0_ty, self.ast.get_extra(extra_start))
+                            let _ = self.check_builtin_method_call_arg(mc_call_name, 0, sm_elem_ty, a0_ty, self.ast.get_extra(extra_start))
                 else if field == self.syms.get or field == self.syms.slot or field == self.syms.remove or field == self.syms.contains:
                     if arg_count >= 1:
                         let h_ty = arg_types.get(0)
                         if sm_handle_ty != 0 and h_ty != 0:
-                            if self.builtin_arg_type_compatible(sm_handle_ty, h_ty) == 0:
-                                self.emit_argument_type_mismatch(mc_call_name, 0, 0, 0, sm_handle_ty, h_ty, self.ast.get_extra(extra_start))
+                            let _ = self.check_builtin_method_call_arg(mc_call_name, 0, sm_handle_ty, h_ty, self.ast.get_extra(extra_start))
                 else if field == self.syms.replace:
                     if arg_count >= 1:
                         let h_ty2 = arg_types.get(0)
                         if sm_handle_ty != 0 and h_ty2 != 0:
-                            if self.builtin_arg_type_compatible(sm_handle_ty, h_ty2) == 0:
-                                self.emit_argument_type_mismatch(mc_call_name, 0, 0, 0, sm_handle_ty, h_ty2, self.ast.get_extra(extra_start))
+                            let _ = self.check_builtin_method_call_arg(mc_call_name, 0, sm_handle_ty, h_ty2, self.ast.get_extra(extra_start))
                     if arg_count >= 2:
                         let v_ty = arg_types.get(1)
                         if sm_elem_ty != 0 and v_ty != 0:
-                            if self.builtin_arg_type_compatible(sm_elem_ty, v_ty) == 0:
-                                self.emit_argument_type_mismatch(mc_call_name, 0, 1, 1, sm_elem_ty, v_ty, self.ast.get_extra(extra_start + 1))
+                            let _ = self.check_builtin_method_call_arg(mc_call_name, 1, sm_elem_ty, v_ty, self.ast.get_extra(extra_start + 1))
                 else if field == self.syms.get_disjoint:
                     for sm_hi in 0..2:
                         if arg_count > sm_hi:
                             let h_ty3 = arg_types.get(sm_hi as i64)
                             if sm_handle_ty != 0 and h_ty3 != 0:
-                                if self.builtin_arg_type_compatible(sm_handle_ty, h_ty3) == 0:
-                                    self.emit_argument_type_mismatch(mc_call_name, 0, sm_hi, sm_hi, sm_handle_ty, h_ty3, self.ast.get_extra(extra_start + sm_hi))
+                                let _ = self.check_builtin_method_call_arg(mc_call_name, sm_hi, sm_handle_ty, h_ty3, self.ast.get_extra(extra_start + sm_hi))
             else if type_name_sym == self.syms.slotmapslot:
                 if mc_method_name_raw == "set" and arg_count >= 1:
                     let slot_elem_ty = self.get_generic_inst_arg(recv_type, 0)
                     let set_arg_ty = arg_types.get(0)
                     if slot_elem_ty != 0 and set_arg_ty != 0:
-                        if self.builtin_arg_type_compatible(slot_elem_ty, set_arg_ty) == 0:
-                            self.emit_argument_type_mismatch(mc_call_name, 0, 0, 0, slot_elem_ty, set_arg_ty, self.ast.get_extra(extra_start))
+                        let _ = self.check_builtin_method_call_arg(mc_call_name, 0, slot_elem_ty, set_arg_ty, self.ast.get_extra(extra_start))
             else if type_name_sym == self.syms.fixed_string:
                 if mc_method_name_raw == "push_byte":
                     if arg_count != 1:
                         self.emit_error("FixedString.push_byte() expects exactly one argument", node)
                     else:
                         let fs_byte_ty = arg_types.get(0)
-                        if fs_byte_ty != 0 and self.builtin_arg_type_compatible(self.ty_u8 as i32, fs_byte_ty) == 0:
-                            self.emit_argument_type_mismatch(mc_call_name, 0, 0, 0, self.ty_u8 as i32, fs_byte_ty, self.ast.get_extra(extra_start))
+                        let _ = self.check_builtin_method_call_arg(mc_call_name, 0, self.ty_u8 as i32, fs_byte_ty, self.ast.get_extra(extra_start))
                 else if mc_method_name_raw == "push_str" or mc_method_name_raw == "equals":
                     if arg_count != 1:
                         self.emit_error("FixedString." ++ mc_method_name_raw ++ "() expects exactly one argument", node)
                     else:
                         let fs_str_ty = arg_types.get(0)
-                        if fs_str_ty != 0 and self.call_arg_type_compatible(self.ty_str_view as i32, fs_str_ty) == 0:
-                            self.emit_argument_type_mismatch(mc_call_name, 0, 0, 0, self.ty_str_view as i32, fs_str_ty, self.ast.get_extra(extra_start))
+                        let _ = self.check_builtin_method_call_arg(mc_call_name, 0, self.ty_str_view as i32, fs_str_ty, self.ast.get_extra(extra_start))
                 else if mc_method_name_raw == "clear" or mc_method_name_raw == "is_empty" or mc_method_name_raw == "as_view" or mc_method_name_raw == "capacity" or mc_method_name_raw == "len_i32" or mc_method_name_raw == "len_i64" or self.is_collection_len_method(field):
                     if arg_count != 0:
                         self.emit_error("FixedString." ++ mc_method_name_raw ++ "() expects no arguments", node)
@@ -18417,8 +18467,7 @@ impl Sema:
                         self.emit_error("Option.expect() expects exactly one argument", node)
                         return 0
                     let msg_ty = arg_types.get(0)
-                    if msg_ty != 0 and self.builtin_arg_type_compatible(self.ty_str as i32, msg_ty) == 0:
-                        self.emit_argument_type_mismatch("Option.expect", 0, 0, 0, self.ty_str as i32, msg_ty, self.ast.get_extra(extra_start))
+                    if self.check_builtin_method_call_arg("Option.expect", 0, self.ty_str as i32, msg_ty, self.ast.get_extra(extra_start)) == 0:
                         return 0
                     return self.get_generic_inst_arg(recv_type, 0)
                 let option_combinator_ret = self.option_combinator_return_type(recv_type, mc_method_name_raw, arg_types, mc_resolved_arg_count, node)
@@ -18447,8 +18496,7 @@ impl Sema:
                         self.emit_error("Result.expect() expects exactly one argument", node)
                         return 0
                     let res_msg_ty = arg_types.get(0)
-                    if res_msg_ty != 0 and self.builtin_arg_type_compatible(self.ty_str as i32, res_msg_ty) == 0:
-                        self.emit_argument_type_mismatch("Result.expect", 0, 0, 0, self.ty_str as i32, res_msg_ty, self.ast.get_extra(extra_start))
+                    if self.check_builtin_method_call_arg("Result.expect", 0, self.ty_str as i32, res_msg_ty, self.ast.get_extra(extra_start)) == 0:
                         return 0
                     return self.get_generic_inst_arg(recv_type, 0)
                 let result_combinator_ret = self.result_combinator_return_type(recv_type, mc_method_name_raw, arg_types, mc_resolved_arg_count, node)
@@ -18491,8 +18539,8 @@ impl Sema:
                     return 0
                 if arg_types.len() > 0:
                     let split_idx_ty = arg_types.get(0)
-                    if split_idx_ty != 0 and self.builtin_arg_type_compatible(self.ty_i64 as i32, split_idx_ty) == 0:
-                        self.emit_argument_type_mismatch(self.pool_resolve(field), 0, 0, 0, self.ty_i64 as i32, split_idx_ty, if mc_has_resolved_args != 0: self.get_resolved_call_arg(node, 0) else: self.ast.get_extra(extra_start))
+                    let split_idx_node = if mc_has_resolved_args != 0: self.get_resolved_call_arg(node, 0) else: self.ast.get_extra(extra_start)
+                    if self.check_builtin_method_call_arg(self.pool_resolve(field), 0, self.ty_i64 as i32, split_idx_ty, split_idx_node) == 0:
                         return 0
                 return self.ensure_vecrange_pair_type_for(self.get_type_d0(resolved))
 

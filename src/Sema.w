@@ -765,6 +765,9 @@ type Sema {
     // consumed by MirLower.lower_call_arg to borrow the place instead of
     // moving the collection.
     slice_coerce_args: HashMap[i32, i32],
+    // Shared-reference call argument node -> checked reference type when its
+    // Copy pointee is passed by value.
+    auto_copy_ref_args: HashMap[i32, i32],
     // #604 stage 1: >0 while resolving a function-signature parameter type —
     // the only position where `[]mut T` is legal in this release.
     in_param_type_position: i32,
@@ -1838,6 +1841,7 @@ fn sema_empty_state(pool: InternPool, diags: DiagnosticList, ast: AstPool) -> Se
         autoderef_step_starts: sema_new_map_i32_i32(),
         autoderef_step_counts: sema_new_map_i32_i32(),
         slice_coerce_args: sema_new_map_i32_i32(),
+        auto_copy_ref_args: sema_new_map_i32_i32(),
         in_param_type_position: 0,
         autoderef_step_fns: Vec.new(),
         autoderef_step_tys: Vec.new(),

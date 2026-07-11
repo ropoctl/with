@@ -8030,6 +8030,10 @@ impl MirBuilder:
         if autoref_op >= 0:
             self.expected_type = saved_expected
             return autoref_op
+        let autocopy_ref_op = self.lower_auto_copy_ref_call_arg(arg_node, expected_ty)
+        if autocopy_ref_op >= 0:
+            self.expected_type = saved_expected
+            return autocopy_ref_op
         let autoderef_op = self.lower_auto_deref_call_arg(arg_node, expected_ty)
         if autoderef_op >= 0:
             self.expected_type = saved_expected
@@ -8086,7 +8090,8 @@ impl MirBuilder:
             expected_ty = self.sema.method_expected_arg_type(resolved_recv, method_sym, arg_index)
             if expected_ty != 0 and expected_ty != self.sema.ty_void as i32:
                 self.expected_type = expected_ty
-        let lowered = self.lower_expr(arg_node)
+        let autocopy_ref = self.lower_auto_copy_ref_call_arg(arg_node, expected_ty)
+        let lowered = if autocopy_ref >= 0: autocopy_ref else: self.lower_expr(arg_node)
         self.expected_type = saved_expected
         lowered
 
@@ -8108,6 +8113,23 @@ impl MirBuilder:
         let temp_place = self.place_for_local(temp)
         self.body.push_stmt(self.cur_bb, StmtKind.Assign, temp_place, rv, self.ast.get_start(arg_node))
         self.body.new_operand(OperandKind.OK_COPY, temp_place)
+
+    mut fn lower_auto_copy_ref_call_arg(arg_node: i32, expected_ty: i32) -> i32:
+        if arg_node == 0 or expected_ty == 0:
+            return -1
+        let recorded_ty = self.sema.auto_copy_ref_args.get(arg_node)
+        if not recorded_ty.is_some():
+            return -1
+        let actual_ty = recorded_ty.unwrap()
+        if self.sema.can_auto_copy_ref_arg_frozen(expected_ty, actual_ty) == 0:
+            return -1
+        var source = arg_node
+        while self.ast.kind(source) == NodeKind.NK_GROUPED or self.ast.kind(source) == NodeKind.NK_NO_SUSPEND:
+            source = self.ast.get_data0(source)
+        if self.ast.kind(source) == NodeKind.NK_UNARY and self.ast.get_data0(source) == UnaryOp.UOP_REF:
+            return self.body.new_operand(OperandKind.OK_COPY, self.lower_expr_place(self.ast.get_data1(source)))
+        let place = self.lower_expr_place(arg_node)
+        self.body.new_operand(OperandKind.OK_COPY, self.new_deref_place(place))
 
     mut fn lower_auto_deref_call_arg(arg_node: i32, expected_ty: i32) -> i32:
         if arg_node == 0 or expected_ty == 0:
