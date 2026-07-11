@@ -3016,7 +3016,10 @@ impl Sema:
                     self_type_id = self.lookup_named_type_visible(method_owner_sym)
                 break
         for abi_pi in 0..param_count:
-            if self.fn_param_uses_value_ref_abi(param_start, abi_pi, method_owner_sym, self_type_id) != 0:
+            let cfc_vra = self.fn_param_uses_value_ref_abi(param_start, abi_pi, method_owner_sym, self_type_id)
+            if with_getenv_str("WITH_DEBUG_SUBST").len() > 0:
+                with_eprint(f"[vra] mono={self.pool_resolve(mono_sym)} sig={sig_idx} param={abi_pi} vra={cfc_vra} owner={method_owner_sym} self_ty={self_type_id}")
+            if cfc_vra != 0:
                 self.set_sig_param_value_ref_abi(sig_idx, abi_pi, 1)
 
         // Concrete generic validation must run in the callee's own lexical
@@ -3056,6 +3059,15 @@ impl Sema:
         self.in_concrete_generic_body = self.in_concrete_generic_body + 1
         self.check_fn_body_with_sig(fn_node, sig_idx)
         self.in_concrete_generic_body = saved_concrete_generic_body
+        // A RE-check resets this sig's value_ref rows and recomputes only the
+        // AST-level receiver heuristic — wiping assign_share_place_abi's D5
+        // classification for specializations re-checked during MIR lowering
+        // (lower_concrete_specialization). MirLower then passed share-place
+        // args as owned moves and codegen marshaled direct-value: the caller's
+        // place never received the callee's writes
+        // (behav_method_arg_share_place_matrix). Re-apply the effects-based
+        // rule now that this body's effects are recomputed.
+        self.assign_share_place_abi_for_sig(sig_idx)
         self.register_concrete_specialization(fn_node, mono_sym, sig_idx, tp_syms, tp_sema_tys, param_concrete_tys)
 
         self.bind_names = saved_bind_names

@@ -5144,25 +5144,28 @@ impl Sema:
     // escape_value) keep the by-value/Indirect ABI and are dropped by the callee.
     // escape_view is share-place (satisfied by view-origin tracking), so it is NOT
     // excluded here. Runs after fixpoint_effect_flow so the effect is final.
+    mut fn assign_share_place_abi_for_sig(si: i32):
+        let pc = self.sig_get_param_count(si)
+        for pi in 0..pc:
+            if self.sig_param_uses_value_ref_abi(si, pi) != 0:
+                continue
+            let pty = self.sig_param_type(si, pi)
+            if pty <= 0:
+                continue
+            if self.param_type_is_by_value(pty) == 0:
+                continue
+            if self.is_copy(pty as TypeId) != 0:
+                continue
+            let eff = self.sig_param_effect(si, pi)
+            if (eff & (EFF_CONSUME | EFF_ESCAPE_VALUE)) != 0:
+                continue
+            self.set_sig_param_value_ref_abi(si, pi, 1)
+
     mut fn assign_share_place_abi():
         let n = self.sig_param_eff_starts.len() as i32
         var si = 0
         while si < n:
-            let pc = self.sig_get_param_count(si)
-            for pi in 0..pc:
-                if self.sig_param_uses_value_ref_abi(si, pi) != 0:
-                    continue
-                let pty = self.sig_param_type(si, pi)
-                if pty <= 0:
-                    continue
-                if self.param_type_is_by_value(pty) == 0:
-                    continue
-                if self.is_copy(pty as TypeId) != 0:
-                    continue
-                let eff = self.sig_param_effect(si, pi)
-                if (eff & (EFF_CONSUME | EFF_ESCAPE_VALUE)) != 0:
-                    continue
-                self.set_sig_param_value_ref_abi(si, pi, 1)
+            self.assign_share_place_abi_for_sig(si)
             si = si + 1
 
     // #D5/D6: dump the per-parameter ownership/ABI classification for every function
