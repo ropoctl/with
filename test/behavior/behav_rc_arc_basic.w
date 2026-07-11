@@ -1,4 +1,4 @@
-var RC_ARC_DROP_TRACE = ""
+global var RC_ARC_DROP_TRACE = ""
 
 type RefCountGuard { id: str }
 

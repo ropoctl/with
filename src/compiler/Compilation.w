@@ -617,15 +617,24 @@ impl Compilation:
         out = out ++ self.project_info_source(pool)
         out = out ++ "\nfn main:\n"
         out = out ++ "    let project = __with_compiler_hook_project_info()\n"
-        out = out ++ "    let diagnostics = Diagnostics.__driver_new(\"" ++ compilation_escape_with_string(token) ++ "\", \"" ++ compilation_escape_with_string(diag_path) ++ "\")\n"
-        out = out ++ "    let source_emitter = SourceEmitter.__driver_new(\"" ++ compilation_escape_with_string(token) ++ "\", \"" ++ compilation_escape_with_string(emitted_source_path) ++ "\")\n"
+        // Diagnostics/SourceEmitter capabilities are constructed INLINE at
+        // each hook argument position: an owned rvalue temp satisfies every
+        // parameter mode (§3.8), so a hook that CONSUMES its capability
+        // (fn generate(source: SourceEmitter) storing/dropping it) and one
+        // that merely reads it both compile without the generator having to
+        // know the hook's inferred effects. Hoisted lets forced a spelling
+        // choice the generator cannot make (move vs bare fails one side).
+        let diag_ctor = "Diagnostics.__driver_new(\"" ++ compilation_escape_with_string(token) ++ "\", \"" ++ compilation_escape_with_string(diag_path) ++ "\")"
+        let emitter_ctor = "SourceEmitter.__driver_new(\"" ++ compilation_escape_with_string(token) ++ "\", \"" ++ compilation_escape_with_string(emitted_source_path) ++ "\")"
         for hi2 in 0..hook_count:
             let hook_node = pool.compiler_hook_node(hi2)
             let phase_name = zcu.pool.resolve(pool.compiler_hook_phase_at(hi2))
             if phase_name != "after_typecheck":
                 continue
             let hook_name = zcu.pool.resolve(pool.get_data0(hook_node))
-            let call_args = compilation_compiler_hook_call_args(pool, zcu.pool, hook_node)
+            var call_args = compilation_compiler_hook_call_args(pool, zcu.pool, hook_node)
+            call_args = call_args.replace("source_emitter", emitter_ctor)
+            call_args = call_args.replace("diagnostics", diag_ctor)
             out = out ++ "    " ++ hook_name ++ "(" ++ call_args ++ ")\n"
         out
 

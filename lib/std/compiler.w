@@ -156,17 +156,21 @@ pub fn ProjectInfo.new() -> ProjectInfo:
         type_items: Vec.new(),
     }
 
-pub fn ProjectInfo.add_module(mut self: ProjectInfo, module_info: ModuleInfo) -> ProjectInfo:
-    self.module_items.push(module_info)
-    self
+impl ProjectInfo:
+    pub move fn add_module(module_info: ModuleInfo) -> ProjectInfo:
+        var out = self
+        out.module_items.push(module_info)
+        out
 
-pub fn ProjectInfo.add_function(mut self: ProjectInfo, function: FunctionInfo) -> ProjectInfo:
-    self.function_items.push(function)
-    self
+    pub move fn add_function(function: FunctionInfo) -> ProjectInfo:
+        var out = self
+        out.function_items.push(function)
+        out
 
-pub fn ProjectInfo.add_type(mut self: ProjectInfo, type_info: TypeInfo) -> ProjectInfo:
-    self.type_items.push(type_info)
-    self
+    pub move fn add_type(type_info: TypeInfo) -> ProjectInfo:
+        var out = self
+        out.type_items.push(type_info)
+        out
 
 pub fn ProjectInfo.modules(self: &Self) -> Vec[ModuleInfo]:
     self.module_items

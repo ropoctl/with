@@ -1,22 +1,29 @@
 //! expect-stdout: ok
+// D7: a builder method that returns self CONSUMES it — `move fn` with the
+// `var out = self` rebind idiom (the pre-D7 `mut self: Thing` transition
+// form is receiver-mode-enforced away; see std.build's migration).
 
 type Thing {
     name: str,
     items: Vec[str],
 }
 
-fn Thing.add(mut self: Thing, item: str) -> Thing:
-    self.items.push(item)
-    self
+impl Thing:
+    move fn add(item: str) -> Thing:
+        var out = self
+        out.items.push(item)
+        out
 
 type Wrapper {
     label: str,
     value: i32,
 }
 
-fn Wrapper.set_value(mut self: Wrapper, v: i32) -> Wrapper:
-    self.value = v
-    self
+impl Wrapper:
+    move fn set_value(v: i32) -> Wrapper:
+        var out = self
+        out.value = v
+        out
 
 fn main:
     var t = Thing { name: "test", items: Vec.new() }

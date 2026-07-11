@@ -14324,6 +14324,18 @@ impl Codegen:
         // Guaranteed mutual @[tailrec] edges are emitted as musttail.
         if self.mir_emit_mutual_tail_call != 0 and call_val != 0 and call_temp_cleanups.len() == 0:
             wl_set_musttail_call(call_val)
+            // LLVM requires a musttail call to be immediately followed by
+            // ret. The normal flow stores the result and branches to the
+            // next MIR block — valid until an overflow-guarded argument
+            // (n - 1 with panic checks) splits the block, then the verifier
+            // rejects it (behav_mutual_tailrec). The tail call's result IS
+            // the function's result; the MIR continuation block becomes
+            // unreachable and is left well-formed.
+            if wl_get_return_type(call_ft) == wl_void_type(self.context):
+                let _ = wl_build_ret_void(self.builder)
+            else:
+                let _ = wl_build_ret(self.builder, call_val)
+            return true
         self.free_call_temp_ptrs(call_temp_cleanups)
 
         // Handle sret: load result from the sret buffer instead of using call_val

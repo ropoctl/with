@@ -9,10 +9,11 @@ the reference's compact description-then-command style. The commands assume a
 POSIX shell unless the final section says otherwise.
 
 `POSSIBLE_IMPROVE` means the complete With command is more than 20% longer than
-the corresponding Perl command in the reference. `IMPOSSIBLE_ONELINER` means no
+the corresponding Perl command in the reference; those cases are grouped in
+[`improve_oneliners.md`](improve_oneliners.md). `IMPOSSIBLE_ONELINER` means no
 correct generic With one-liner is currently available; the marker occupies the
-command's place and is not shell input. The impossible cases are grouped and
-analyzed in [`impossible_oneliners.md`](impossible_oneliners.md).
+command's place and is not shell input. Those cases are analyzed in
+[`impossible_oneliners.md`](impossible_oneliners.md).
 
 ## Contents
 

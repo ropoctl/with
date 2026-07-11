@@ -4323,7 +4323,7 @@ impl MirBuilder:
         self.body.push_stmt(self.cur_bb, StmtKind.Assign, recv_place, rv, self.ast.get_start(node))
         let args: Vec[i32] = Vec.new()
         args.push(self.body.new_operand(OperandKind.OK_COPY, recv_place))
-        let deref_op = self.lower_resolved_call_with_operand_args(deref_info.deref_fn, args, result_ref_ty, node)
+        let deref_op = self.lower_resolved_call_with_operand_args(deref_info.deref_fn, args, result_ref_ty, node, false)
         self.materialize_operand(deref_op, result_ref_ty, self.ast.get_start(node))
 
     mut fn lower_field_base_place_for_field(base_expr: i32, field: i32) -> i32:
@@ -7849,7 +7849,7 @@ impl MirBuilder:
         self.record_call_contract(args_id, node, sig_idx)
         if self.sym_is_generic_fn(fn_sym):
             self.body.set_call_intrinsic(args_id, MirIntrinsic.GENERIC_CALL)
-            self.body.require_call_contract(args_id)
+            self.require_generic_call_contract(args_id, fn_sym, 0, 0, recorded_sig.is_some(), "redirect")
         let result_local = self.new_temp(actual_ret_type_id)
         let result_place = self.place_for_local(result_local)
         let next_bb = self.new_block()
@@ -7896,7 +7896,7 @@ impl MirBuilder:
         self.record_call_contract(args_id, node, sig_idx)
         if self.sym_is_generic_fn(callee_sym):
             self.body.set_call_intrinsic(args_id, MirIntrinsic.GENERIC_CALL)
-            self.body.require_call_contract(args_id)
+            self.require_generic_call_contract(args_id, callee_sym, 0, 0, recorded_sig.is_some(), "arg-nodes")
         let result_local = self.new_temp(actual_ret_type_id)
         let result_place = self.place_for_local(result_local)
         let next_bb = self.new_block()
@@ -8850,18 +8850,9 @@ impl MirBuilder:
         // Route through MirIntrinsic.GENERIC_CALL so codegen's gen_call handles it
         // (disc enums, from_int, Option methods, concrete/generic struct methods, etc.).
         let recorded_method_sig = self.sema.resolved_call_sigs.get(node)
-        // Scope-handle machinery (`s.track(...)`) and channel-endpoint methods
-        // (`tx.send(..)` / `rx.recv()` on Sender/Receiver) are checked by
-        // special sema paths and never carry a resolved signature
-        // (method-resolution verdict: outside-registry). They still route
-        // through GENERIC_CALL — codegen dispatches them by name — but no
-        // specialization contract can exist for them, so they must not be
-        // contract-required (the ownership validator would reject
-        // sig=-1/mono=0; behav_channel_basic was the cache-masked stratum).
-        // Recorded sidecar only — expr_type's fallback resolution can reach
-        // into uninstantiated generic bodies and emit "unknown type 'T'".
-        let machinery_recv_ty = if self.sema.typed_expr_types.contains(self_expr): self.sema.typed_expr_types.get(self_expr).unwrap() else: 0
-        let scope_machinery_method = not recorded_method_sig.is_some() and (method_sym == self.sema.syms.track or (machinery_recv_ty != 0 and self.type_is_channel_endpoint(machinery_recv_ty) != 0))
+        // Machinery-vs-user classification lives in
+        // require_generic_call_contract (the single decision point); here we
+        // only need "did sema record a signature" to pick the lowering arm.
         let method_is_unresolved = callee_sym == method_sym and not recorded_method_sig.is_some()
         if method_is_unresolved or self.sym_is_generic_fn(callee_sym):
                 let gc_fn_op = self.const_operand(ConstKind.CK_FN, callee_sym, 0)
@@ -8903,8 +8894,7 @@ impl MirBuilder:
                         gc_args.push(self.const_operand(ConstKind.CK_INT, 0, self.sema.ty_i32))
                 let gc_args_id = self.body.new_call_args(gc_args)
                 self.body.set_call_intrinsic(gc_args_id, MirIntrinsic.GENERIC_CALL)
-                if not scope_machinery_method:
-                    self.body.require_call_contract(gc_args_id)
+                self.require_generic_call_contract(gc_args_id, callee_sym, method_sym, self_expr, recorded_method_sig.is_some(), "method-gc")
                 self.body.set_call_ast_node(gc_args_id, node)
                 self.record_call_contract(gc_args_id, node, gc_sig_idx)
                 var gc_ret_ty = self.expr_type(node)
@@ -10859,7 +10849,43 @@ impl MirBuilder:
             return self.body.new_operand(OperandKind.OK_COPY, result_place)
         self.body.new_operand(OperandKind.OK_MOVE, result_place)
 
-    mut fn lower_resolved_call_with_operand_args(fn_sym: i32, args: Vec[i32], ret_type: i32, node: i32) -> i32:
+    // D6-spirit single decision point: every GENERIC_CALL contract
+    // requirement flows through here (seven per-site decisions produced
+    // four cache-masked machinery strata). Language-machinery calls carry
+    // no specialization contract — codegen dispatches them by
+    // name/receiver: scope handles (track/spawn), channel endpoints,
+    // task/join handles (join), Atomic, and disc-enum from_int. User-Deref
+    // dispatch opts out at its creation site instead.
+    mut fn require_generic_call_contract(args_id: i32, callee_sym: i32, method_sym: i32, self_expr: i32, has_recorded_sig: bool, site: str):
+        var mach_name = self.pool.resolve(if method_sym != 0: method_sym else: callee_sym)
+        if mach_name.len() == 0:
+            mach_name = self.sema.pool_resolve(if method_sym != 0: method_sym else: callee_sym)
+        var recv_ty = 0
+        if self_expr != 0 and self.sema.typed_expr_types.contains(self_expr):
+            recv_ty = self.sema.typed_expr_types.get(self_expr).unwrap()
+        var recv_kind = -1
+        if recv_ty != 0:
+            recv_kind = self.sema.get_type_kind(self.sema.resolve_alias(recv_ty as TypeId))
+        var required = true
+        // Real method resolutions always record a signature; machinery
+        // resolutions never do. The name list is scoped to unrecorded-sig
+        // method calls, so user methods that happen to share these names
+        // keep the full requirement.
+        if method_sym != 0 and not has_recorded_sig:
+            if method_sym == self.sema.syms.track or mach_name == "spawn" or mach_name == "join" or mach_name == "from_int":
+                required = false
+        if recv_ty != 0 and required:
+            if self.sema.type_is_task(recv_ty) != 0 or self.sema.type_is_scoped_task(recv_ty) != 0 or self.sema.type_is_scoped_join_handle(recv_ty) != 0 or self.type_is_channel_endpoint(recv_ty) != 0:
+                required = false
+            let mach_resolved = self.sema.resolve_alias(recv_ty as TypeId)
+            if recv_kind == TypeKind.TY_GENERIC_INST and self.sema.pool_resolve(self.sema.get_generic_inst_base(mach_resolved as i32)) == "Atomic":
+                required = false
+        if with_getenv_str("WITH_MIR_AUDIT").len() > 0:
+            with_eprint(f"[gc-contract] site={site} name={mach_name} recv_ty={recv_ty} recv_kind={recv_kind} recorded={has_recorded_sig} required={required}")
+        if required:
+            self.body.require_call_contract(args_id)
+
+    mut fn lower_resolved_call_with_operand_args(fn_sym: i32, args: Vec[i32], ret_type: i32, node: i32, require_contract: bool = true) -> i32:
         let fn_op = self.lower_var(fn_sym, 0, node)
         var sig_idx = self.call_sig_for_sym(fn_sym)
         let recorded_sig = self.sema.resolved_call_sigs.get(node)
@@ -10873,7 +10899,13 @@ impl MirBuilder:
         self.record_call_contract(args_id, node, sig_idx)
         if self.sym_is_generic_fn(fn_sym):
             self.body.set_call_intrinsic(args_id, MirIntrinsic.GENERIC_CALL)
-            self.body.require_call_contract(args_id)
+            // User-Deref dispatch (autoderef machinery) passes the GENERIC
+            // Deref.deref symbol with no per-node recorded sig; codegen
+            // monomorphizes GENERIC_CALL by receiver, so no specialization
+            // contract can exist for it (behav_rc_arc_basic's auto-deref
+            // stratum). Ordinary generic calls keep the requirement.
+            if require_contract:
+                self.require_generic_call_contract(args_id, fn_sym, 0, 0, recorded_sig.is_some(), "operand-args")
         let result_local = self.new_temp(ret_type)
         let result_place = self.place_for_local(result_local)
         let next_bb = self.new_block()
@@ -11533,7 +11565,7 @@ impl MirBuilder:
                                 gc_args.push(self.lower_default_call_arg(gc_def, node, gc_sig_idx, 0, gc_di))
                     let gc_args_id = self.body.new_call_args(gc_args)
                     self.body.set_call_intrinsic(gc_args_id, MirIntrinsic.GENERIC_CALL)
-                    self.body.require_call_contract(gc_args_id)
+                    self.require_generic_call_contract(gc_args_id, gc_fn_sym, 0, 0, gc_recorded_sig.is_some(), "free-generic")
                     self.body.set_call_ast_node(gc_args_id, node)
                     self.record_call_contract(gc_args_id, node, gc_sig_idx)
                     var gc_ret_ty = self.expr_type(node)
@@ -12929,7 +12961,11 @@ impl MirModule:
                 let sig_idx = body.call_sig_index(ci)
                 let mono_sym = body.call_mono_sym(ci)
                 if sig_idx < 0 or sig_idx >= sema.sig_names.len() as i32 or mono_sym == 0:
-                    sema_phase_bug(f"BUG: user generic call lacks a concrete contract: body={body.fn_sym} call={ci} sig={sig_idx} mono={mono_sym}")
+                    // Name the call: the bare body/call ids forced an LLDB
+                    // session per occurrence across four machinery strata.
+                    let vgc_node = if ci < body.call_ast_nodes.len() as i32: body.call_ast_nodes.get(ci as i64) else: 0
+                    let vgc_fn_name = sema.pool_resolve(body.fn_sym)
+                    sema_phase_bug(f"BUG: user generic call lacks a concrete contract: body={body.fn_sym}({vgc_fn_name}) call={ci} node={vgc_node} sig={sig_idx} mono={mono_sym}")
                 if sema.sig_names.get(sig_idx as i64) != mono_sym:
                     sema_phase_bug(f"BUG: generic call signature/symbol mismatch: body={body.fn_sym} call={ci} sig={sig_idx} mono={mono_sym}")
                 if not sema.concrete_specialization_by_sym.contains(mono_sym):

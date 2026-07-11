@@ -1625,21 +1625,28 @@ impl Sema:
         out.add_fn_meta(new_fn, 0, soa_self_type as i32, out.extra_len(), 0, 0, 0)
         generated.push(new_fn as i32)
 
+        // D7: a builder method returning self consumes it — move receiver
+        // with the `var out = self` rebind (owned move-self is immutable;
+        // the pre-D7 mut-self-returning-self form fails receiver-mode
+        // enforcement: "mut receiver is too weak").
+        let soa_out_sym = intern.intern("__soa_out")
         let push_stmts: Vec[i32] = Vec.new()
+        let push_self_ident = out.ct_build_ident(decl, self_sym)
+        push_stmts.push(out.add_node(NodeKind.NK_LET_BINDING, start, end, soa_out_sym, push_self_ident as i32, 1) as i32)
         for fi in 0..field_count:
             let field_sym = out.get_extra(type_extra_start + 1 + fi * 3)
-            let self_ident = out.ct_build_ident(decl, self_sym)
-            let self_field = out.ct_build_field_access(decl, self_ident, field_sym)
-            let push_callee = out.ct_build_field_access(decl, self_field, push_sym)
+            let out_ident = out.ct_build_ident(decl, soa_out_sym)
+            let out_field = out.ct_build_field_access(decl, out_ident, field_sym)
+            let push_callee = out.ct_build_field_access(decl, out_field, push_sym)
             let value_ident = out.ct_build_ident(decl, value_sym)
             let value_field = out.ct_build_field_access(decl, value_ident, field_sym)
             let push_args: Vec[i32] = Vec.new()
             push_args.push(value_field)
             push_stmts.push(out.ct_build_call(decl, push_callee, push_args))
-        let push_tail = out.ct_build_ident(decl, self_sym)
+        let push_tail = out.ct_build_ident(decl, soa_out_sym)
         let push_body = out.ct_build_block(decl, push_stmts, push_tail)
         let push_param_start = out.extra_len()
-        out.ct_add_fn_param(self_sym, soa_self_type as i32, FN_PARAM_FLAG_MUT_SELF)
+        out.ct_add_fn_param(self_sym, soa_self_type as i32, FN_PARAM_FLAG_MOVE_SELF)
         out.ct_add_fn_param(value_sym, source_type as i32, 0)
         let push_fn_sym = intern.intern(soa_name ++ ".push")
         let push_fn = out.add_node(NodeKind.NK_FN_DECL, start, end, push_fn_sym, push_body as i32, 0)

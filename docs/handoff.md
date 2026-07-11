@@ -495,6 +495,53 @@ as_ref_struct` SIGSEGV (139). Diagnosis complete, fix not started:
   identical check-fail); all seven prior session pins re-verified under the
   same binary; `audit:all` 2,145,022 facts 0 violations; fixpoint held.
 
+## THE COMPLETE FAILURE INVENTORY (first run-all sweep, gate 11b, 2026-07-11 ~03:40)
+
+`behavior-tests: 27 of 849 files failed (0 cached, 849 ran)` under the
+stage-built release compiler — the first complete list in the campaign
+(ten previous gates each showed exactly one, by alphabetized fail-fast).
+822 greens banked in the new verdict store; the next `:test` run (with a
+current-tree driver) costs only these:
+
+- **A. receiver-mode too-weak (test/hook sources)**: compiler_hook ×4,
+  std_compiler_project_info, mut_self_vec_return — "mut receiver is too
+  weak; effects require move fn" on builder-shaped methods (the std.build
+  lesson: bodies must use the `var out = self` rebind idiom, or the
+  sources predate D7 spelling).
+- **B. machinery contract BUGs (sig=-1 mono=0)**: scope_spawn,
+  scope_spawn_mut_capture, scope_join_vec_join, scope_block_forms,
+  enum_discriminant_from_int (+likely guard/iter cousins) — MORE
+  outside-registry machinery families (async-scope spawn/join, disc-enum
+  from_int) needing the same GENERIC_CALL contract waiver as scope.track
+  and channel endpoints (f02070da) — or proper resolution registration.
+- **C. derive machinery**: derive_serialize/deserialize/soa/soa_generic —
+  "return type does not implement Default".
+- **D. std.rc is broken post-campaign**: rc_arc_basic, rc_as_ref,
+  task_non_send_same_thread_storage — errors INSIDE
+  `<embedded-std>/std/rc.w` ((unsafe *ptr).strong → "undefined variable";
+  raw-ptr conversion requires unsafe; Default missing). std.rc is another
+  std.build-class blind spot: compiled by no gate except its own
+  previously-masked tests, never swept by the flag-day. Also
+  rc_arc_basic's top-level `var RC_ARC_DROP_TRACE` needs §9.1c
+  `global var` (box_drop precedent).
+- **E. tailrec codegen**: mutual_tailrec, tailrec_three_cycle — LLVM
+  verification failure after MIR cleanup (with_panic call shape in
+  is_even).
+- **F. assorted sema**: extension_coherence (candidate list shows the same
+  candidate thrice — dedup bug in ambiguity reporting?),
+  generic_nested_type_param ("cannot infer single T: Vec[i64] vs Vec"),
+  blanket_impl_basic (int_to_string arg type), iter_pipeline_local
+  (BUG: frozen generic type base not visible — SemaCheck.w:739),
+  guard_local_use (cannot dereference non-pointer), ffi_box_roundtrip
+  (§3.8 move required — likely test spelling).
+- **G. share-place matrix RUNTIME failure**: method_arg_share_place_matrix
+  exits 134 — D5 calling-card semantics; treat as high priority.
+
+Provenance note: the blanket-Drop `unknown type 'T'` chased earlier fires
+only under BRIDGE-BUILT binaries (channel tests PASS under the stage-built
+release) — another deviance artifact, not a source bug; verify everything
+against out/release/bin/with from here on.
+
 ## Remaining Work (in order)
 
 1. ~~Trait instance/associated syntax ruling~~ — **resolved by the existing

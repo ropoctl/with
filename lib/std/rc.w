@@ -17,25 +17,29 @@ pub type Rc[T] { ptr: *mut u8 }
 
 pub fn Rc.new[T](value: T) -> Rc[T]:
     let value_ptr = with_alloc(sizeof[T]() as i64) as *mut T
-    with_memcpy(value_ptr as *i8, (&raw const (move value) as *const T) as *i8, sizeof[T]() as i64)
+    // Move-assign through the pointer: consumes `value` without running its
+    // drop (the heap slot now owns it) — the memcpy-of-&raw idiom left the
+    // caller's copy owned and double-dropped the payload (std.box had the
+    // identical bug).
+    unsafe { *value_ptr = value }
     let ptr = with_alloc(sizeof[RcControl]() as i64) as *mut RcControl
-    (unsafe *ptr).strong = 1
-    (unsafe *ptr).value = value_ptr as *mut u8
+    unsafe { (*ptr).strong = 1 }
+    unsafe { (*ptr).value = value_ptr as *mut u8 }
     Rc { ptr: ptr as *mut u8 }
 
 impl[T] Rc[T]:
     pub fn clone() -> Rc[T]:
-        let ptr = unsafe { *(self as *const *mut u8) } as *mut RcControl
-        (unsafe *ptr).strong = (unsafe *ptr).strong + 1
-        Rc { ptr: ptr as *mut u8 }
+        let ptr = self.ptr as *mut RcControl
+        unsafe { (*ptr).strong = (*ptr).strong + 1 }
+        Rc { ptr: self.ptr }
 
     pub fn strong_count() -> i64:
-        let ptr = unsafe { *(self as *const *mut u8) } as *mut RcControl
-        (unsafe *ptr).strong
+        let ptr = self.ptr as *mut RcControl
+        unsafe { (*ptr).strong }
 
     pub fn as_ref() -> &T:
-        let inner = unsafe { *(self as *const *mut u8) } as *mut RcControl
-        (unsafe *inner).value as *mut T as &T
+        let ptr = self.ptr as *mut RcControl
+        unsafe { (*ptr).value as *mut T as &T }
 
 impl[T] Deref[T] for Rc[T]:
     fn deref(self: &Self) -> &T:
@@ -44,11 +48,11 @@ impl[T] Deref[T] for Rc[T]:
 impl[T] Drop for Rc[T]:
     move fn drop():
         let ptr = self.ptr as *mut RcControl
-        let next = (unsafe *ptr).strong - 1
-        (unsafe *ptr).strong = next
+        let next = unsafe { (*ptr).strong } - 1
+        unsafe { (*ptr).strong = next }
         if next == 0:
-            let value_ptr = (unsafe *ptr).value as *mut T
-            let value = unsafe *value_ptr
+            let value_ptr = unsafe { (*ptr).value } as *mut T
+            let value = unsafe { *value_ptr }
             drop(value)
             with_free(value_ptr as *i8)
             with_free(ptr as *i8)
@@ -58,28 +62,29 @@ pub type Arc[T] { ptr: *mut u8 }
 
 pub fn Arc.new[T](value: T) -> Arc[T]:
     let value_ptr = with_alloc(sizeof[T]() as i64) as *mut T
-    with_memcpy(value_ptr as *i8, (&raw const (move value) as *const T) as *i8, sizeof[T]() as i64)
+    unsafe { *value_ptr = value }
     let ptr = with_alloc(sizeof[RcControl]() as i64) as *mut RcControl
-    (unsafe *ptr).value = value_ptr as *mut u8
+    unsafe { (*ptr).value = value_ptr as *mut u8 }
     let strong_ptr = &raw mut (unsafe *ptr).strong as *mut i64
     unsafe *strong_ptr = 1
     Arc { ptr: ptr as *mut u8 }
 
 impl[T] Arc[T]:
     pub fn clone() -> Arc[T]:
-        let ptr = unsafe { *(self as *const *mut u8) } as *mut RcControl
+        let ptr = self.ptr as *mut RcControl
         let strong = &raw mut (unsafe *ptr).strong as *mut Atomic[i64]
         let _ = (unsafe *strong).fetch_add(1, .AcqRel)
-        Arc { ptr: ptr as *mut u8 }
+        Arc { ptr: self.ptr }
 
     pub fn strong_count() -> i64:
-        let ptr = unsafe { *(self as *const *mut u8) } as *mut RcControl
+        let ptr = self.ptr as *mut RcControl
         let strong = &raw const (unsafe *ptr).strong as *const Atomic[i64]
-        (unsafe *strong).load(.Acquire)
+        let n = (unsafe *strong).load(.Acquire)
+        n
 
     pub fn as_ref() -> &T:
-        let inner = unsafe { *(self as *const *mut u8) } as *mut RcControl
-        (unsafe *inner).value as *mut T as &T
+        let ptr = self.ptr as *mut RcControl
+        unsafe { (*ptr).value as *mut T as &T }
 
 impl[T] Deref[T] for Arc[T]:
     fn deref(self: &Self) -> &T:
@@ -91,8 +96,8 @@ impl[T] Drop for Arc[T]:
         let strong = &raw mut (unsafe *ptr).strong as *mut Atomic[i64]
         let old = (unsafe *strong).fetch_sub(1, .AcqRel)
         if old == 1:
-            let value_ptr = (unsafe *ptr).value as *mut T
-            let value = unsafe *value_ptr
+            let value_ptr = unsafe { (*ptr).value } as *mut T
+            let value = unsafe { *value_ptr }
             drop(value)
             with_free(value_ptr as *i8)
             with_free(ptr as *i8)

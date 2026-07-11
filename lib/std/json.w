@@ -61,7 +61,9 @@ fn json_quote(value: str) -> str:
     "\"" ++ json_escape_string(value) ++ "\""
 
 impl JsonWriter:
-    fn prefix_value():
+    // Explicit return type: unannotated fns with early `return <value>`
+    // mis-finalize (#653); the annotation is the documented workaround.
+    fn prefix_value() -> JsonWriter:
         if self.after_key:
             return JsonWriter { text: self.text, needs_comma: self.needs_comma, after_key: false }
         if self.needs_comma:
