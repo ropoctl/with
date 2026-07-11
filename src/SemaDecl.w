@@ -1707,11 +1707,25 @@ impl Sema:
         if owner_sym == 0 or method_sym == 0:
             return 0
         if self.method_decl_is_extension(node) != 0:
+            // Registration runs once per check pass; without the identity
+            // guard the same extension appears N times and a SINGLE
+            // extension reports itself as ambiguous (behav_extension_
+            // coherence: "candidates: w.label, w.label, w.label"). Keyed by
+            // source PATH: fn syms differ across passes for the same decl.
+            let reg_path = sema_owned_text(self.decl_source_path_for_index(decl_index))
+            for ei in 0..self.extension_method_owner_syms.len() as i32:
+                if self.extension_method_owner_syms.get(ei as i64) == owner_sym and self.extension_method_syms.get(ei as i64) == method_sym and self.extension_method_paths.get(ei as i64) == reg_path:
+                    // Refresh the row so later passes' fn/sig win (they are
+                    // the finalized ones).
+                    self.extension_method_fn_syms.set_i32(ei as i64, fn_sym)
+                    self.extension_method_sig_idxs.set_i32(ei as i64, sig_idx)
+                    self.method_symbol_flags.insert(fn_sym, 1)
+                    return 1
             self.extension_method_owner_syms.push(owner_sym)
             self.extension_method_syms.push(method_sym)
             self.extension_method_fn_syms.push(fn_sym)
             self.extension_method_sig_idxs.push(sig_idx)
-            self.extension_method_paths.push(sema_owned_text(self.decl_source_path_for_index(decl_index)))
+            self.extension_method_paths.push(reg_path)
             self.method_symbol_flags.insert(fn_sym, 1)
             return 1
         0
