@@ -542,6 +542,37 @@ only under BRIDGE-BUILT binaries (channel tests PASS under the stage-built
 release) — another deviance artifact, not a source bug; verify everything
 against out/release/bin/with from here on.
 
+## Inventory burn-down (2026-07-11, 04:00-05:00)
+
+Clusters closed and committed (702e3c17, ba547df4): A (std.compiler
+builders + vec_return test → move-fn rebind idiom), B (GENERIC_CALL
+contract requirements consolidated into require_generic_call_contract —
+discriminator: real resolutions always record a signature, machinery never
+does; validator failures now name function+node), C (std.json
+prefix_value #653 annotation unblocked all four derive tests; SoA derive
+generator emits D7 move-receiver push), D-mostly (std.rc rewritten in
+std.box idioms — move-assign ctors fixing the same double-drop, self.ptr,
+braced-unsafe tails), E (musttail must be immediately followed by ret).
+Eager user-Deref specializations now recorded on the base expr
+(Drop-registration recipe) — the dispatch keeps its full contract
+requirement, no waiver.
+
+Still red going into gate twelve: rc_arc_basic (NEW bounded layer:
+'unknown method as_ref for &<error>' at rc.w:91 during Arc's deref
+concrete check — Self resolution in ensure_user_deref_specialization's
+context; FIRST TARGET next session), share-place matrix (generic-method
+share-place ARGS don't land in the caller's place — D5-critical, the
+argument-side sibling of fcb3d38b), extension_coherence (triple-duplicate
+candidate list), generic_nested_type_param, blanket_impl_basic,
+iter_pipeline_local (frozen generic base BUG), guard_local_use,
+ffi_box_roundtrip. Gate twelve (stage-built driver + redesigned cache)
+gives the definitive list without bridge-deviance noise.
+
+Systemic finding worth a gate: four std modules (build, rc, compiler,
+json) all broke the same way — compiled by no gate except their own
+masked tests. A use-everything std-surface probe target would catch the
+whole class at build time.
+
 ## Remaining Work (in order)
 
 1. ~~Trait instance/associated syntax ruling~~ — **resolved by the existing
