@@ -1218,6 +1218,12 @@ impl Codegen:
                         if pointee_sema > 0:
                             cur_sema_ty = pointee_sema
                             deref_ty = self.mir_sema_type_to_llvm(pointee_sema)
+                    else if self.sema.type_is_std_box_inst(deref_resolved) != 0:
+                        // Transparent std Box: deref of the box yields the payload.
+                        let box_payload_sema = self.sema.get_generic_inst_arg(deref_resolved, 0)
+                        if box_payload_sema > 0:
+                            cur_sema_ty = box_payload_sema
+                            deref_ty = self.mir_sema_type_to_llvm(box_payload_sema)
                 if deref_ty != 0:
                     cur_ty = deref_ty
                 else:
@@ -1426,6 +1432,16 @@ impl Codegen:
                         if pointee_sema > 0:
                             cur_sema_ty = pointee_sema
                             deref_ptr_ty = self.mir_sema_type_to_llvm(pointee_sema)
+                    else if self.sema.type_is_std_box_inst(deref_resolved) != 0:
+                        // Transparent std Box: the box value IS the payload
+                        // pointer, so the load above already lands on the
+                        // payload — only the type bookkeeping needs the
+                        // payload type (or the following PK_FIELD chases an
+                        // extra pointer and collapses the operand to undef).
+                        let box_payload_sema = self.sema.get_generic_inst_arg(deref_resolved, 0)
+                        if box_payload_sema > 0:
+                            cur_sema_ty = box_payload_sema
+                            deref_ptr_ty = self.mir_sema_type_to_llvm(box_payload_sema)
                 if deref_ptr_ty != 0:
                     cur_ty = deref_ptr_ty
                 else:
@@ -5736,6 +5752,9 @@ impl Codegen:
                 let d_tk = self.mir_input.mir_get_type_kind(d_resolved)
                 if d_tk == TypeKind.TY_PTR or d_tk == TypeKind.TY_REF:
                     ty = self.mir_input.mir_get_type_d0(d_resolved)
+                else if self.sema.type_is_std_box_inst(d_resolved) != 0:
+                    // Transparent std Box: deref of the box yields the payload.
+                    ty = self.sema.get_generic_inst_arg(d_resolved, 0)
                 active_variant_idx = -1
             else if pk == ProjKind.PK_INDEX:
                 let elem_ty = self.mir_index_elem_sema_type(ty)

@@ -1,4 +1,4 @@
-var BOX_DROP_TRACE = ""
+global var BOX_DROP_TRACE = ""
 
 type BoxDropGuard { id: str }
 

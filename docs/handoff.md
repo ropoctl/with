@@ -5,10 +5,10 @@ Updated 2026-07-10 (end of day). Supersedes the morning and mid-afternoon
 
 ## Executive Status
 
-- Branch: `main`. `HEAD == origin/main == ed3ffae0`. The D7 campaign remains
-  **uncommitted**; the working tree is intentionally large and dirty
-  (receiver migration across 127 files plus the integrated analysis
-  framework). Do not reset or broadly revert it.
+- Branch: `main`. The D7 campaign is **committed and pushed** through
+  `01a79221` (seven commits on 2026-07-10); the box_drop codegen +
+  reset-on-move fixes below are the only uncommitted delta, awaiting gate
+  chain six.
 - **The integrated audit gate is GREEN on the migrated tree:**
 
   ```
@@ -240,33 +240,64 @@ staleness is also a plausible cause of finding B's method-registry delta.
 Lesson: after editing `lib/std/*` in a targeted-build workflow, regenerate
 `:compat-runtime-source` before rebuilding.
 
-## NEXT LOOP (one layer left): behav_box_drop codegen place emission
+## RESOLVED: behav_box_drop — final two layers (night 2026-07-10, gate six pending)
 
-Four of five layers are fixed and pinned (raw-ref escape effect; Box.new
-move-assign idiom; transparent-box field lowering incl. typed deref place;
-test-file `global var` spelling — see the resolved section below and commit
-f50684ec). The remaining layer, with repro `scratchpad/bdgv.w` (the full
-test with `global var`):
+Both remaining layers root-caused to the exact line and fixed; the full test
+passes at runtime (`scratchpad/bdgv_run.w` executes both test fns), all bd
+pins hold, `/drop-audit` 25/25 with 0 regressions, into_inner repro clean
+under `--debug-alloc`.
 
-- `test_box_drops_payload_at_scope_exit` fails LLVM function verification
-  after MIR cleanup. The dumped IR shows the deref place is now correct
-  (`load ptr, ptr %0` twice in bb2) but the FIELD value never materializes:
-  `guard.id == "G"` emits `icmp eq i32 undef, %str ...` — the projected
-  field read through [box-local, PK_DEREF(payload_ty), PK_FIELD(id)]
-  produced no load of the payload's str field, and the string-eq lowering
-  fell back to a type-mismatched icmp on undef.
-- Suspect: codegen's place-emission projection chain (mir_place_ptr /
-  place-emit region in CodegenDispatch) — with the base LOCAL's LLVM
-  storage being the box's raw pointer value, PK_DEREF emits the ptr load,
-  but the subsequent PK_FIELD must GEP into the PAYLOAD struct type derived
-  from the projection's sema type; it instead re-loads the pointer and
-  abandons the value. Also worth checking why the EQ lowering degrades to
-  icmp-on-undef instead of failing loudly when its operand collapses —
-  that silent undef is the same disease class as #653.
-- Note: sema's transparent-box model records ZERO autoderef steps for box
-  field access (WITH_DEBUG_DEREF trace proves it), so every consumer must
-  implement the transparency; grep for other autoderef walks that may need
-  the same box branch as lower_field_base_place_for_field.
+1. **Codegen place-walk blind to transparent-box deref** (the icmp-undef
+   layer). MIR was already correct (`_2.*.f6`); the three place-walk twins —
+   `mir_place_projected_type` (~1204), `mir_place_ptr` (~1406), and
+   `mir_place_sema_type` (~5734) in `src/CodegenDispatch.w` — resolved a
+   PK_DEREF pointee only for TY_PTR/TY_REF. `Box[T]` is TY_GENERIC_INST, so
+   `cur_ty` stayed 0 after the deref; the PK_FIELD arm then pointer-chased an
+   extra load (landing on the payload's first 8 bytes) and failed
+   `mir_resolve_field_index` → returned 0 → operand emitter substituted
+   `i32 undef`. Fix: each twin resolves deref-of-std-Box to the payload type
+   via `sema.type_is_std_box_inst` + `get_generic_inst_arg(_, 0)` (the
+   emitted load was already landing on the payload; only the type
+   bookkeeping was blind).
+2. **`RK_CAST` skipped reset-on-move** (the into_inner double-drop layer).
+   `Box.into_inner`'s `self as *mut T` lowered to `cast(move _1 …)` with NO
+   `_1 = const zst` reset after it — `lower_cast` was the only rvalue path
+   embedding an operand without `consume_moved_operand` (corpus-verified:
+   the whole prelude+user MIR contains exactly one rvalue-embedded move;
+   binops/unops lower non-Copy operands as copies). The moved-from box local
+   stayed live, so its guarded scope-exit drop re-dropped the payload (trace
+   pollution + latent double-free with the body's own `with_free`). Fix:
+   one-line `consume_moved_operand(op)` in `MirLower.lower_cast`.
+
+Also applied: `test/behavior/behav_box_drop.w` line 1 `var` → `global var`
+(§9.1c; pre-verified spelling in `scratchpad/bdgv.w`).
+
+**New findings parked while verifying (both pre-existing, proven with the
+pre-fix `/tmp/with-gap2` binary):**
+
+- `analyze <box-drop-repro> audit:all` reports 2 violations on ANY program
+  instantiating `Box[T: Drop]` — `sig N: receiver requirement is not the
+  finalized param[0] effect` (the sig is the `Box.drop__receiver__*`
+  specialization, one past the emitted signature-fact range) and
+  `call with_free … no Codegen marshalling fact` (the specialization's body
+  exists in MIR but codegen inlines drop glue instead of emitting it, so its
+  calls never pass the instrumented emitter). First time this shape was ever
+  audited; the whole-compiler green runs never instantiate box
+  specializations. Needs: exempt-or-emit decision for never-emitted mono
+  drop bodies in the marshalling-coverage audit, and the receiver-req
+  checker taught about the specialization sig row.
+- `--debug-alloc` flags a 16-byte exit leak for ANY `global var` str that
+  holds a concat result at program exit (globals are not dropped at exit) —
+  isolated to `scratchpad/gleak.w`, no box involvement. Language-level
+  question (should module globals drop at exit?), not a gate blocker.
+- `Box.new`'s MIR emits `drop(_2.*) @ drop-before-overwrite` on the
+  freshly-allocated uninit slot before `_2.* = move _1`; the runtime niche
+  guard is what keeps it from firing on garbage. Correct only if
+  `with_alloc` memory reads as niche — worth a deliberate zero-or-exempt
+  decision.
+- `Box.into_inner` MIR orders `StorageDead(_4)` BEFORE `_0 = move _4`
+  (benign today — codegen ignores StorageDead — but a validator-worthy
+  smell).
 
 ## PREVIOUS LOOP NOTES: behav_box_drop diagnosis trail
 
@@ -357,9 +388,10 @@ as_ref_struct` SIGSEGV (139). Diagnosis complete, fix not started:
    types, void-return default trait methods).
 5. Remove temporary repair tools (`out/restore_migrated_impl_headers.w`)
    after the expensive gates pass.
-6. **Expensive gates once, then bootstrap:** `with build`, `:fixpoint`,
-   `:test`, `:test-green`, `:last-green`, then the one-chain seed update.
-   Keep `-O1`.
+6. **Expensive gates once, then bootstrap:** gate chain six (build →
+   `:fixpoint` → `:test`) is IN FLIGHT with both box_drop fixes
+   (`scratchpad/gates6.log`). On `GATES EXIT: 0`: `:test-green`,
+   `:last-green`, then the one-chain seed update. Keep `-O1`.
 
 ## Temporary Assets
 

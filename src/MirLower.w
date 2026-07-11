@@ -4279,6 +4279,11 @@ impl MirBuilder:
 
     mut fn lower_cast(expr: i32, target_type_id: i32, node: i32) -> i32:
         let op = self.lower_expr(expr)
+        // A cast can consume its operand (`self as *mut T` in a move-receiver
+        // body). Without the reset-on-move bookkeeping the moved-from local
+        // stays live and its guarded scope-exit drop re-drops the value —
+        // Box.into_inner double-dropped its payload through exactly this hole.
+        self.consume_moved_operand(op)
         let src_sema_ty = self.expr_type(expr)
         let rv = self.body.new_rvalue(RvalueKind.RK_CAST, op, target_type_id, src_sema_ty)
         let temp = self.new_temp(target_type_id)
