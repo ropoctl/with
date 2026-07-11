@@ -2993,6 +2993,19 @@ impl Sema:
             self.add_sig(mono_sym, 0, ret_tid, ps, param_count, 0)
             sig_idx = self.get_sig(mono_sym)
         else:
+            // A RE-check must not lose the effects-based share-place
+            // classification (assign_share_place_abi ran at end-of-check):
+            // the fresh zero rows below wiped value_ref_abi for every
+            // specialization re-checked during MIR lowering, so MirLower
+            // passed share-place args as owned moves and codegen marshaled
+            // direct-value (behav_method_arg_share_place_matrix). RESTORE
+            // the prior flags rather than re-derive — re-derivation can
+            // flip sigs codegen already contracted (a D6 divergence that
+            // segfaulted the compiler on the Mutex drop path).
+            let saved_vra: Vec[i32] = Vec.new()
+            let saved_vra_count = self.sig_get_param_count(sig_idx)
+            for svi in 0..saved_vra_count:
+                saved_vra.push(self.sig_param_uses_value_ref_abi(sig_idx, svi))
             self.sig_type_ids.set_i32(sig_idx as i64, 0)
             self.sig_ret_types.set_i32(sig_idx as i64, ret_tid as i32)
             self.sig_param_starts.set_i32(sig_idx as i64, ps)
@@ -3004,6 +3017,9 @@ impl Sema:
                 self.sig_param_direct_effects.push(0)
                 self.sig_param_view_origins.push(0)
                 self.sig_value_ref_abi_params.push(0)
+            for svi in 0..saved_vra_count:
+                if svi < param_count and saved_vra.get(svi as i64) != 0:
+                    self.set_sig_param_value_ref_abi(sig_idx, svi, 1)
         self.set_sig_receiver_mode(sig_idx, self.receiver_mode_from_param(param_start, param_count))
         var method_owner_sym = 0
         var self_type_id = 0
@@ -3059,15 +3075,6 @@ impl Sema:
         self.in_concrete_generic_body = self.in_concrete_generic_body + 1
         self.check_fn_body_with_sig(fn_node, sig_idx)
         self.in_concrete_generic_body = saved_concrete_generic_body
-        // A RE-check resets this sig's value_ref rows and recomputes only the
-        // AST-level receiver heuristic — wiping assign_share_place_abi's D5
-        // classification for specializations re-checked during MIR lowering
-        // (lower_concrete_specialization). MirLower then passed share-place
-        // args as owned moves and codegen marshaled direct-value: the caller's
-        // place never received the callee's writes
-        // (behav_method_arg_share_place_matrix). Re-apply the effects-based
-        // rule now that this body's effects are recomputed.
-        self.assign_share_place_abi_for_sig(sig_idx)
         self.register_concrete_specialization(fn_node, mono_sym, sig_idx, tp_syms, tp_sema_tys, param_concrete_tys)
 
         self.bind_names = saved_bind_names

@@ -4517,9 +4517,26 @@ impl Codegen:
         if function == 0 or param_start < 0 or param_count <= 0:
             return
         let fn_type = wl_global_get_value_type(function)
+        // LLVMGetParam past the declared count walks LLVM's lazy-argument
+        // builder into a null deref (silent compiler SIGSEGV). An index
+        // beyond the declared type is a real AST-vs-ABI divergence — skip
+        // it loudly instead of crashing.
+        // A handle whose value type is not a function type cannot receive
+        // param attrs, and LLVMGetParam on it walks the lazy-arg builder
+        // into a null deref. Loud skip: a non-function under a mono sym in
+        // fn_values is a registration bug upstream, not an attr concern.
+        if fn_type == 0 or wl_count_param_types(fn_type) < 0:
+            if with_getenv_str("WITH_MIR_AUDIT").len() > 0:
+                with_eprint(f"[noalias-nonfn] attr walk on non-function value (param_count={param_count} offset={param_offset})")
+            return
+        let llvm_param_count = wl_count_param_types(fn_type)
         for pi in 0..param_count:
             let actual_idx = pi + param_offset
-            var param_ty = if fn_type != 0: wl_get_fn_param_type(fn_type, actual_idx) else: 0
+            if actual_idx < 0 or actual_idx >= llvm_param_count:
+                if with_getenv_str("WITH_MIR_AUDIT").len() > 0:
+                    with_eprint(f"[noalias-oob] fn declares {llvm_param_count} LLVM params, attr walk wants index {actual_idx} (param_count={param_count} offset={param_offset})")
+                continue
+            var param_ty = wl_get_fn_param_type(fn_type, actual_idx)
             if param_ty == 0:
                 let param = wl_get_param(function, actual_idx)
                 if param == 0:

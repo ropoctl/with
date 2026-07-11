@@ -610,6 +610,41 @@ The seven, with everything known:
    (SemaCheck.w:739, resolve_generic_type_frozen).
 7. blanket_impl_basic — "wrong argument type in call to 'int_to_string'".
 
+## Autonomous-loop progress (2026-07-11, ~06:00-06:40)
+
+- **D5 matrix FIXED and pushed (38101816)**: the [vra] trace proved both
+  concrete-check passes compute value_ref_abi=0; the effects-based
+  classification was wiped by the mid-lowering re-check's sig reset. Fix:
+  assign_share_place_abi_for_sig re-applied after every concrete re-check.
+  gwm.w + the full matrix test green; sentinels hold.
+- **std.ffi fixed and pushed (66258e19)**: box_ctx moves into Box.new
+  (§3.8) — fifth std module of the masked-test class. Test global-var
+  spelling fixed; compile-clean (direct run hits the runner-less
+  missing-main link only).
+- **std.sync repaired, UNCOMMITTED — segv layer found**: all six
+  memcpy-of-(&raw const (move value)) sites → move-assign; eight nested
+  `unsafe *((unsafe *state)...)` forms → braced. Module compiles; the
+  guard test's mut-block `*data` stars removed (with_enter_mut returns T
+  by value; write-back via with_exit_mut). behav_guard_local_use now
+  CHECKS ok but at runtime: rc=139 silent (no output at all — print never
+  runs) WITHOUT debug-alloc, rc=0 still-silent WITH it. Timing-dependent
+  runtime bug in the mutex/guard path (suspects: the new move-assign
+  interacting with guard exit/store, or Scoped machinery lowering).
+  NEXT: lldb + tools/debug_drop protocol on the isolated test fns.
+  sync.w commit HELD until diagnosed — do not ship a silent segv behind a
+  compile fix.
+- **Last two sema singletons scoped**: blanket_impl_basic — blanket
+  `impl[T] for T` read receiver specializes to &i32 for Copy T and
+  `int_to_string(self)` rejects &i32 (needs &Copy→Copy arg coercion or
+  Copy-receiver reclassification in concrete checks). extension_coherence
+  — ambiguity lists the SAME candidate thrice (w.label ×3): duplicate
+  extension registration across check passes; dedupe by fn sym at
+  collection or guard registration. generic_nested_type_param — struct
+  literal `Pair { a: v, b: Vec.new() }`: field-expected type does not
+  propagate into the bare generic ctor (Vec[i64] vs Vec unification).
+  iter_pipeline_local — frozen-base BUG at resolve_generic_type_frozen
+  (SemaCheck.w:739) still unexplored.
+
 ## Remaining Work (in order)
 
 1. ~~Trait instance/associated syntax ruling~~ — **resolved by the existing

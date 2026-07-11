@@ -133,7 +133,7 @@ unsafe fn sync_barrier_unlock(state: *mut BarrierState):
 /// Create a new generic mutex with the given initial value.
 pub fn Mutex.new[T](value: T) -> Mutex[T]:
     let value_ptr = with_alloc(sizeof[T]() as i64) as *mut T
-    with_memcpy(value_ptr as *i8, (&raw const (move value) as *const T) as *i8, sizeof[T]() as i64)
+    unsafe { *value_ptr = value }
     let state = with_alloc(sizeof[MutexState]() as i64) as *mut MutexState
     (unsafe *state).locked = 0
     (unsafe *state).value = value_ptr as *mut u8
@@ -156,7 +156,7 @@ pub fn Mutex.enter_mut[T](self: &Self) -> MutexGuardMut[T]:
 /// Release the read guard, returning a Copy snapshot of the current value.
 pub fn MutexGuard.exit[T: Copy](move self: Self) -> T:
     let state = self.ptr as *mut MutexState
-    let value = unsafe *((unsafe *state).value as *mut T)
+    let value = unsafe { *((*state).value as *mut T) }
     let locked = (&raw mut (unsafe *state).locked as *mut i32) as *mut Atomic[i32]
     (unsafe *locked).store(0, .Release)
     value
@@ -164,7 +164,7 @@ pub fn MutexGuard.exit[T: Copy](move self: Self) -> T:
 /// Release the write guard, returning a Copy snapshot of the current value.
 pub fn MutexGuardMut.exit[T: Copy](move self: Self) -> T:
     let state = self.ptr as *mut MutexState
-    let value = unsafe *((unsafe *state).value as *mut T)
+    let value = unsafe { *((*state).value as *mut T) }
     let locked = (&raw mut (unsafe *state).locked as *mut i32) as *mut Atomic[i32]
     (unsafe *locked).store(0, .Release)
     value
@@ -172,7 +172,7 @@ pub fn MutexGuardMut.exit[T: Copy](move self: Self) -> T:
 impl[T] Scoped[&T] for MutexGuard[T]:
     fn with_enter(self: &Self) -> &T:
         let state = self.ptr as *mut MutexState
-        unsafe { (unsafe *state).value as &T }
+        unsafe { (*state).value as &T }
 
     fn with_exit(self: &Self) -> Unit:
         let state = self.ptr as *mut MutexState
@@ -182,12 +182,12 @@ impl[T] Scoped[&T] for MutexGuard[T]:
 impl[T] ScopedMut[T] for MutexGuardMut[T]:
     fn with_enter_mut(self: &Self) -> T:
         let state = self.ptr as *mut MutexState
-        unsafe *((unsafe *state).value as *mut T)
+        unsafe { *((*state).value as *mut T) }
 
     mut fn with_exit_mut(value: T) -> Unit:
         let state = self.ptr as *mut MutexState
         let value_ptr = (unsafe *state).value as *mut T
-        with_memcpy(value_ptr as *i8, (&raw const (move value) as *const T) as *i8, sizeof[T]() as i64)
+        unsafe { *value_ptr = value }
         let locked = (&raw mut (unsafe *state).locked as *mut i32) as *mut Atomic[i32]
         (unsafe *locked).store(0, .Release)
 
@@ -205,7 +205,7 @@ pub fn Mutex.set[T](self: &Self, value: T) -> Unit:
     let value_ptr = (unsafe *state).value as *mut T
     let old = unsafe *value_ptr
     drop(old)
-    with_memcpy(value_ptr as *i8, (&raw const (move value) as *const T) as *i8, sizeof[T]() as i64)
+    unsafe { *value_ptr = value }
     (unsafe *locked).store(0, .Release)
 
 impl[T] Drop for Mutex[T]:
@@ -220,7 +220,7 @@ impl[T] Drop for Mutex[T]:
 /// Create a new generic reader-writer lock with the given initial value.
 pub fn RwLock.new[T](value: T) -> RwLock[T]:
     let value_ptr = with_alloc(sizeof[T]() as i64) as *mut T
-    with_memcpy(value_ptr as *i8, (&raw const (move value) as *const T) as *i8, sizeof[T]() as i64)
+    unsafe { *value_ptr = value }
     let state = with_alloc(sizeof[RwLockState]() as i64) as *mut RwLockState
     (unsafe *state).state = 0
     (unsafe *state).value = value_ptr as *mut u8
@@ -257,7 +257,7 @@ pub fn RwLock.enter_mut[T](self: &Self) -> RwWriteGuard[T]:
 /// Release read guard, returning a Copy snapshot of the current value.
 pub fn RwReadGuard.exit[T: Copy](move self: Self) -> T:
     let state = self.ptr as *mut RwLockState
-    let value = unsafe *((unsafe *state).value as *mut T)
+    let value = unsafe { *((*state).value as *mut T) }
     let word = (&raw mut (unsafe *state).state as *mut i32) as *mut Atomic[i32]
     let _ = (unsafe *word).fetch_sub(1, .Release)
     value
@@ -265,7 +265,7 @@ pub fn RwReadGuard.exit[T: Copy](move self: Self) -> T:
 /// Release write guard, returning a Copy snapshot of the current value.
 pub fn RwWriteGuard.exit[T: Copy](move self: Self) -> T:
     let state = self.ptr as *mut RwLockState
-    let value = unsafe *((unsafe *state).value as *mut T)
+    let value = unsafe { *((*state).value as *mut T) }
     let word = (&raw mut (unsafe *state).state as *mut i32) as *mut Atomic[i32]
     (unsafe *word).store(0, .Release)
     value
@@ -273,7 +273,7 @@ pub fn RwWriteGuard.exit[T: Copy](move self: Self) -> T:
 impl[T] Scoped[&T] for RwReadGuard[T]:
     fn with_enter(self: &Self) -> &T:
         let state = self.ptr as *mut RwLockState
-        unsafe { (unsafe *state).value as &T }
+        unsafe { (*state).value as &T }
 
     fn with_exit(self: &Self) -> Unit:
         let state = self.ptr as *mut RwLockState
@@ -283,12 +283,12 @@ impl[T] Scoped[&T] for RwReadGuard[T]:
 impl[T] ScopedMut[T] for RwWriteGuard[T]:
     fn with_enter_mut(self: &Self) -> T:
         let state = self.ptr as *mut RwLockState
-        unsafe *((unsafe *state).value as *mut T)
+        unsafe { *((*state).value as *mut T) }
 
     mut fn with_exit_mut(value: T) -> Unit:
         let state = self.ptr as *mut RwLockState
         let value_ptr = (unsafe *state).value as *mut T
-        with_memcpy(value_ptr as *i8, (&raw const (move value) as *const T) as *i8, sizeof[T]() as i64)
+        unsafe { *value_ptr = value }
         let word = (&raw mut (unsafe *state).state as *mut i32) as *mut Atomic[i32]
         (unsafe *word).store(0, .Release)
 
@@ -309,7 +309,7 @@ pub fn RwLock.write[T](self: &Self, value: T) -> Unit:
     let value_ptr = (unsafe *state).value as *mut T
     let old = unsafe *value_ptr
     drop(old)
-    with_memcpy(value_ptr as *i8, (&raw const (move value) as *const T) as *i8, sizeof[T]() as i64)
+    unsafe { *value_ptr = value }
     (unsafe *word).store(0, .Release)
 
 impl[T] Drop for RwLock[T]:
