@@ -302,10 +302,26 @@ fn ret_direct_w_files(fs: &ToolFs, dir: str) -> Vec[str]:
             out.push(path)
     ret_sorted_strings(out)
 
+fn ret_sha256_hex_list(ctx: &ActionCtx, label: str, files: &Vec[str]) -> Vec[str]:
+    let out: Vec[str] = Vec.new()
+    let manifest = ret_sha256_files_manifest(ctx, label, files)
+    if manifest.len() == 0:
+        return out
+    let lines = manifest.split("\n")
+    for i in 0..lines.len() as i32:
+        let line = lines.get(i as i64)
+        if line.len() >= 64:
+            out.push(line.slice(0, 64))
+    out
+
 fn ret_expected_test_marker(ctx: &ActionCtx, target_name: str, entry: str) -> str:
     let fs = ctx.fs()
     let compiler_path = ret_release_compiler_path()
-    var text = "v1\n"
+    // Mirrors BuildGraphCache.build_cache_test_success_manifest v2: the
+    // compiler and every test file are keyed by content sha256, so stale
+    // evidence cannot survive a compiler rebuild (the v1 marker recorded
+    // the compiler by path only).
+    var text = "v2\n"
     text = text ++ "target:" ++ target_name ++ "\n"
     text = text ++ "kind:2\n"
     text = text ++ "entry:" ++ entry ++ "\n"
@@ -314,10 +330,20 @@ fn ret_expected_test_marker(ctx: &ActionCtx, target_name: str, entry: str) -> st
     text = text ++ "target-kind:0\n"
     text = text ++ "arg:compiler=" ++ compiler_path ++ "\n"
     text = text ++ "compiler:" ++ compiler_path ++ "\n"
+    let comp_files: Vec[str] = Vec.new()
+    comp_files.push(compiler_path)
+    let comp_hexes = ret_sha256_hex_list(ctx, ret_safe_label(target_name) ++ "-marker-compiler", comp_files)
+    if comp_hexes.len() as i32 != 1:
+        ctx.diagnostics().error(ctx.target_name() ++ ": could not hash test compiler for marker " ++ target_name)
+        return ""
+    text = text ++ "compiler-sha256:" ++ comp_hexes.get(0) ++ "\n"
     let files = ret_direct_w_files(fs, ret_dirname(entry))
+    let file_hexes = ret_sha256_hex_list(ctx, ret_safe_label(target_name) ++ "-marker-files", files)
+    if file_hexes.len() != files.len():
+        ctx.diagnostics().error(ctx.target_name() ++ ": could not hash test files for marker " ++ target_name)
+        return ""
     for i in 0..files.len() as i32:
-        let path = files.get(i as i64)
-        text = text ++ "file:" ++ path ++ "\n"
+        text = text ++ "file:" ++ files.get(i as i64) ++ ":" ++ file_hexes.get(i as i64) ++ "\n"
     text
 
 fn ret_host_bin(path: str) -> str:

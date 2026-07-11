@@ -4,6 +4,7 @@ use Resolve
 use BuildGraphModel
 use BuildGraphRuntime
 use BuildGraphSupport
+use BuildGraphCache
 
 type BuildGraphExternalTestJob {
     test_path: str,
@@ -120,12 +121,43 @@ pub fn build_graph_run_external_test_files(root: str, target: &BuildGraphTarget,
     if build_graph_rt_mkdir_p(capture_dir) != 0:
         build_graph_rt_eprint("error: could not create test output directory for target '" ++ target.name ++ "': " ++ capture_dir)
         return 1
+
+    // Per-file verdict cache: skip files whose PASS verdict was recorded
+    // under the same (compiler fingerprint, file fingerprint, target
+    // config) key. Only passes are cached; failures always re-run. A red
+    // run still banks every green verdict it proved, so the next run
+    // re-executes only failures and changed files — never the whole
+    // alphabet again.
+    let compiler_fp = build_cache_test_compiler_fingerprint(compiler_path)
+    let prior = build_cache_load_test_verdicts(root, target.name)
+    var pass_keys: Vec[str] = Vec.new()
+    var pass_paths: Vec[str] = Vec.new()
+    var run_files: Vec[str] = Vec.new()
+    var run_keys: Vec[str] = Vec.new()
+    var cached_count = 0
+    for i in 0..test_files.len() as i32:
+        let test_path = test_files.get(i as i64)
+        let key = build_cache_test_verdict_key(root, target, compiler_fp, test_path)
+        if prior.contains(key):
+            cached_count = cached_count + 1
+            pass_keys.push(key)
+            pass_paths.push(build_cache_project_relative_path(root, test_path))
+        else:
+            run_files.push(test_path)
+            run_keys.push(key)
+
+    // Run every non-cached file; report every failure; never abort the
+    // sweep on the first one (fail-fast over alphabetically ordered files
+    // is how ten gate chains each surfaced exactly one bug).
     let jobs_limit = build_graph_test_jobs()
+    var failed_paths: Vec[str] = Vec.new()
+    var first_failure = 0
     var next = 0
-    while next < test_files.len() as i32:
+    while next < run_files.len() as i32:
         let active: Vec[BuildGraphExternalTestJob] = Vec.new()
-        while next < test_files.len() as i32 and active.len() < jobs_limit as i64:
-            let test_path = test_files.get(next as i64)
+        let active_keys: Vec[str] = Vec.new()
+        while next < run_files.len() as i32 and active.len() < jobs_limit as i64:
+            let test_path = run_files.get(next as i64)
             let base = build_graph_path_basename(test_path)
             let stdout_path = resolve_join(capture_dir, base ++ ".stdout")
             let stderr_path = resolve_join(capture_dir, base ++ ".stderr")
@@ -135,12 +167,28 @@ pub fn build_graph_run_external_test_files(root: str, target: &BuildGraphTarget,
                 build_graph_rt_eprint("error: build.w test target '" ++ target.name ++ "' could not spawn '" ++ test_path ++ "'")
                 return 1
             active.push(build_graph_external_test_job_new(test_path, stdout_path, stderr_path, pid))
+            active_keys.push(run_keys.get(next as i64))
             next = next + 1
-        var first_failure = 0
         for ai in 0..active.len() as i32:
+            let job_path = active.get(ai as i64).test_path
             let rc = build_graph_wait_external_test_job(target, active.get(ai as i64))
-            if rc != 0 and first_failure == 0:
-                first_failure = rc
-        if first_failure != 0:
-            return first_failure
+            if rc == 0:
+                pass_keys.push(active_keys.get(ai as i64))
+                pass_paths.push(build_cache_project_relative_path(root, job_path))
+            else:
+                failed_paths.push(job_path)
+                if first_failure == 0:
+                    first_failure = rc
+
+    // Persist the passing set even when the target is red (compaction:
+    // the file is rewritten with exactly the keys proven this run plus
+    // the still-valid cached ones).
+    build_cache_write_test_verdicts(root, target.name, &pass_keys, &pass_paths)
+
+    if failed_paths.len() as i32 > 0:
+        build_graph_rt_eprint(f"error: build.w test target '{target.name}': {failed_paths.len() as i32} of {test_files.len() as i32} files failed ({cached_count} cached, {run_files.len() as i32} ran):")
+        for fi in 0..failed_paths.len() as i32:
+            build_graph_rt_eprint("error:   failed: " ++ failed_paths.get(fi as i64))
+        return first_failure
+    build_graph_rt_eprint(f"test target '{target.name}': {test_files.len() as i32} files ok ({cached_count} cached, {run_files.len() as i32} ran)")
     0

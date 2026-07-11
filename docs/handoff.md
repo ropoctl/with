@@ -370,6 +370,52 @@ walk), `WITH_DEBUG_BOXSYM` (std-box predicate). Findings, each trace-proven:
   bridge build works; simpler to reason from binary provenance when the
   uncommitted delta is one edit.
 
+## Test cache redesign (maintainer-directed, 2026-07-11 early AM)
+
+Maintainer ruling after the ten-gate strata crawl: "redesign the test
+cache." Reference survey (receipts): Go keys test verdicts on the test
+binary's action ID (toolchain chains in transitively) × a hash of
+runtime-observed inputs (`go/src/cmd/go/internal/test/test.go:1879`);
+Rust compiletest's up-to-date stamp starts with
+`Stamp::from_path(rustc_path)` (`compiletest/src/lib.rs:666`); Zig seeds
+every cache manifest with compiler version+backend
+(`zig/src/Compilation.zig:2115`); Vale has no cache and just runs
+everything. Unanimous principle: compiler identity is the first key input.
+
+What ours did: Test targets (kind 2) had NO scheduler cache at all — every
+gate re-ran the full suite — and the runner ABORTED at the first failing
+parallel batch over alphabetically-ordered files (box_drop → c_import_auto
+→ offsetof → channel IS the alphabet: that fail-fast, not staleness, made
+each gate surface exactly one bug). Separately, the `.test-pass` evidence
+manifest consumed by `:test-green`/`:last-green` recorded the test compiler
+by PATH only (#655's real hazard: stale evidence surviving rebuilds).
+
+The redesign (src/BuildGraphCache.w, src/BuildGraphTests.w,
+build/retention.w):
+
+- **Per-file PASS verdict cache** at `out/.build-state/<target>.test-verdicts`,
+  key = sha256(target config + env WITH_MEMORY_LIMIT_BYTES + compiler
+  CONTENT fingerprint + test file rel path + test file fingerprint).
+  Passes only (Go semantics — failures always re-run). The store is
+  rewritten each run with exactly the proven-set (self-compacting), and a
+  RED run still banks its greens: the next run re-executes only failures
+  and changed files.
+- **Run-all-report-all**: the runner never aborts the sweep; every failing
+  file is listed (`N of M files failed (K cached, R ran)`), and the
+  always-printed summary line makes cache behavior visible in gate logs.
+- **Evidence manifest v2**: `.test-pass` now records `compiler-sha256:` and
+  per-file content hashes; `build/retention.w`'s expected-marker builder
+  mirrors it byte-for-byte via its external sha256-tool flow (plain content
+  hashes on both sides so they stay reproducible).
+
+Verified by a six-step sandbox matrix (scratchpad/tcache): fresh red run
+banks greens; cached rerun executes only the failure; fix → only it runs;
+all-cached; file edit invalidates exactly that file; compiler swap
+invalidates everything. Path is part of the key (content-identical files
+may still differ via sibling-relative behavior, e.g. c_import headers).
+In-process (worker-mode) test targets remain uncached — external-compiler
+targets are the gate-relevant surface.
+
 Also applied: `test/behavior/behav_box_drop.w` line 1 `var` → `global var`
 (§9.1c; pre-verified spelling in `scratchpad/bdgv.w`).
 

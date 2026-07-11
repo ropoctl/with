@@ -289,8 +289,19 @@ fn build_cache_hash_build_graph_sources(root: str) -> str:
     combined = combined ++ "std.build:" ++ build_cache_fingerprint_file(root ++ "/lib/std/build.w") ++ "\n"
     build_cache_sha256_text(combined)
 
+// Plain content hash (no mode/exec framing) so external evidence checkers
+// (build/retention.w's sha256-tool flow) can reproduce manifest entries.
+pub fn build_cache_sha256_file_content(path: str) -> str:
+    build_cache_sha256_text(build_graph_rt_read_file(path))
+
 fn build_cache_test_success_manifest(root: str, target: &BuildGraphTarget, test_files: &Vec[str], test_compiler: str) -> str:
-    var text = "v1\n"
+    // v2: the test compiler and every test file are keyed by CONTENT hash.
+    // v1 recorded the compiler by PATH only, so :test-green evidence
+    // survived compiler rebuilds — the reference toolchains all key test
+    // verdicts on compiler identity first (Go: test-binary action ID;
+    // Rust compiletest: Stamp::from_path(rustc); Zig: cache.hash seeded
+    // with compiler version/backend).
+    var text = "v2\n"
     text = text ++ "target:" ++ target.name ++ "\n"
     text = text ++ f"kind:{target.kind}\n"
     text = text ++ "entry:" ++ target.entry ++ "\n"
@@ -308,15 +319,17 @@ fn build_cache_test_success_manifest(root: str, target: &BuildGraphTarget, test_
     let compiler_rel = build_cache_project_relative(root, test_compiler)
     if compiler_rel.len() > 0:
         text = text ++ "compiler:" ++ compiler_rel ++ "\n"
+        text = text ++ "compiler-sha256:" ++ build_cache_sha256_file_content(test_compiler) ++ "\n"
     else:
         text = text ++ "compiler:\n"
+        text = text ++ "compiler-sha256:\n"
     let rel_files: Vec[str] = Vec.new()
     for i in 0..test_files.len() as i32:
         rel_files.push(build_cache_project_relative(root, test_files.get(i as i64)))
     let sorted = build_cache_sorted_strings(rel_files)
     for i in 0..sorted.len() as i32:
         let path = sorted.get(i as i64)
-        text = text ++ "file:" ++ path ++ "\n"
+        text = text ++ "file:" ++ path ++ ":" ++ build_cache_sha256_file_content(build_cache_dep_path(root, path)) ++ "\n"
     text
 
 pub fn build_cache_record_test_success(root: str, target: &BuildGraphTarget, test_files: &Vec[str], test_compiler: str) -> Unit:
@@ -325,6 +338,79 @@ pub fn build_cache_record_test_success(root: str, target: &BuildGraphTarget, tes
     let marker_path = build_cache_test_success_path(root, target.name)
     let marker = build_cache_test_success_manifest(root, target, test_files, test_compiler)
     let _write = build_graph_rt_write_file(marker_path, marker)
+
+// ── Per-file test verdict cache ─────────────────────────────────────
+//
+// A test file's PASS verdict is cached under a key that changes when any
+// of these change: the test compiler binary (content fingerprint — the
+// unanimous reference-toolchain design), the test file itself, the
+// target's configuration (args/defines/includes/libs/opt), or the
+// harness-relevant environment. Only PASSES are cached (Go semantics);
+// failures always re-run. The verdict store is rewritten after every
+// target run with exactly the currently-passing key set, so stale keys
+// compact away and a red target still banks the green files it proved —
+// the next run re-executes only failures and changed files.
+
+pub fn build_cache_test_verdicts_path(root: str, target_name: str) -> str:
+    build_cache_state_dir(root) ++ "/" ++ target_name ++ ".test-verdicts"
+
+fn build_cache_test_target_sig_text(target: &BuildGraphTarget) -> str:
+    var sig = f"opt:{target.optimize_mode}\n"
+    for i in 0..target.args.len() as i32:
+        sig = sig ++ "arg:" ++ target.args.get(i as i64) ++ "\n"
+    for i in 0..target.defines.len() as i32:
+        sig = sig ++ "define:" ++ target.defines.get(i as i64) ++ "\n"
+    for i in 0..target.include_paths.len() as i32:
+        sig = sig ++ "include:" ++ target.include_paths.get(i as i64) ++ "\n"
+    for i in 0..target.system_libs.len() as i32:
+        sig = sig ++ "lib:" ++ target.system_libs.get(i as i64) ++ "\n"
+    sig = sig ++ "env:WITH_MEMORY_LIMIT_BYTES=" ++ build_graph_rt_getenv("WITH_MEMORY_LIMIT_BYTES") ++ "\n"
+    sig
+
+pub fn build_cache_test_compiler_fingerprint(compiler_path: str) -> str:
+    build_cache_fingerprint_file(compiler_path)
+
+pub fn build_cache_test_verdict_key(root: str, target: &BuildGraphTarget, compiler_fp: str, test_path: str) -> str:
+    // The relative path is part of the key: content-identical files are
+    // *almost* behavior-identical, but tests resolve siblings (c_import
+    // headers) relative to their own location.
+    build_cache_sha256_text("test-verdict\n" ++ build_cache_test_target_sig_text(target) ++ "compiler:" ++ compiler_fp ++ "\npath:" ++ build_cache_project_relative(root, test_path) ++ "\nfile:" ++ build_cache_fingerprint_file(test_path) ++ "\n")
+
+pub fn build_cache_load_test_verdicts(root: str, target_name: str) -> HashMap[str, i32]:
+    let out: HashMap[str, i32] = HashMap.new()
+    let path = build_cache_test_verdicts_path(root, target_name)
+    if build_graph_rt_file_exists(path) == 0:
+        return out
+    let text = build_graph_rt_read_file(path)
+    var line_start = 0
+    var i = 0
+    while i <= text.len() as i32:
+        if i == text.len() as i32 or text.byte_at(i as i64) == 10:
+            let line = text.slice(line_start as i64, i as i64)
+            if line.starts_with("pass:"):
+                let rest = line.slice(5, line.len())
+                var colon = -1
+                for ci in 0..rest.len() as i32:
+                    if rest.byte_at(ci as i64) == 58:
+                        colon = ci
+                        break
+                let key = if colon >= 0: rest.slice(0, colon as i64) else: rest
+                if key.len() > 0:
+                    out.insert(key, 1)
+            line_start = i + 1
+        i = i + 1
+    out
+
+pub fn build_cache_write_test_verdicts(root: str, target_name: str, keys: &Vec[str], rel_paths: &Vec[str]) -> Unit:
+    let state_dir = build_cache_state_dir(root)
+    let _mkdir = build_graph_rt_mkdir_p(state_dir)
+    var text = "v1\n"
+    for i in 0..keys.len() as i32:
+        text = text ++ "pass:" ++ keys.get(i as i64) ++ ":" ++ rel_paths.get(i as i64) ++ "\n"
+    let _write = build_graph_rt_write_file(build_cache_test_verdicts_path(root, target_name), text)
+
+pub fn build_cache_project_relative_path(root: str, path: str) -> str:
+    build_cache_project_relative(root, path)
 
 fn build_cache_compute_signature(target: &BuildGraphTarget, root: str) -> str:
     var sig = f"{target.kind}:{target.name}:{target.entry}:{target.output}"
