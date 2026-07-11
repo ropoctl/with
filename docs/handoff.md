@@ -240,7 +240,35 @@ staleness is also a plausible cause of finding B's method-registry delta.
 Lesson: after editing `lib/std/*` in a targeted-build workflow, regenerate
 `:compat-runtime-source` before rebuilding.
 
-## NEXT LOOP (fresh, undiagnosed): behav_box_drop
+## NEXT LOOP (one layer left): behav_box_drop codegen place emission
+
+Four of five layers are fixed and pinned (raw-ref escape effect; Box.new
+move-assign idiom; transparent-box field lowering incl. typed deref place;
+test-file `global var` spelling — see the resolved section below and commit
+f50684ec). The remaining layer, with repro `scratchpad/bdgv.w` (the full
+test with `global var`):
+
+- `test_box_drops_payload_at_scope_exit` fails LLVM function verification
+  after MIR cleanup. The dumped IR shows the deref place is now correct
+  (`load ptr, ptr %0` twice in bb2) but the FIELD value never materializes:
+  `guard.id == "G"` emits `icmp eq i32 undef, %str ...` — the projected
+  field read through [box-local, PK_DEREF(payload_ty), PK_FIELD(id)]
+  produced no load of the payload's str field, and the string-eq lowering
+  fell back to a type-mismatched icmp on undef.
+- Suspect: codegen's place-emission projection chain (mir_place_ptr /
+  place-emit region in CodegenDispatch) — with the base LOCAL's LLVM
+  storage being the box's raw pointer value, PK_DEREF emits the ptr load,
+  but the subsequent PK_FIELD must GEP into the PAYLOAD struct type derived
+  from the projection's sema type; it instead re-loads the pointer and
+  abandons the value. Also worth checking why the EQ lowering degrades to
+  icmp-on-undef instead of failing loudly when its operand collapses —
+  that silent undef is the same disease class as #653.
+- Note: sema's transparent-box model records ZERO autoderef steps for box
+  field access (WITH_DEBUG_DEREF trace proves it), so every consumer must
+  implement the transparency; grep for other autoderef walks that may need
+  the same box branch as lower_field_base_place_for_field.
+
+## PREVIOUS LOOP NOTES: behav_box_drop diagnosis trail
 
 Gate 5 (build PASS, **fixpoint PASS — 5th consecutive**, box_as_* strata
 green) surfaced `behav_box_drop`: under the current compiler it dies at the

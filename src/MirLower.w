@@ -4346,8 +4346,12 @@ impl MirBuilder:
             // produces a call with no specialization contract (behav_box_drop
             // hit the generic-contract validator through exactly this walk).
             if tk == TypeKind.TY_GENERIC_INST and self.sema.type_symbol_is_std_box(self.sema.get_type_d0(current)) != 0 and self.sema.get_generic_inst_arg_count(current as i32) == 1:
-                place = self.new_deref_place(place)
-                current_ty = self.sema.get_generic_inst_arg(current as i32, 0)
+                // The box's sema type is not a pointer, so the untyped deref
+                // helper cannot derive the pointee; record the payload type
+                // explicitly or downstream field typing collapses to undef.
+                let box_payload_ty = self.sema.get_generic_inst_arg(current as i32, 0)
+                place = self.body.new_deref_place(place, box_payload_ty)
+                current_ty = box_payload_ty
                 depth = depth + 1
                 continue
             let deref_info = self.sema.resolve_user_deref_info_frozen(current as i32)
