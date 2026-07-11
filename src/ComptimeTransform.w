@@ -2708,7 +2708,6 @@ impl Sema:
         let ctor_fn_sym = intern.intern(type_name ++ ".builder")
         let ctor_fn = out.add_node(NodeKind.NK_FN_DECL, start, end, ctor_fn_sym, ctor_body as i32, 0)
         out.add_fn_meta(ctor_fn, 0, builder_ret_type, out.extra_len(), 0, 0, 0)
-        generated.push(ctor_fn as i32)
 
         let builder_impl_extra = out.extra_len()
         out.add_extra(0)
@@ -2720,6 +2719,7 @@ impl Sema:
             let impl_target = ct_build_generic_self_type(out, decl, builder_sym, impl_tp_start, tp_count)
             out.add_impl_target_type_node(builder_impl, impl_target as NodeId)
         generated.push(builder_impl as i32)
+        generated.push(ctor_fn as i32)
 
         let source_impl_extra = out.extra_len()
         out.add_extra(0)
