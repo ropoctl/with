@@ -10225,7 +10225,13 @@ impl Sema:
             if declared < 0 or declared >= declared_count:
                 continue
             let type_node = self.ast.get_extra(td_extra + 1 + declared * 3 + 1)
-            self.bind_type_params_from_type_expr(type_node, val_types.get(li as i64), tp_start, tp_count, node)
+            let value = self.ast.get_extra(extra_start + li * 2 + 1)
+            let value_ty = val_types.get(li as i64)
+            // A bare Vec.new()/HashMap.new()/HashSet.new() needs context; it
+            // cannot constrain the struct type until concrete sibling fields
+            // have supplied that context. Settle it after the instance exists.
+            if self.pending_generic_constructor_base(value, value_ty) == 0:
+                self.bind_type_params_from_type_expr(type_node, value_ty, tp_start, tp_count, node)
 
         let args: Vec[i32] = Vec.new()
         var complete = true
@@ -10243,7 +10249,30 @@ impl Sema:
         self.generic_subst_type_ids = saved_types
         if not complete:
             return 0
-        self.ensure_generic_inst_type(name, args, tp_count) as i32
+        let inferred = self.ensure_generic_inst_type(name, args, tp_count) as i32
+        for li in 0..field_count:
+            var declared = if positional: li else: -1
+            let literal_name = self.ast.get_extra(extra_start + li * 2)
+            if not positional:
+                for fi in 0..declared_count:
+                    if self.ast.get_extra(td_extra + 1 + fi * 3) == literal_name:
+                        declared = fi
+                        break
+            if declared < 0 or declared >= declared_count:
+                continue
+            let value = self.ast.get_extra(extra_start + li * 2 + 1)
+            let value_ty = val_types.get(li as i64)
+            if self.pending_generic_constructor_base(value, value_ty) == 0:
+                continue
+            let expected = if positional:
+                let info = self.struct_field_info_by_index(inferred, declared)
+                (info / 4294967296) as i32
+            else:
+                self.struct_field_type(inferred, literal_name)
+            if self.settle_pending_generic_value_from_expected(value, value_ty, expected) == 0:
+                let declared_name = self.ast.get_extra(td_extra + 1 + declared * 3)
+                self.emit_error("field type mismatch for '" ++ self.pool_resolve(declared_name) ++ "': expected '" ++ self.type_name(expected) ++ "', found '" ++ self.type_name(value_ty) ++ "'", value)
+        inferred
 
     mut fn check_struct_literal(node: i32) -> i32:
         var name = self.ast.get_data0(node)
@@ -15441,6 +15470,25 @@ impl Sema:
         if self.get_generic_inst_base(resolved as i32) != base_sym:
             return 0
         resolved as i32
+
+    fn settle_pending_generic_value_from_expected(value: i32, val_type: i32, expected: i32) -> i32:
+        let base_sym = self.pending_generic_constructor_base(value, val_type)
+        let concrete = self.pending_generic_expected_type_for_base(expected, base_sym)
+        if concrete == 0:
+            return 0
+        let kind = self.ast.kind(value)
+        if kind == NodeKind.NK_GROUPED:
+            let settled = self.settle_pending_generic_value_from_expected(self.ast.get_data0(value), val_type, expected)
+            if settled != 0:
+                self.typed_expr_types.insert(value, settled)
+            return settled
+        if kind == NodeKind.NK_IDENT:
+            return self.settle_pending_generic_binding(self.ast.get_data0(value), concrete, value)
+        let call_node = self.pending_generic_constructor_call_node(value)
+        if call_node != 0:
+            self.typed_expr_types.insert(call_node, concrete)
+        self.typed_expr_types.insert(value, concrete)
+        concrete
 
     fn settle_pending_generic_binding(sym: i32, concrete_type: i32, expr_node: i32) -> i32:
         if concrete_type == 0:
