@@ -11,7 +11,11 @@ pub type Box[T] { ptr: *mut T }
 
 pub fn Box.new[T](value: T) -> Box[T]:
     let ptr = with_alloc(sizeof[T]() as i64) as *mut T
-    with_memcpy(ptr as *i8, (&raw const value as *const T) as *i8, sizeof[T]() as i64)
+    // Move-assign through the pointer: consumes `value` without running its
+    // drop (the heap slot now owns it). The old memcpy of `&raw const value`
+    // left `value` owned on this side, so the payload was dropped while the
+    // heap kept the same bytes — behav_box_drop's double-drop.
+    unsafe { *ptr = value }
     ptr as Box[T]
 
 impl[T] Box[T]:

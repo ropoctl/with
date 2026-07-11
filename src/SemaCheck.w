@@ -14,6 +14,7 @@ use render
 
 extern fn with_write(s: str) -> Unit
 extern fn with_eprint(s: str) -> Unit
+extern fn with_getenv_str(name: str) -> str
 extern fn with_str_eq(a: str, b: str) -> i32
 extern fn str_from_byte(b: i32) -> str
 extern fn with_regex_compile(pattern: str, options: i32, err_code: *mut i32, err_offset: *mut i32) -> *const i8
@@ -7606,6 +7607,20 @@ impl Sema:
                 let raw_mut = if op == UnaryOp.UOP_RAW_REF_MUT: 1 else: 0
                 if raw_mut != 0:
                     self.record_global_place_write(operand_node, node)
+                // §13/§3.8 — a raw pointer to a by-value non-Copy parameter can
+                // smuggle the value out invisibly (memcpy into storage is how
+                // Box.new stores its payload). The effect system cannot see
+                // through raw ops, so the parameter must conservatively be
+                // ESCAPE_VALUE: the caller transfers ownership and must not
+                // drop (behav_box_drop pins the double-drop this prevents).
+                let raw_root = self.place_root_sym(operand_node)
+                if raw_root != 0 and self.current_fn_sig_idx >= 0:
+                    let raw_pi = self.param_index_for_sym(raw_root)
+                    if raw_pi >= 0:
+                        let raw_p_tid = self.sig_param_type(self.current_fn_sig_idx, raw_pi)
+                        let raw_p_kind = self.get_type_kind(self.resolve_alias(raw_p_tid as TypeId))
+                        if raw_p_kind != TypeKind.TY_REF and raw_p_kind != TypeKind.TY_PTR and self.is_copy(raw_p_tid as TypeId) == 0:
+                            self.note_param_effect(raw_root, EFF_ESCAPE_VALUE)
                 return self.add_type(TypeKind.TY_PTR, operand as i32, raw_mut, 0) as i32
             self.check_borrow_create(operand_node, BorrowKind.SHARED, node)
             return self.add_type(TypeKind.TY_REF, operand as i32, 0, 0) as i32
@@ -9334,6 +9349,8 @@ impl Sema:
         0
 
     fn autoderef_record_steps(expr: i32, step_fns: &Vec[i32], step_tys: &Vec[i32]):
+        if with_getenv_str("WITH_DEBUG_DEREF").len() > 0:
+            with_eprint(f"[deref-record] expr={expr} steps={step_fns.len() as i32}")
         if expr == 0:
             return
         if step_fns.len() as i32 == 0:

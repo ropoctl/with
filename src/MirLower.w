@@ -4315,6 +4315,14 @@ impl MirBuilder:
         self.materialize_operand(deref_op, result_ref_ty, self.ast.get_start(node))
 
     mut fn lower_field_base_place_for_field(base_expr: i32, field: i32) -> i32:
+        // The checker records the autoderef steps (with the deref fns it
+        // resolved) per base expression; use them like lower_field_base_place
+        // does. Re-walking with the frozen type-keyed resolver only recovers
+        // the GENERIC Deref symbol, whose call then lacks a specialization
+        // contract (behav_box_drop: field access through Box[T] hit the
+        // generic-contract validator).
+        if self.sema.autoderef_step_counts.contains(base_expr):
+            return self.lower_recorded_autoderef_place(base_expr)
         var place = self.lower_expr_place(base_expr)
         var current_ty = self.expr_type(base_expr)
         let place_ty = self.place_local_type(place)
@@ -4329,6 +4337,17 @@ impl MirBuilder:
             if tk == TypeKind.TY_PTR or tk == TypeKind.TY_REF:
                 place = self.new_deref_place(place)
                 current_ty = self.sema.get_type_d0(current)
+                depth = depth + 1
+                continue
+            // Transparent std Box: sema types payload fields directly (its
+            // special case records no autoderef steps), so mirror it here —
+            // the box place IS the payload pointer and payload access is a
+            // deref projection. Emitting Box's generic Deref.deref instead
+            // produces a call with no specialization contract (behav_box_drop
+            // hit the generic-contract validator through exactly this walk).
+            if tk == TypeKind.TY_GENERIC_INST and self.sema.type_symbol_is_std_box(self.sema.get_type_d0(current)) != 0 and self.sema.get_generic_inst_arg_count(current as i32) == 1:
+                place = self.new_deref_place(place)
+                current_ty = self.sema.get_generic_inst_arg(current as i32, 0)
                 depth = depth + 1
                 continue
             let deref_info = self.sema.resolve_user_deref_info_frozen(current as i32)
