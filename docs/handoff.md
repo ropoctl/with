@@ -240,7 +240,20 @@ staleness is also a plausible cause of finding B's method-registry delta.
 Lesson: after editing `lib/std/*` in a targeted-build workflow, regenerate
 `:compat-runtime-source` before rebuilding.
 
-## NEXT LOOP (diagnosed, unfixed): Box transparent-receiver autoref regression
+## NEXT LOOP (fresh, undiagnosed): behav_box_drop
+
+Gate 5 (build PASS, **fixpoint PASS — 5th consecutive**, box_as_* strata
+green) surfaced `behav_box_drop`: under the current compiler it dies at the
+generic-contract validator (`body=13 call=2 sig=-1 mono=0`, body sym maps
+near BoxDropGuard.drop); under the PRE-autoref compiler (`/tmp/with-gap2`
+≈ f68403f5) it fails differently — two "error: undefined variable"
+(suspect: the module-level `var BOX_DROP_TRACE` global accessed from fns
+and a Drop impl). Two failure layers to reconcile; NOT caused by the
+autoref fix (pre-existing at f68403f5, cache-masked). Candidates in the
+test: module-level `var` global handling, `drop(guard)` builtin lowering,
+`Box.new(non-Copy payload)` drop glue, `into_inner` move-receiver chain.
+
+## RESOLVED THIS SESSION: Box transparent-receiver autoref regression
 
 Gate 4 (build PASS, **fixpoint PASS — 4th consecutive**, async test now
 green) surfaced the next cache stratum: `behav_box_as_ptr/as_ref/
@@ -265,8 +278,16 @@ as_ref_struct` SIGSEGV (139). Diagnosis complete, fix not started:
   "already a pointer" shape must not be mistaken for "already a
   reference"; the decision must key on SEMA types (recv 324 = Box inst vs
   param 326 = &Box) and take the receiver PLACE address.
-- After the fix: /drop-audit is mandatory (receiver-lowering change), then
-  the three box tests, then gates.
+- **FIXED + VERIFIED (night 2026-07-10):** `MirLower.lower_generic_receiver_arg`
+  wraps the generic-method receiver per the instantiated signature — autoref
+  via `operand_for_place_arg` ONLY when param0 is a ref the bare-owner
+  receiver lacks (`can_auto_ref_arg_frozen` gate); every other shape keeps
+  the raw autoderef path, move receivers untouched. Evidence: the three box
+  pins print 42/42/7; `/drop-audit` 25/25 cells, 0 regressions (its fixture
+  needed a one-token D7 migration: `S.plain(self: S)` → `(self: &S)` — bare
+  by-value self is now rejected, which had turned every audit cell into an
+  identical check-fail); all seven prior session pins re-verified under the
+  same binary; `audit:all` 2,145,022 facts 0 violations; fixpoint held.
 
 ## Remaining Work (in order)
 

@@ -8125,6 +8125,27 @@ impl MirBuilder:
             depth = depth + 1
         -1
 
+    // Generic-method receivers must honor the instantiated signature's
+    // receiver contract: a `&Self` param takes the receiver place's ADDRESS
+    // (autoref), not the place value. Pushing the walked place raw
+    // reintroduced the #627 transparent-box class for migrated impl-block
+    // methods — a std Box value and &Box both lower to `ptr`, so codegen
+    // cannot recover the lost indirection later (behav_box_as_ref pins this).
+    // Only the sig-demands-ref/receiver-is-bare-owner case diverts; every
+    // other shape keeps the plain autoderef result.
+    mut fn lower_generic_receiver_arg(recv_node: i32, method_sym: i32, sig_idx: i32) -> i32:
+        let raw_op = self.lower_receiver_with_method_autoderef_for_method(recv_node, method_sym)
+        if sig_idx < 0 or self.sema.sig_get_param_count(sig_idx) <= 0:
+            return raw_op
+        let expected = self.sema.sig_param_type(sig_idx, 0)
+        let actual = self.expr_type(recv_node)
+        if expected == 0 or actual == 0 or self.sema.can_auto_ref_arg_frozen(expected, actual) == 0:
+            return raw_op
+        if self.body.operand_kinds.get(raw_op as i64) != OperandKind.OK_COPY:
+            return raw_op
+        let place = self.body.operand_d0.get(raw_op as i64)
+        self.operand_for_place_arg(place, actual, expected, self.ast.get_start(recv_node))
+
     mut fn lower_receiver_with_method_autoderef_for_method(recv_node: i32, method_sym: i32) -> i32:
         if method_sym == 0:
             return self.lower_receiver_with_method_autoderef(recv_node)
@@ -8824,7 +8845,7 @@ impl MirBuilder:
                             let gc_recv_place = self.lower_expr_place(self_expr)
                             self.body.new_operand(OperandKind.OK_MOVE, gc_recv_place)
                         else:
-                            self.lower_receiver_with_method_autoderef_for_method(self_expr, method_sym)
+                            self.lower_generic_receiver_arg(self_expr, method_sym, gc_sig_idx)
                     if self.callee_has_move_self(callee_sym):
                         self.consume_moved_operand(gc_recv_op)
                     gc_args.push(gc_recv_op)
