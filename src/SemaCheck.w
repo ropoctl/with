@@ -9311,7 +9311,24 @@ impl Sema:
     mut fn field_access_type_direct(field_base: TypeId, field: i32) -> i32:
         let ftk = self.get_type_kind(field_base)
         if ftk == TypeKind.TY_STRUCT or ftk == TypeKind.TY_GENERIC_INST:
-            return self.struct_field_type(field_base as i32, field)
+            let direct_ty = self.struct_field_type(field_base as i32, field)
+            if direct_ty != 0:
+                return direct_ty
+            // Transparent std Box: payload fields are visible on the box
+            // itself — sema types them directly and the autoderef walk stops
+            // AT the box with ZERO recorded steps (MirLower's manual walk
+            // emits the typed deref projection). Without this the walk steps
+            // through the GENERIC Deref impl and records a user-deref step
+            // that lowers as a call with no specialization contract
+            // (behav_box_drop's validator abort — exposed only by correctly
+            // self-hosted builds; the dirty bridge compiler accidentally
+            // produced the intended stop-at-box). The frozen twin
+            // deliberately lacks this case: it serves MirLower's walk, which
+            // must keep walking INTO the box to emit the deref itself.
+            if self.type_is_std_box_inst(field_base as i32) != 0:
+                let box_payload = self.get_generic_inst_arg(self.resolve_alias(field_base) as i32, 0)
+                return self.field_access_type_direct(box_payload as TypeId, field)
+            return 0
         if ftk == TypeKind.TY_TUPLE:
             let te_start = self.get_type_d0(field_base)
             let elem_count = self.get_type_d1(field_base)
@@ -9420,6 +9437,8 @@ impl Sema:
 
     mut fn auto_deref_field_type(tid: TypeId, field: i32, node: i32, expr: i32) -> TypeId:
         var current = self.resolve_alias(tid)
+        if with_getenv_str("WITH_DEBUG_DEREF").len() > 0:
+            with_eprint(f"[deref-walk] expr={expr} tid={tid as i32} current={current as i32} tk={self.get_type_kind(current)} field={field} has0={self.autoderef_type_has_field(current, field)}")
         let seen: Vec[i32] = Vec.new()
         let step_fns: Vec[i32] = Vec.new()
         let step_tys: Vec[i32] = Vec.new()
@@ -9627,7 +9646,11 @@ impl Sema:
             return field_ty
 
         if ftk == TypeKind.TY_GENERIC_INST:
-            let field_ty2 = self.struct_field_type(field_base as i32, field)
+            // field_access_type_direct, not struct_field_type: the resolver
+            // carries the transparent-box payload fallback (the walk above
+            // stops AT the box with zero recorded steps, so field_base can
+            // legitimately be Box[T] here).
+            let field_ty2 = self.field_access_type_direct(field_base, field)
             if field_ty2 == 0:
                 self.emit_error("unknown field '" ++ self.pool_resolve(field) ++ "' for type '" ++ self.type_name(field_base as i32) ++ "'", node)
             return field_ty2

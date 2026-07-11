@@ -267,7 +267,80 @@ under `--debug-alloc`.
    binops/unops lower non-Copy operands as copies). The moved-from box local
    stayed live, so its guarded scope-exit drop re-dropped the payload (trace
    pollution + latent double-free with the body's own `with_free`). Fix:
-   one-line `consume_moved_operand(op)` in `MirLower.lower_cast`.
+   `consume_moved_operand(op)` in `MirLower.lower_cast` — **gated to
+   transparent std Box sources only** (see the flip below).
+
+   **SELF-HOST FLIP caught by gate chain six** (a61a0410's unconditional
+   consume): build PASSED, fixpoint PASSED (6th consecutive), but gate 3's
+   `behav_box_drop` died at the generic-contract validator (`body=13 call=2
+   sig=-1 mono=0`) — under the STAGE-CHAIN binaries only. Bridge-built
+   compiler from identical sources: `check` ok. Diagnosis without
+   instrumentation: whole-compiler `--dump-mir` (28 MB) has exactly 18
+   `cast(move _K)` sites; a With scanner (`scratchpad/scan_cast_moves.w`)
+   showed nearly all are the comptime evaluator's **address-taking
+   `self as *mut Sema` casts of the share-place receiver** with heavy later
+   use of `_1` (self). Their OK_MOVE operand kind is classification noise
+   (non-Copy by-value operand defaults to move); the unconditional consume
+   put `_1 = const zst(Sema)` into stage2's own machine code — zeroing the
+   caller's Sema THROUGH THE ALIAS mid-function, so the self-hosted compiler
+   silently lost resolved-call-contract lookups. Fixpoint cannot catch this
+   class (determinism ≠ correctness). Fix: consume only when
+   `sema.type_is_std_box_inst(src)` — the box value-reinterpret is the one
+   real consuming cast; compiler sources never instantiate std Box, so the
+   self-host surface is closed.
+
+   **Open follow-up (principled fix):** `place as *mut T` has two semantics
+   sharing one syntax — value reinterpret (transparent Box: operand IS the
+   pointer) vs address-taking (`self as *mut Sema`: wants the place address,
+   must not consume). The operand-kind decision should distinguish them
+   (address-casts want a place-based lowering, not a value move operand);
+   the 18-site scan list is the evidence base.
+
+   **CORRECTION (later that night):** the gated consume was right to do (the
+   Sema-zeroing hazard was real), but it was NOT the cause of the gate-six
+   contract BUG — gate seven failed identically with the gate in place. The
+   real cause is the bridge-lineage deviance below.
+
+## ROOT CAUSE (gate six/seven): bridge-lineage deviance + missing sema box case
+
+Method: two-generation instrumented builds (gen-1 = bridge-built from current
+sources, gen-2 = gen-1-built from the same sources) with env-gated decision
+traces, diffed. `WITH_DEBUG_BOXWALK` (MirLower field-base walk),
+`[deref-walk]`/`[deref-record]` under `WITH_DEBUG_DEREF` (sema autoderef
+walk), `WITH_DEBUG_BOXSYM` (std-box predicate). Findings, each trace-proven:
+
+- `stage1 check behav_box_drop` ok; `stage2 check` aborts (validator,
+  `sig=-1 mono=0`) — divergence enters at generation 2. Sema resolution
+  facts identical; the diverging artifact is sema's RECORDED autoderef
+  steps: gen-1 records `steps=0` for `guard` (expr 31, `Box[BoxDropGuard]`),
+  gen-2 records `steps=2` — a step through the GENERIC `Deref.deref` plus a
+  ref peel. MirLower's recorded path lowers the generic deref as a call
+  with no specialization contract → the abort.
+- Iteration-0 walk state is IDENTICAL across generations (`has0=0` both),
+  and per source `autoderef_type_has_field(Box[G], id)` = 0 — **gen-2 is
+  per-source-correct; gen-1 (and the whole bridge lineage, i.e. every
+  binary in daily use) deviates**, accidentally producing the INTENDED
+  stop-at-box behavior. Same verdict for `autoderef_type_has_method(&T)`
+  (source says refs have no methods → one builtin step; gen-2 records it,
+  gen-1 doesn't). The dirty-tree bridge miscompiles current sema sources in
+  the autoderef has-field/has-method region; fixpoint can't see it
+  (determinism ≠ correctness), and the 36-entry bridge-vs-stage1 ABI flip
+  catalog is mostly this deviance, not real rule changes.
+- **The real source bug**: the transparent-box contract ("sema types
+  payload fields directly and records ZERO autoderef steps") was never
+  encoded in the mutable sema walk/typing path — only the deviant bridge
+  made it appear so. Fix (uncommitted, verifying):
+  `field_access_type_direct` gains the box→payload fallback (one
+  authority; `autoderef_type_has_field` inherits it, so the walk stops AT
+  the box with zero steps), and the field-access checker's GENERIC_INST
+  typing branch calls `field_access_type_direct` instead of raw
+  `struct_field_type`. The FROZEN twin deliberately keeps NO box case —
+  it serves MirLower's manual walk, which must walk INTO the box to emit
+  the typed deref projection (the verified f50684ec/a61a0410 pipeline).
+- Consequence for the campaign: the reseed at the end of the gates is not
+  just ceremony — it retires the deviant bridge lineage. Until then, every
+  bridge-built binary embeds sema semantics that differ from source in
+  this region.
 
 Also applied: `test/behavior/behav_box_drop.w` line 1 `var` → `global var`
 (§9.1c; pre-verified spelling in `scratchpad/bdgv.w`).

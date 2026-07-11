@@ -4279,12 +4279,19 @@ impl MirBuilder:
 
     mut fn lower_cast(expr: i32, target_type_id: i32, node: i32) -> i32:
         let op = self.lower_expr(expr)
-        // A cast can consume its operand (`self as *mut T` in a move-receiver
-        // body). Without the reset-on-move bookkeeping the moved-from local
-        // stays live and its guarded scope-exit drop re-drops the value —
-        // Box.into_inner double-dropped its payload through exactly this hole.
-        self.consume_moved_operand(op)
         let src_sema_ty = self.expr_type(expr)
+        // A cast consumes its operand only for the transparent std Box value
+        // reinterpret (`self as *mut T` in into_inner/drop): the box VALUE is
+        // the payload pointer, the move is real, and without reset-on-move
+        // the guarded scope-exit drop re-drops the payload (into_inner's
+        // double-free). Every other non-Copy cast in the tree is an
+        // address-taking cast of a share-place receiver (the comptime
+        // evaluator's `self as *mut Sema` family) whose OK_MOVE operand is
+        // classification noise: consuming those zeroes the caller's struct
+        // through the alias — the stage2 self-host build lost its own
+        // resolved-call contracts exactly that way (gates6 flip).
+        if self.sema.type_is_std_box_inst(src_sema_ty) != 0:
+            self.consume_moved_operand(op)
         let rv = self.body.new_rvalue(RvalueKind.RK_CAST, op, target_type_id, src_sema_ty)
         let temp = self.new_temp(target_type_id)
         let place = self.place_for_local(temp)
@@ -4336,6 +4343,9 @@ impl MirBuilder:
         var depth = 0
         while current_ty > 0 and depth < 32:
             let current = self.sema.resolve_alias(current_ty as TypeId)
+            if with_getenv_str("WITH_DEBUG_BOXWALK").len() > 0:
+                let bw_d0 = self.sema.get_type_d0(current)
+                with_eprint(f"[boxwalk] depth={depth} current={current as i32} tk={self.sema.get_type_kind(current)} has_field={self.sema.autoderef_type_has_field_frozen(current, field)} d0={bw_d0} is_box={self.sema.type_symbol_is_std_box(bw_d0)} argc={self.sema.get_generic_inst_arg_count(current as i32)}")
             if self.sema.autoderef_type_has_field_frozen(current, field) != 0:
                 return place
             let tk = self.sema.get_type_kind(current)

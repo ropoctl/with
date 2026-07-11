@@ -1083,6 +1083,10 @@ impl Sema:
         sema_tier_path_is_std_implementation(self.current_module_path)
 
     fn type_symbol_is_std_box(sym: i32) -> i32:
+        if with_getenv_str("WITH_DEBUG_BOXSYM").len() > 0:
+            let bs_path = self.type_decl_source_path(sym)
+            let bs_eq = if sym == self.syms.box: 1 else: 0
+            with_eprint(f"[boxsym] sym={sym} syms.box={self.syms.box} eq={bs_eq} path='{bs_path}' pathlen={bs_path.len() as i32} verdict={sema_path_is_std_box_module(bs_path)}")
         if sym != self.syms.box:
             return 0
         sema_path_is_std_box_module(self.type_decl_source_path(sym))
