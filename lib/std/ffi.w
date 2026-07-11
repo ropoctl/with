@@ -35,7 +35,7 @@ extern fn with_free(ptr: *i8) -> Unit
 /// same gap as `Box.new[T]`); the recovery helpers are `unsafe`, so the
 /// caller's liveness assertion is the backstop.
 pub fn box_ctx[T](value: T) -> *mut c_void:
-    Box.new(value) as *mut c_void
+    Box.new(move value) as *mut c_void
 
 /// Borrow the boxed context immutably. The caller recovers the type by casting
 /// (`ctx_ref(cb.ctx as *mut State)`) and asserts the pointer is a live `T`.

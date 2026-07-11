@@ -4,7 +4,7 @@
 
 use std.ffi
 
-var FFI_TRACE = ""
+global var FFI_TRACE = ""
 
 type Payload { tag: str }
 
