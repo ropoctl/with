@@ -1407,10 +1407,12 @@ impl Sema:
             self.in_param_type_position = self.in_param_type_position + 1
             let p_tid = self.resolve_type_expr(p_type_node)
             self.in_param_type_position = self.in_param_type_position - 1
-            if self.is_opaque_value_type(p_tid) != 0:
+            let p_flags = self.ast.fn_param_flags(param_start, pi)
+            // A D7 mut receiver spells `Self` but uses the share-place ABI: the
+            // caller passes an address, so no opaque value is materialized.
+            if self.is_opaque_value_type(p_tid) != 0 and self.fn_param_uses_value_ref_abi(param_start, pi, method_owner_sym, self_type_id) == 0:
                 self.emit_error("opaque types cannot be passed by value; use a pointer or reference", p_type_node)
             // Check for duplicate implicit parameter types (spec §F6)
-            let p_flags = self.ast.fn_param_flags(param_start, pi)
             if fn_param_is_implicit(p_flags) != 0:
                 for prev in 0..implicit_type_ids.len() as i32:
                     if implicit_type_ids.get(prev as i64) == p_tid as i32:
