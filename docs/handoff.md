@@ -573,6 +573,43 @@ json) all broke the same way — compiled by no gate except their own
 masked tests. A use-everything std-surface probe target would catch the
 whole class at build time.
 
+## GATE TWELVE VERDICT (2026-07-11 ~05:50): 7 of 849 — the definitive list
+
+Build PASS, fixpoint PASS (ninth consecutive), test: **7 of 849 failed
+(849 ran, 842 banked)** under the stage-built compiler with the
+redesigned cache. behav_rc_arc_basic PASSES — the '&<error>' deref layer
+chased pre-gate was ANOTHER bridge-deviance artifact (probe plan in
+scratchpad/deref_self_probe_plan.md retired); the eager-Deref
+specialization work is correct under correct lineage. Verify ONLY against
+stage-built binaries until the reseed.
+
+The seven, with everything known:
+
+1. **method_arg_share_place_matrix (D5-critical, NEXT TARGET — root
+   vicinity pinned):** generic-method share-place ARGS marshal as
+   direct-value. Repro `scratchpad/gwm.w` (16 lines, panic at
+   cell.value.id==51). The full disagreement, from the campaign's own
+   instrumentation: sema sig 171 param[1] = eff=[write] value_ref_abi=1 →
+   SHARE-PLACE (--dump-abi); MIR passes the caller's place operand
+   (`move _3`, correct place identity); but codegen-argument facts show
+   `direct-value ... sig=171 sema-share=false` — codegen's share-place
+   lookup for GENERIC_CALL (intrinsic=103) args reads FALSE from the same
+   signature sema reads TRUE. Two lookups of one sig disagree — a D6
+   violation in codegen's mono-call argument marshalling
+   (push_call_arg / record_codegen_call_argument's sema_share
+   computation, likely a sema-vs-codegen sig-id or param-index mapping on
+   the monomorphize path). One function to dissect; `matrix:name~` shows
+   the row instantly.
+2. extension_coherence — ambiguity report lists the same candidate
+   thrice (dedup in the candidate collection).
+3. ffi_box_roundtrip — §3.8 move spelling (likely test-source migration).
+4. generic_nested_type_param — "cannot infer a single type for 'T': saw
+   'Vec[i64]' and 'Vec'" (bare-vs-instantiated unification).
+5. guard_local_use — "cannot dereference non-pointer value".
+6. iter_pipeline_local — "BUG: frozen generic type base not visible"
+   (SemaCheck.w:739, resolve_generic_type_frozen).
+7. blanket_impl_basic — "wrong argument type in call to 'int_to_string'".
+
 ## Remaining Work (in order)
 
 1. ~~Trait instance/associated syntax ruling~~ — **resolved by the existing
