@@ -342,6 +342,34 @@ walk), `WITH_DEBUG_BOXSYM` (std-box predicate). Findings, each trace-proven:
   bridge-built binary embeds sema semantics that differ from source in
   this region.
 
+## Gate strata nine/ten (2026-07-11, early AM): c_import legacy emitters + channel machinery
+
+- **c_import auto-method wrappers** (gate 8/9): synthesized member wrappers
+  and the flex-array accessor still emitted the pre-D7 top-level
+  explicit-self form → receiver-mode enforcement rejects them. Fixed
+  (4f0b66c8, 1185f6d0): impl-block methods, mode from C pointer constness
+  (`const T*` → `fn`, `T*` → `mut fn`), receiver rebuilt via
+  `self as *const/mut T` (NOT `&raw const self` — that takes the address of
+  the reference cell, `*const &T`). Constructor wrappers stay top-level
+  associated. En route, a real grammar gap: unsafe instance methods had no
+  post-D7 spelling — the impl-body parser now accepts
+  `[pub] unsafe [mut|move] fn` with top-level-identical FN_BODY
+  unsafe-block wrapping. RAII-wrapper emissions (`fn drop(move self: Self)`,
+  `fn handle(self: &Self)`) are D7-legal and untouched.
+- **Channel endpoints** (gate 10, cache-masked since ≤f68403f5):
+  `Sender.send`/`Receiver.recv` resolve outside-registry (like `scope.track`)
+  and MirLower contract-required their GENERIC_CALL → validator abort.
+  The scope-machinery waiver now covers channel-endpoint receivers, keyed
+  on the RECORDED type sidecar only — the first attempt used
+  `expr_type(self_expr)`, whose fallback resolution reaches uninstantiated
+  generic bodies and emitted `unknown type 'T'` at the blanket
+  `impl[T] Drop for Receiver[T]` (a lesson: machinery predicates in
+  lowering must not force type resolution).
+- Worktree-isolation note: a fresh worktree needs `out/gen` (embedded-stdlib
+  data) AND `out/lib` (LLVM static bridge artifacts) copied in before a
+  bridge build works; simpler to reason from binary provenance when the
+  uncommitted delta is one edit.
+
 Also applied: `test/behavior/behav_box_drop.w` line 1 `var` → `global var`
 (§9.1c; pre-verified spelling in `scratchpad/bdgv.w`).
 

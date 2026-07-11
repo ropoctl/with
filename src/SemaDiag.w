@@ -8,6 +8,7 @@ use InternPool
 use render
 
 extern fn with_eprint(s: str) -> Unit
+extern fn with_getenv_str(name: str) -> str
 
 // ── Diagnostics ──────────────────────────────────────────────────
 
@@ -102,6 +103,9 @@ impl Sema:
         "unknown type '" ++ name ++ "'"
 
     mut fn emit_unknown_type_error(sym: i32, node: i32):
+        if with_getenv_str("WITH_DEBUG_SUBST").len() > 0:
+            let ut_named = if self.named_types.contains(sym): 1 else: 0
+            with_eprint(f"[unknown-type] sym={sym} '{self.pool_resolve(sym)}' subst_frame_len={self.generic_subst_param_syms.len() as i32} named_has={ut_named}")
         if sym <= 0:
             self.emit_error("unknown type", node)
             return

@@ -8850,13 +8850,18 @@ impl MirBuilder:
         // Route through MirIntrinsic.GENERIC_CALL so codegen's gen_call handles it
         // (disc enums, from_int, Option methods, concrete/generic struct methods, etc.).
         let recorded_method_sig = self.sema.resolved_call_sigs.get(node)
-        // Scope-handle machinery (`s.track(...)`) is checked by the async-scope
-        // special path and never carries a resolved signature. It still routes
-        // through GENERIC_CALL — codegen dispatches it by name to
-        // with_scope_track — but no specialization contract can exist for it,
-        // so it must not be contract-required (the ownership validator would
-        // reject sig=-1/mono=0).
-        let scope_machinery_method = method_sym == self.sema.syms.track and not recorded_method_sig.is_some()
+        // Scope-handle machinery (`s.track(...)`) and channel-endpoint methods
+        // (`tx.send(..)` / `rx.recv()` on Sender/Receiver) are checked by
+        // special sema paths and never carry a resolved signature
+        // (method-resolution verdict: outside-registry). They still route
+        // through GENERIC_CALL — codegen dispatches them by name — but no
+        // specialization contract can exist for them, so they must not be
+        // contract-required (the ownership validator would reject
+        // sig=-1/mono=0; behav_channel_basic was the cache-masked stratum).
+        // Recorded sidecar only — expr_type's fallback resolution can reach
+        // into uninstantiated generic bodies and emit "unknown type 'T'".
+        let machinery_recv_ty = if self.sema.typed_expr_types.contains(self_expr): self.sema.typed_expr_types.get(self_expr).unwrap() else: 0
+        let scope_machinery_method = not recorded_method_sig.is_some() and (method_sym == self.sema.syms.track or (machinery_recv_ty != 0 and self.type_is_channel_endpoint(machinery_recv_ty) != 0))
         let method_is_unresolved = callee_sym == method_sym and not recorded_method_sig.is_some()
         if method_is_unresolved or self.sym_is_generic_fn(callee_sym):
                 let gc_fn_op = self.const_operand(ConstKind.CK_FN, callee_sym, 0)
