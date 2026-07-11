@@ -684,13 +684,28 @@ point.
 
 ### Rebuild and verify
 
-After each change:
+Match verification to the change's actual blast radius.
+
+For compiler, runtime, stdlib, migrator, build-system, generated-source,
+or other changes that can affect compiler artifacts, run after each logical
+change:
 ```
 with build              # must pass
 with build :fixpoint    # must pass
 ```
 
 If either fails, stop adding changes. Debug the failure.
+
+For documentation-only changes (`docs/**`, `.reference/**`, and repository
+instruction files), do **not** run a compiler build or fixpoint merely because
+text changed. Use targeted verification instead: check the diff and links,
+validate formatting where tooling exists, and run any executable examples that
+were added or changed. Run the full build/fixpoint gates only when the user
+explicitly requests them or when the documentation change also modifies an
+input to the compiler/build artifact pipeline.
+
+For mixed documentation and compiler-affecting changes, use the full
+build/fixpoint gates.
 
 ### Re-read before editing
 
