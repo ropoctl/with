@@ -736,6 +736,15 @@ impl Sema:
                 gi_base_sym = canonical_base
                 gi_base_tid = self.lookup_named_type_visible(gi_base_sym)
         if gi_base_tid == 0:
+            // Frozen resolution serves MIR-era consumers whose active module
+            // context can differ from the one the mutable pass resolved
+            // under; visibility was already enforced then, so the frozen
+            // twin recovers TYPE IDENTITY from the raw registry rather than
+            // re-policing it (behav_iter_pipeline_local: FilterIter resolved
+            // at check time, "not visible" from the frozen context).
+            if self.named_types.contains(gi_base_sym):
+                gi_base_tid = self.named_types.get(gi_base_sym).unwrap()
+        if gi_base_tid == 0:
             sema_phase_bug("BUG: frozen generic type base not visible")
             return 0
         let gi_arg_count = self.ast.get_data2(node)
