@@ -33,7 +33,7 @@ fn drive_until_done(task: &Task[i32]):
 
 fn test_generic_payload:
     let initial = Counter { count: 1 tag: 7 }
-    let lock: Mutex[Counter] = Mutex[Counter].new(initial)
+    let lock: Mutex[Counter] = Mutex[Counter].new(move initial)
     let first = with lock.enter() as data:
         data.count + data.tag
     assert(first == 8)
@@ -44,7 +44,7 @@ fn test_generic_payload:
         data.count
     assert(first_count == 1)
     let next = Counter { count: 10 tag: 20 }
-    lock.set(next)
+    lock.set(move next)
     let after_set = with lock.enter() as data:
         data.count + data.tag
     assert(after_set == 30)
