@@ -1212,6 +1212,14 @@ impl Sema:
         self.register_fn_clause_decl(dispatch_sym, node)
         body_sym
 
+    mut fn fn_signature_return_type(flags: i32, declared_ret_type: TypeId) -> TypeId:
+        if (flags / FnFlags.ASYNC) % 2 == 0:
+            return declared_ret_type
+        let task_args: Vec[i32] = Vec.new()
+        task_args.push(declared_ret_type as i32)
+        let task_ty = self.ensure_generic_inst_type(self.pool_intern("Task"), task_args, 1)
+        if task_ty != 0: task_ty else: declared_ret_type
+
     mut fn collect_fn_decl(node: i32, is_local: i32, decl_index: i32):
         let parsed_fn_name = self.ast.get_data0(node)
         let method_owner_sym = self.method_decl_owner_symbol(node, parsed_fn_name)
@@ -1444,14 +1452,7 @@ impl Sema:
             self.register_generator_next_method(fn_name, state_sym, state_tid, ret_type as i32)
             sig_ret_type = state_tid as TypeId
 
-        // For async functions, wrap return type in Task[T]
-        if (flags / FnFlags.ASYNC) % 2 == 1:
-            let task_sym = self.pool_intern("Task")
-            let task_args: Vec[i32] = Vec.new()
-            task_args.push(ret_type as i32)
-            let task_ty = self.ensure_generic_inst_type(task_sym, task_args, 1)
-            if task_ty != 0:
-                sig_ret_type = task_ty
+        sig_ret_type = self.fn_signature_return_type(flags, sig_ret_type)
 
         // Build fn type
         let fn_extra_start = self.type_extra.len() as i32

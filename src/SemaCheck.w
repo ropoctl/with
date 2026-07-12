@@ -65,11 +65,7 @@ impl Sema:
             ret_ty = self.resolve_type_expr(ret_node) as i32
         if ret_ty == 0:
             return 0
-        if (method_flags / FnFlags.ASYNC) % 2 == 0:
-            return ret_ty
-        let task_args: Vec[i32] = Vec.new()
-        task_args.push(ret_ty)
-        self.ensure_generic_inst_type(self.syms.task, task_args, 1) as i32
+        self.fn_signature_return_type(method_flags, ret_ty as TypeId) as i32
 
 type SemaTraitImplMethodContract {
     ok: i32,
@@ -3056,7 +3052,8 @@ impl Sema:
                         p_tid = concrete_param_ty as TypeId
             self.sig_params.push(p_tid as i32)
 
-        let ret_tid = if ret_type_node != 0: self.resolve_type_expr(ret_type_node) else: self.ty_void
+        let declared_ret_tid = if ret_type_node != 0: self.resolve_type_expr(ret_type_node) else: self.ty_void
+        let ret_tid = self.fn_signature_return_type(self.ast.fn_meta_flags(meta), declared_ret_tid)
 
         var sig_idx = self.get_sig(mono_sym)
         if sig_idx < 0:
@@ -3478,7 +3475,7 @@ impl Sema:
                 return 0
         fn_sym
 
-    mut fn with_method_concrete_sig(owner_sym: i32, owner_type: i32, method_fn: i32) -> i32:
+    mut fn concrete_owner_method_sig(owner_sym: i32, owner_type: i32, method_fn: i32) -> i32:
         let fn_node = self.generic_fn_node_for_symbol(method_fn)
         if fn_node == 0:
             return self.get_sig(method_fn)
@@ -3502,6 +3499,20 @@ impl Sema:
         self.generic_subst_type_ids = saved_types
         sig_idx
 
+    mut fn record_btree_insert_contract(owner_sym: i32, owner_type: i32, anchor_node: i32) -> i32:
+        let insert_sym = self.pool_lookup_symbol("insert")
+        let insert_fn = if insert_sym != 0: self.lookup_generic_method_fn(owner_sym, insert_sym) else: 0
+        if insert_fn == 0:
+            self.emit_error("BTree collection insertion method is unavailable", anchor_node)
+            return 0
+        let insert_sig = self.concrete_owner_method_sig(owner_sym, owner_type, insert_fn)
+        if insert_sig < 0:
+            self.emit_error("BTree collection insertion method could not be specialized for the concrete collection type", anchor_node)
+            return 0
+        self.btree_insert_sigs.insert(anchor_node, insert_sig)
+        self.btree_insert_mono_syms.insert(anchor_node, self.sig_names.get(insert_sig as i64))
+        1
+
     mut fn classify_guarded_with(node: i32, source_ty: i32, is_mut: i32) -> i32:
         let trait_sym = if is_mut != 0: self.pool_lookup_symbol("ScopedMut") else: self.pool_lookup_symbol("Scoped")
         if trait_sym == 0:
@@ -3524,8 +3535,8 @@ impl Sema:
         if enter_fn == 0 or exit_fn == 0:
             return WithFormKind.Binding
         let owner_type = self.auto_deref_ref_ptr_type(source_ty as TypeId) as i32
-        let enter_sig = self.with_method_concrete_sig(owner_sym, owner_type, enter_fn)
-        let exit_sig = self.with_method_concrete_sig(owner_sym, owner_type, exit_fn)
+        let enter_sig = self.concrete_owner_method_sig(owner_sym, owner_type, enter_fn)
+        let exit_sig = self.concrete_owner_method_sig(owner_sym, owner_type, exit_fn)
         if enter_sig < 0 or exit_sig < 0:
             self.emit_error("guarded with protocol methods could not be specialized for the concrete guard type", node)
             return WithFormKind.Binding
@@ -6001,6 +6012,8 @@ impl Sema:
                         self.emit_error("BTreeSet comprehension element type must implement Ord", node)
                         return 0
                     let _btree_storage_ty = self.ensure_btree_storage_type(target_ty)
+                    if self.record_btree_insert_contract(self.syms.btreeset, target_ty, expr) == 0:
+                        return 0
             self.typed_expr_types.insert(node, result_ty)
             return result_ty as TypeId
 
@@ -6063,6 +6076,8 @@ impl Sema:
                     self.emit_error("BTreeMap comprehension key type must implement Ord", node)
                     return 0
                 let _btree_storage_ty = self.ensure_btree_storage_type(map_target_ty)
+                if self.record_btree_insert_contract(self.syms.btreemap, map_target_ty, key_expr) == 0:
+                    return 0
             else:
                 let hash_trait2 = self.pool_lookup_symbol("Hash")
                 if hash_trait2 != 0 and key_ty != 0 and self.type_implements_trait(key_ty as i32, hash_trait2) == 0:
@@ -7751,11 +7766,22 @@ impl Sema:
                 if self.types_compatible(return_try.break_ty, try_info.break_ty) == 0:
                     self.emit_error("? cannot propagate break type '" ++ self.type_name(try_info.break_ty) ++ "' through enclosing return type '" ++ self.type_name(self.current_return_type as i32) ++ "'", node)
                     return 0
+                let branch_owner = self.method_owner_symbol_for_type(self.resolve_alias(try_info.carrier_ty as TypeId) as i32)
+                let from_break_owner = self.method_owner_symbol_for_type(self.resolve_alias(return_try.carrier_ty as TypeId) as i32)
+                let branch_sig = self.concrete_owner_method_sig(branch_owner, try_info.carrier_ty, try_info.branch_fn)
+                let from_break_sig = self.concrete_owner_method_sig(from_break_owner, return_try.carrier_ty, return_try.from_break_fn)
+                if branch_sig < 0 or from_break_sig < 0:
+                    self.emit_error("Try protocol methods could not be specialized for the concrete carrier types", node)
+                    return 0
                 self.try_continue_tys.insert(node, try_info.continue_ty)
                 self.try_break_tys.insert(node, try_info.break_ty)
                 self.try_branch_result_tys.insert(node, try_info.branch_result_ty)
                 self.try_branch_fns.insert(node, try_info.branch_fn)
                 self.try_from_break_fns.insert(node, return_try.from_break_fn)
+                self.try_branch_sigs.insert(node, branch_sig)
+                self.try_branch_mono_syms.insert(node, self.sig_names.get(branch_sig as i64))
+                self.try_from_break_sigs.insert(node, from_break_sig)
+                self.try_from_break_mono_syms.insert(node, self.sig_names.get(from_break_sig as i64))
                 self.typed_expr_types.insert(node, try_info.continue_ty)
                 return try_info.continue_ty
             let source_err_ty = self.result_error_type(operand as i32)
@@ -10158,6 +10184,9 @@ impl Sema:
                 self.emit_error("BTreeSet literal element type must implement Ord", node)
                 return 0
             let _btree_storage_ty = self.ensure_btree_storage_type(result as i32)
+            for i in 0..elem_count:
+                if self.record_btree_insert_contract(self.syms.btreeset, result as i32, self.ast.get_extra(extra_start + i)) == 0:
+                    return 0
         result as i32
 
     mut fn check_map_literal(node: i32) -> i32:
@@ -10226,6 +10255,9 @@ impl Sema:
                 self.emit_error("BTreeMap literal key type must implement Ord", node)
                 return 0
             let _btree_storage_ty = self.ensure_btree_storage_type(target_ty)
+            for i in 0..pair_count:
+                if self.record_btree_insert_contract(self.syms.btreemap, target_ty, self.ast.get_extra(extra_start + i * 2)) == 0:
+                    return 0
         else:
             let hash_trait = self.pool_lookup_symbol("Hash")
             if hash_trait != 0 and key_ty != 0 and self.type_implements_trait(key_ty, hash_trait) == 0:
@@ -12147,6 +12179,40 @@ impl Sema:
         self.typed_expr_types.insert(node, closure_ty)
         closure_ty
 
+    mut fn check_generic_pipeline_call(node: i32, lhs: i32, lhs_ty: i32, rhs: i32) -> i32:
+        var callee = rhs
+        var args_start = -1
+        var args_count = 0
+        if self.ast.kind(rhs) == NodeKind.NK_CALL:
+            callee = self.ast.get_data0(rhs)
+            args_start = self.ast.get_data1(rhs)
+            args_count = self.ast.get_data2(rhs)
+        if callee == 0 or self.ast.kind(callee) != NodeKind.NK_IDENT:
+            return -1
+        let fn_sym = self.ast.get_data0(callee)
+        let fn_node = self.generic_fn_node_for_symbol(fn_sym)
+        if fn_node == 0:
+            return -1
+        if self.require_std_tier_for_symbol(fn_sym, callee) == 0:
+            return 0
+        if self.symbol_visible_from_current(fn_sym) == 0:
+            self.emit_private_symbol_error(fn_sym, callee)
+            return 0
+        let arg_types: Vec[i32] = Vec.new()
+        let arg_nodes: Vec[i32] = Vec.new()
+        arg_types.push(lhs_ty)
+        arg_nodes.push(lhs)
+        for ai in 0..args_count:
+            let arg_node = self.ast.get_extra(args_start + ai)
+            arg_nodes.push(arg_node)
+            arg_types.push(self.check_expr(arg_node) as i32)
+        self.emit_no_await_guard_may_suspend_call(node, fn_sym)
+        self.note_allocating_callee(node, fn_sym)
+        let ret = self.check_generic_call(fn_sym, fn_node, arg_types, arg_nodes, args_count + 1, node)
+        self.comp_resolved.insert(node, fn_sym)
+        self.typed_expr_types.insert(node, ret)
+        ret
+
     mut fn check_pipeline(node: i32) -> i32:
         let lhs = self.ast.get_data0(node)
         let rhs = self.ast.get_data1(node)
@@ -12205,6 +12271,9 @@ impl Sema:
                             self.pipeline_method_calls.insert(node, method3)
                             self.typed_expr_types.insert(node, ret4)
                         return ret4
+        let generic_ret = self.check_generic_pipeline_call(node, lhs, lhs_ty as i32, rhs)
+        if generic_ret >= 0:
+            return generic_ret
         let saved = self.in_pipeline_rhs
         self.in_pipeline_rhs = 1
         let rhs_ty = self.check_expr(rhs)
@@ -13321,12 +13390,14 @@ impl Sema:
         // calling a known function signature).
         let has_resolved = self.has_resolved_call_args(node)
         let arg_types: Vec[i32] = Vec.new()
+        let checked_arg_nodes: Vec[i32] = Vec.new()
         // docs/mut.md Rev 8 §15.8 — borrow indices to remove after this call's
         // arg-loop completes. Iterator-of-self borrows live for the duration of
         // the enclosing call so sibling closures conflict with them.
         let iter_borrow_idxs: Vec[i32] = Vec.new()
         for ai in 0..resolved_arg_count:
             let arg_node = if has_resolved != 0: self.get_resolved_call_arg(node, ai) else: self.ast.get_extra(resolved_extra_start + ai)
+            checked_arg_nodes.push(arg_node)
             var expected_ty = 0
             if sig_idx >= 0:
                 let param_i = ai + param_offset
@@ -13591,7 +13662,7 @@ impl Sema:
             let fn_node = generic_fn_node
             self.emit_no_await_guard_may_suspend_call(node, fn_sym)
             self.note_allocating_callee(node, fn_sym)
-            let ret = self.check_generic_call(fn_sym, fn_node, arg_types, resolved_arg_count, node)
+            let ret = self.check_generic_call(fn_sym, fn_node, arg_types, checked_arg_nodes, resolved_arg_count, node)
             self.comp_resolved.insert(node, fn_sym)
             self.typed_expr_types.insert(node, ret)
             return ret
@@ -14052,7 +14123,7 @@ impl Sema:
             self.obligation_type_syms.push(concrete_sym)
             self.obligation_nodes.push(self.ast.get_extra(call_extra_start + ai))
 
-    mut fn check_generic_call(fn_sym: i32, fn_node: i32, arg_types: &Vec[i32], arg_count: i32, call_node: i32) -> i32:
+    mut fn check_generic_call(fn_sym: i32, fn_node: i32, arg_types: &Vec[i32], arg_nodes: &Vec[i32], arg_count: i32, call_node: i32) -> i32:
         let meta = self.ast.find_fn_meta(fn_node)
         if meta < 0:
             if arg_count > 0:
@@ -14090,11 +14161,10 @@ impl Sema:
             // #600 (§5.1): generic calls (incl. static methods like Box.new) never
             // reached the ephemeral arg gates — heap-owning constructors accepted
             // ephemeral values by value. Route through the same gate; arg node
-            // from the call's extras (resolved args mirror them positionally).
+            // is supplied by the caller because pipelines prepend their lhs.
             if arg_ty != 0 and self.type_is_ephemeral_value(arg_ty as TypeId) != 0:
-                let eg_extra = self.ast.get_data1(call_node)
-                let eg_arg_node = if self.has_resolved_call_args(call_node) != 0: self.get_resolved_call_arg(call_node, pi) else: self.ast.get_extra(eg_extra + pi)
-                self.check_ephemeral_task_arg_escape(eg_arg_node, 0, 0, fn_sym, pi)
+                let eg_arg_node = if pi < arg_nodes.len() as i32: arg_nodes.get(pi as i64) else: 0
+                self.check_ephemeral_task_arg_escape(if eg_arg_node > 0: eg_arg_node else: call_node, 0, 0, fn_sym, pi)
 
         // Obligation model: collect and solve trait bounds for each bound type parameter.
         self.check_generic_trait_bounds(tp_start, tp_count, call_node)
@@ -14153,7 +14223,8 @@ impl Sema:
             self.generic_subst_type_ids = saved_generic_call_subst_tys
             return 0
 
-        let resolved_ret = self.resolve_generic_return_type_node(ret_node, tp_start, tp_count)
+        let declared_ret = self.resolve_generic_return_type_node(ret_node, tp_start, tp_count)
+        let resolved_ret = self.fn_signature_return_type(self.ast.fn_meta_flags(meta), declared_ret as TypeId) as i32
         self.generic_specialization_cache.insert(sema_owned_text(spec_key), resolved_ret)
         self.typed_expr_types.insert(call_node, resolved_ret)
         self.generic_subst_param_syms = saved_generic_call_subst_syms

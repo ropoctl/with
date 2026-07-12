@@ -49,16 +49,22 @@ impl Sema:
         let field_count = self.ast.get_extra(extra_start)
         if field_index < 0 or field_index >= field_count:
             return 0
+        let saved_subst_syms = sema_clone_i32_vec(&self.generic_subst_param_syms)
+        let saved_subst_types = sema_clone_i32_vec(&self.generic_subst_type_ids)
+        var field_tid = 0
         if self.setup_generic_inst_substitution(resolved as i32, base_sym) == 0:
             if self.named_types.contains(base_sym):
                 let base_tid = self.named_types.get(base_sym).unwrap()
                 let te_start = self.get_type_d1(base_tid)
-                return self.type_extra.get((te_start + field_index * 3 + 1) as i64)
-            return 0
-        let tp_start = self.type_decl_tp_start(decl)
-        let tp_count = self.type_decl_tp_count(decl)
-        let field_type_node = self.ast.get_extra(extra_start + 1 + field_index * 3 + 1)
-        self.resolve_generic_return_type_node(field_type_node, tp_start, tp_count)
+                field_tid = self.type_extra.get((te_start + field_index * 3 + 1) as i64)
+        else:
+            let tp_start = self.type_decl_tp_start(decl)
+            let tp_count = self.type_decl_tp_count(decl)
+            let field_type_node = self.ast.get_extra(extra_start + 1 + field_index * 3 + 1)
+            field_tid = self.resolve_generic_return_type_node(field_type_node, tp_start, tp_count)
+        self.generic_subst_param_syms = saved_subst_syms
+        self.generic_subst_type_ids = saved_subst_types
+        field_tid
 
     mut fn type_layout_generic_struct_field_align(tid: i32, field_index: i32) -> i64:
         let field_tid = self.type_layout_generic_struct_field_type(tid, field_index)

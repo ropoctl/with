@@ -757,6 +757,14 @@ type Sema {
     try_branch_result_tys: HashMap[i32, i32],
     try_branch_fns: HashMap[i32, i32],
     try_from_break_fns: HashMap[i32, i32],
+    try_branch_sigs: HashMap[i32, i32],
+    try_branch_mono_syms: HashMap[i32, i32],
+    try_from_break_sigs: HashMap[i32, i32],
+    try_from_break_mono_syms: HashMap[i32, i32],
+    // Synthetic BTree literal/comprehension insertion contracts. These cannot
+    // use resolved_call_*: the anchor expression may itself be a generic call.
+    btree_insert_sigs: HashMap[i32, i32],
+    btree_insert_mono_syms: HashMap[i32, i32],
     // Auto-deref adjustment sidecar: expression node -> contiguous step range.
     // Step fn 0 means builtin &/* deref; non-zero is a user Deref.deref fn.
     autoderef_step_starts: HashMap[i32, i32],
@@ -1838,6 +1846,12 @@ fn sema_empty_state(pool: InternPool, diags: DiagnosticList, ast: AstPool) -> Se
         try_branch_result_tys: sema_new_map_i32_i32(),
         try_branch_fns: sema_new_map_i32_i32(),
         try_from_break_fns: sema_new_map_i32_i32(),
+        try_branch_sigs: sema_new_map_i32_i32(),
+        try_branch_mono_syms: sema_new_map_i32_i32(),
+        try_from_break_sigs: sema_new_map_i32_i32(),
+        try_from_break_mono_syms: sema_new_map_i32_i32(),
+        btree_insert_sigs: sema_new_map_i32_i32(),
+        btree_insert_mono_syms: sema_new_map_i32_i32(),
         autoderef_step_starts: sema_new_map_i32_i32(),
         autoderef_step_counts: sema_new_map_i32_i32(),
         slice_coerce_args: sema_new_map_i32_i32(),

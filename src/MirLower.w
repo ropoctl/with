@@ -4091,10 +4091,14 @@ impl MirBuilder:
         let continue_ty = self.sema.try_continue_tys.get(node).unwrap()
         let break_ty = self.sema.try_break_tys.get(node).unwrap()
         let branch_ty = self.sema.try_branch_result_tys.get(node).unwrap()
+        let branch_sig = self.sema.try_branch_sigs.get(node).unwrap()
+        let branch_mono_sym = self.sema.try_branch_mono_syms.get(node).unwrap()
+        let from_break_sig = self.sema.try_from_break_sigs.get(node).unwrap()
+        let from_break_mono_sym = self.sema.try_from_break_mono_syms.get(node).unwrap()
 
         let branch_args: Vec[i32] = Vec.new()
         branch_args.push(self.lower_expr(expr))
-        let branch_op = self.lower_resolved_call_with_operand_args(branch_fn, branch_args, branch_ty, node)
+        let branch_op = self.lower_resolved_call_with_operand_args_contract(branch_fn, branch_args, branch_ty, node, branch_sig, branch_mono_sym)
         let branch_place = self.materialize_operand(branch_op, branch_ty, self.ast.get_start(expr))
 
         let pass_bb = self.new_block()
@@ -4125,7 +4129,7 @@ impl MirBuilder:
         let break_op = self.operand_for_place(break_payload_place, break_ty)
         let from_break_args: Vec[i32] = Vec.new()
         from_break_args.push(break_op)
-        let ret_op = self.lower_resolved_call_with_operand_args(from_break_fn, from_break_args, ret_ty, node)
+        let ret_op = self.lower_resolved_call_with_operand_args_contract(from_break_fn, from_break_args, ret_ty, node, from_break_sig, from_break_mono_sym)
         self.assign_operand_to_place(ret_place, ret_op, self.ast.get_start(expr))
         self.emit_errdefers_for_return()
         self.emit_defers_for_return()
@@ -4602,7 +4606,9 @@ impl MirBuilder:
         let args: Vec[i32] = Vec.new()
         args.push(self.body.new_operand(OperandKind.OK_COPY, set_place))
         args.push(elem_op)
-        let _ = self.lower_resolved_call_with_operand_args(fn_sym, args, self.sema.ty_void as i32, node)
+        let sig_idx = self.sema.btree_insert_sigs.get(node).unwrap()
+        let mono_sym = self.sema.btree_insert_mono_syms.get(node).unwrap()
+        let _ = self.lower_resolved_call_with_operand_args_contract(fn_sym, args, self.sema.ty_void as i32, node, sig_idx, mono_sym)
 
     mut fn emit_btree_map_insert(map_place: i32, key_op: i32, val_op: i32, node: i32):
         let insert_sym = self.sema.pool_lookup_symbol("insert")
@@ -4614,7 +4620,9 @@ impl MirBuilder:
         args.push(self.body.new_operand(OperandKind.OK_COPY, map_place))
         args.push(key_op)
         args.push(val_op)
-        let _ = self.lower_resolved_call_with_operand_args(fn_sym, args, self.sema.ty_void as i32, node)
+        let sig_idx = self.sema.btree_insert_sigs.get(node).unwrap()
+        let mono_sym = self.sema.btree_insert_mono_syms.get(node).unwrap()
+        let _ = self.lower_resolved_call_with_operand_args_contract(fn_sym, args, self.sema.ty_void as i32, node, sig_idx, mono_sym)
 
     mut fn lower_btree_seq_literal(node: i32, elem_ty: i32) -> i32:
         let elem_start = self.ast.get_data0(node)
@@ -10874,54 +10882,66 @@ impl MirBuilder:
             return self.body.new_operand(OperandKind.OK_COPY, result_place)
         self.body.new_operand(OperandKind.OK_MOVE, result_place)
 
+    fn generic_call_symbol_text(sym: i32) -> str:
+        let text = self.pool.resolve(sym)
+        if text.len() > 0:
+            return text
+        self.sema.pool_resolve(sym)
+
+    fn generic_call_uses_codegen_dispatch(method_sym: i32, self_expr: i32, has_recorded_sig: bool, recv_ty: i32, recv_kind: i32) -> bool:
+        if recv_ty != 0:
+            if self.sema.type_is_task(recv_ty) != 0 or self.sema.type_is_scoped_task(recv_ty) != 0 or self.sema.type_is_scoped_join_handle(recv_ty) != 0 or self.type_is_channel_endpoint(recv_ty) != 0:
+                return true
+            let resolved = self.sema.resolve_alias(recv_ty as TypeId)
+            if recv_kind == TypeKind.TY_GENERIC_INST and self.sema.pool_resolve(self.sema.get_generic_inst_base(resolved as i32)) == "Atomic":
+                return true
+        if has_recorded_sig:
+            return false
+        if method_sym != 0:
+            let method_name = self.generic_call_symbol_text(method_sym)
+            if method_sym == self.sema.syms.track or method_name == "spawn" or method_name == "join" or method_name == "from_int":
+                return true
+            if method_name == "new" and self.sema.pool_resolve(self.static_receiver_base_sym(self_expr)) == "Atomic":
+                return true
+        false
+
     // D6-spirit single decision point: every GENERIC_CALL contract
     // requirement flows through here (seven per-site decisions produced
     // four cache-masked machinery strata). Language-machinery calls carry
     // no specialization contract — codegen dispatches them by
-    // name/receiver: scope handles (track/spawn), channel endpoints,
-    // task/join handles (join), Atomic, and disc-enum from_int. User-Deref
-    // dispatch opts out at its creation site instead.
+    // name/receiver. User-Deref dispatch opts out at its creation site.
     mut fn require_generic_call_contract(args_id: i32, callee_sym: i32, method_sym: i32, self_expr: i32, has_recorded_sig: bool, site: str):
-        var mach_name = self.pool.resolve(if method_sym != 0: method_sym else: callee_sym)
-        if mach_name.len() == 0:
-            mach_name = self.sema.pool_resolve(if method_sym != 0: method_sym else: callee_sym)
+        let mach_name = self.generic_call_symbol_text(if method_sym != 0: method_sym else: callee_sym)
         var recv_ty = 0
         if self_expr != 0 and self.sema.typed_expr_types.contains(self_expr):
             recv_ty = self.sema.typed_expr_types.get(self_expr).unwrap()
-        var recv_kind = -1
-        if recv_ty != 0:
-            recv_kind = self.sema.get_type_kind(self.sema.resolve_alias(recv_ty as TypeId))
-        var required = true
-        // Real method resolutions always record a signature; machinery
-        // resolutions never do. The name list is scoped to unrecorded-sig
-        // method calls, so user methods that happen to share these names
-        // keep the full requirement.
-        if method_sym != 0 and not has_recorded_sig:
-            if method_sym == self.sema.syms.track or mach_name == "spawn" or mach_name == "join" or mach_name == "from_int":
-                required = false
-        if recv_ty != 0 and required:
-            if self.sema.type_is_task(recv_ty) != 0 or self.sema.type_is_scoped_task(recv_ty) != 0 or self.sema.type_is_scoped_join_handle(recv_ty) != 0 or self.type_is_channel_endpoint(recv_ty) != 0:
-                required = false
-            let mach_resolved = self.sema.resolve_alias(recv_ty as TypeId)
-            if recv_kind == TypeKind.TY_GENERIC_INST and self.sema.pool_resolve(self.sema.get_generic_inst_base(mach_resolved as i32)) == "Atomic":
-                required = false
+        let recv_kind = if recv_ty != 0: self.sema.get_type_kind(self.sema.resolve_alias(recv_ty as TypeId)) else: -1
+        let required = not self.generic_call_uses_codegen_dispatch(method_sym, self_expr, has_recorded_sig, recv_ty, recv_kind)
         if with_getenv_str("WITH_MIR_AUDIT").len() > 0:
             with_eprint(f"[gc-contract] site={site} name={mach_name} recv_ty={recv_ty} recv_kind={recv_kind} recorded={has_recorded_sig} required={required}")
         if required:
             self.body.require_call_contract(args_id)
 
     mut fn lower_resolved_call_with_operand_args(fn_sym: i32, args: Vec[i32], ret_type: i32, node: i32, require_contract: bool = true) -> i32:
+        self.lower_resolved_call_with_operand_args_contract(fn_sym, args, ret_type, node, -1, 0, require_contract)
+
+    mut fn lower_resolved_call_with_operand_args_contract(fn_sym: i32, args: Vec[i32], ret_type: i32, node: i32, explicit_sig: i32, explicit_mono_sym: i32, require_contract: bool = true) -> i32:
         let fn_op = self.lower_var(fn_sym, 0, node)
         var sig_idx = self.call_sig_for_sym(fn_sym)
         let recorded_sig = self.sema.resolved_call_sigs.get(node)
-        if recorded_sig.is_some():
+        if explicit_sig >= 0:
+            sig_idx = explicit_sig
+        else if recorded_sig.is_some():
             sig_idx = recorded_sig.unwrap()
         for ai in 0..args.len() as i32:
             if sig_idx < 0 or self.sema.sig_param_uses_value_ref_abi(sig_idx, ai) == 0:
                 self.consume_moved_operand(args.get(ai as i64))
         let args_id = self.body.new_call_args(args)
         self.body.set_call_ast_node(args_id, node)
-        self.record_call_contract(args_id, node, sig_idx)
+        if explicit_sig >= 0:
+            self.body.set_call_contract(args_id, explicit_sig, explicit_mono_sym)
+        else:
+            self.record_call_contract(args_id, node, sig_idx)
         if self.sym_is_generic_fn(fn_sym):
             self.body.set_call_intrinsic(args_id, MirIntrinsic.GENERIC_CALL)
             // User-Deref dispatch (autoderef machinery) passes the GENERIC
@@ -10930,7 +10950,7 @@ impl MirBuilder:
             // contract can exist for it (behav_rc_arc_basic's auto-deref
             // stratum). Ordinary generic calls keep the requirement.
             if require_contract:
-                self.require_generic_call_contract(args_id, fn_sym, 0, 0, recorded_sig.is_some(), "operand-args")
+                self.require_generic_call_contract(args_id, fn_sym, 0, 0, explicit_sig >= 0 or recorded_sig.is_some(), "operand-args")
         let result_local = self.new_temp(ret_type)
         let result_place = self.place_for_local(result_local)
         let next_bb = self.new_block()
