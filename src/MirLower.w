@@ -11227,8 +11227,15 @@ impl MirBuilder:
             return self.lower_float_lit(self.ast.get_data0(node), lit_ty)
 
         if kind == NodeKind.NK_NULL_LIT:
-            // Null pointer literal: lower as integer 0 (codegen emits wl_const_null for ptr targets)
-            return self.const_operand(ConstKind.CK_INT, 0, self.sema.ty_i32)
+            // Null pointer literal: a zero const carrying the sema-resolved
+            // target type (pointer, extern fn, or Option-pointer — §16.10).
+            // A bare i32 zero only worked where a destination place repaired
+            // it; a call operand has no place context, so the Option-pointer
+            // ABI received the wrong shape (spec_ss16_10:27).
+            var null_ty = self.expr_type(node)
+            if null_ty == 0 or null_ty == self.sema.ty_void as i32:
+                null_ty = self.sema.ty_i32 as i32
+            return self.const_operand(ConstKind.CK_INT, 0, null_ty)
 
         if kind == NodeKind.NK_POISONED_EXPR:
             return self.unit_operand()
