@@ -9063,6 +9063,15 @@ separately or placed in an unsafe block. Use `unsafe { ... }` or a
 newline `unsafe:` block for unsafe calls, transmutes, asm, and
 compound unsafe expressions.
 
+**Raw stores do not drop.** A store through a raw pointer (`*p = v`,
+`p[i] = v`) is a raw write: the old pointee is not dropped, because the
+compiler cannot prove it is a live value (it may be uninitialized or
+already moved out). To replace a live pointee, move it out and drop it
+explicitly: `let old = *p; drop(old)` then store. Drop-on-reassignment
+(§2.2) applies only to safe places — bindings, `&mut` derefs, and
+fields, including a field projected through a raw deref
+(`(*p).f = v`), where projecting asserts a live pointee.
+
 The following operations involving raw pointers are safe and do not
 require an unsafe context:
 

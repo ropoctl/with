@@ -4884,8 +4884,40 @@ impl MirBuilder:
         let rhs = self.lower_expr(rhs_expr)
         self.expected_type = saved_expected
         if dest_ty != 0 and self.sema.is_copy_frozen(dest_ty) == 0 and self.sema.type_needs_drop_frozen(dest_ty) != 0:
-            self.emit_drop_place_respecting_moved_fields(place, dest_ty)
+            // §16.11 / decisions D8: `*p = v` and `p[i] = v` through a RAW
+            // pointer are raw stores — the old pointee may be uninitialized
+            // (fresh allocation) or already moved out, so the compiler cannot
+            // prove a live old value to drop. The programmer drops explicitly
+            // (`let old = *p; drop(old)`). Safe places (bindings, `&mut`
+            // derefs, fields) keep drop-before-overwrite.
+            if self.assign_target_is_raw_pointer_store(place_expr) == 0:
+                self.emit_drop_place_respecting_moved_fields(place, dest_ty)
         self.assign_operand_to_place(place, rhs, self.ast.get_start(place_expr))
+
+    // True when an assignment target is a direct deref or index through a
+    // raw pointer (`*p = v`, `p[i] = v` with p: *const/*mut T), unwrapping
+    // unsafe-block/grouping wrappers around the target and its base.
+    mut fn assign_target_is_raw_pointer_store(place_expr: i32) -> i32:
+        var target = place_expr
+        while target != 0:
+            let k = self.ast.kind(target)
+            if k != NodeKind.NK_UNSAFE_BLOCK and k != NodeKind.NK_GROUPED:
+                break
+            target = self.ast.get_data0(target)
+        if target == 0:
+            return 0
+        let kind = self.ast.kind(target)
+        var base = 0
+        if kind == NodeKind.NK_UNARY and self.ast.get_data0(target) == UnaryOp.UOP_DEREF:
+            base = self.ast.get_data1(target)
+        else if kind == NodeKind.NK_INDEX:
+            base = self.ast.get_data0(target)
+        if base == 0:
+            return 0
+        let base_ty = self.expr_type(base)
+        if base_ty == 0:
+            return 0
+        if self.sema.get_type_kind(self.sema.resolve_alias(base_ty as TypeId)) == TypeKind.TY_PTR: 1 else: 0
 
     mut fn lower_expr_place(node: i32) -> i32:
         if node == 0:
@@ -11436,8 +11468,11 @@ impl MirBuilder:
             let rhs_op = self.lower_expr(rhs_node)
             self.expected_type = saved_expected
             let place = self.lower_expr_place(target)
+            // §16.11 / decisions D8: raw-pointer stores do not drop the old
+            // pointee (see lower_assign for the statement-position twin).
             if target_ty != 0 and self.sema.is_copy_frozen(target_ty) == 0 and self.sema.type_needs_drop_frozen(target_ty) != 0:
-                self.emit_drop_place_respecting_moved_fields(place, target_ty)
+                if self.assign_target_is_raw_pointer_store(target) == 0:
+                    self.emit_drop_place_respecting_moved_fields(place, target_ty)
             self.assign_operand_to_place(place, rhs_op, self.ast.get_start(target))
             return rhs_op
 
