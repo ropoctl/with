@@ -1922,6 +1922,11 @@ impl Codegen:
         if trait_sym == 0 and info.type_sym != 0:
             trait_sym = self.find_dyn_trait_for_type_and_current_method(info.type_sym)
         if trait_sym != 0 and info.type_sym != 0:
+            // A generic-inst concrete (blanket impl) needs its vtable built
+            // from Sema's dyn_impl specialization rows.
+            let place_resolved = self.mir_input.mir_resolve_alias(place_sema_ty)
+            if self.mir_input.mir_get_type_kind(place_resolved) == TypeKind.TY_GENERIC_INST:
+                self.ensure_generic_inst_trait_vtable(place_resolved, info.type_sym, trait_sym)
             return self.build_dyn_trait_value_from_ptr(ptr, info.type_sym, trait_sym)
         ptr
 
@@ -14266,6 +14271,12 @@ impl Codegen:
             else if dyn_trait_sym != 0:
                 // Evaluate without coercion so we get the raw concrete value.
                 arg_val = self.mir_eval_operand(body, operand_id, 0)
+                if self.llvm_type_is_dyn_fat_ptr(wl_type_of(arg_val)) != 0:
+                    // Already a dyn fat pointer (a dyn-typed RK_REF temp built
+                    // it at the assign) — wrapping again would nest fat values.
+                    self.record_codegen_call_argument(body, args_id, operand_id, ai, AnalysisMarshalStrategy.DirectValue, arg_val, arg_val)
+                    args.push(arg_val)
+                    continue
                 var dyn_info = self.mir_dyn_arg_info_from_operand(body, operand_id, arg_val)
                 if dyn_info.type_sym == 0:
                     let dyn_call_node = body.call_ast_node(args_id)

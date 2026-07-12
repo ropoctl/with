@@ -510,6 +510,17 @@ type Sema {
     union_tracked_syms: Vec[i32],   // insertion-ordered tracked union var syms
     union_in_assign_target: i32,
 
+    // Dyn-erased generic-inst trait impls: methods specialized for the
+    // concrete inst when a ref-to-dyn coercion is accepted, keyed by
+    // pair(resolved inst tid, trait sym) into flat (method, sig, mono) rows.
+    // Codegen's vtable builder consumes these (blanket impls have no
+    // pre-monomorphized Type__Arg.method functions).
+    dyn_impl_starts: HashMap[i64, i32],
+    dyn_impl_counts: HashMap[i64, i32],
+    dyn_impl_flat_method_names: Vec[i32],
+    dyn_impl_flat_sigs: Vec[i32],
+    dyn_impl_flat_mono_syms: Vec[i32],
+
     // Trait declarations
     trait_method_names: Vec[i32],
     trait_method_starts: Vec[i32],
@@ -1662,6 +1673,11 @@ fn sema_empty_state(pool: InternPool, diags: DiagnosticList, ast: AstPool) -> Se
         union_last_written: sema_new_map_i32_i32(),
         union_tracked_syms: Vec.new(),
         union_in_assign_target: 0,
+        dyn_impl_starts: HashMap.new(),
+        dyn_impl_counts: HashMap.new(),
+        dyn_impl_flat_method_names: Vec.new(),
+        dyn_impl_flat_sigs: Vec.new(),
+        dyn_impl_flat_mono_syms: Vec.new(),
         trait_method_names: Vec.new(),
         trait_method_starts: Vec.new(),
         trait_method_counts: Vec.new(),
@@ -5717,7 +5733,9 @@ impl Sema:
         if exp_k == TypeKind.TY_PTR and act_k == TypeKind.TY_REF:
             return self.pointer_pointees_compatible(exp_r, act_r)
         if exp_k == TypeKind.TY_REF and act_k == TypeKind.TY_REF:
-            return self.pointer_pointees_compatible(exp_r, act_r)
+            if self.pointer_pointees_compatible(exp_r, act_r) != 0:
+                return 1
+            return self.ref_to_dyn_pointee_coercible(exp_r, act_r)
         if exp_k == TypeKind.TY_REF and act_k == TypeKind.TY_PTR:
             return self.pointer_pointees_compatible(exp_r, act_r)
         if exp_k == TypeKind.TY_FN and act_k == TypeKind.TY_FN:
@@ -5774,6 +5792,67 @@ impl Sema:
                 if self.types_compatible(self.get_type_d0(exp_r), act_r):
                     return 1
         0
+
+    // §10.6/§10.8: `&Concrete -> &dyn Trait` coerces when Concrete implements
+    // Trait — the checker side of codegen's dyn-fat-pointer construction from
+    // a ref place (mir_build_dyn_trait_value_from_ref_place). Mirrors the
+    // Box[Concrete] -> Box[dyn Trait] case above. A mutable dyn ref still
+    // requires a mutable source.
+    mut fn ref_to_dyn_pointee_coercible(exp_r: TypeId, act_r: TypeId) -> i32:
+        if self.get_type_d1(exp_r) != 0 and self.get_type_d1(act_r) == 0:
+            return 0
+        let exp_pointee = self.resolve_alias(self.get_type_d0(exp_r) as TypeId)
+        if self.get_type_kind(exp_pointee) != TypeKind.TY_TRAIT_OBJ:
+            return 0
+        let act_pointee = self.get_type_d0(act_r)
+        if act_pointee == 0:
+            return 0
+        if self.get_type_kind(self.resolve_alias(act_pointee as TypeId)) == TypeKind.TY_TRAIT_OBJ:
+            return 0
+        let dyn_trait_sym = self.get_type_d0(exp_pointee)
+        if self.type_implements_trait(act_pointee, dyn_trait_sym) == 0:
+            return 0
+        // A generic-inst concrete (blanket impl) has no pre-monomorphized
+        // Type__Arg.method functions; specialize the trait methods now so
+        // codegen can build the vtable.
+        let act_p_res = self.resolve_alias(act_pointee as TypeId) as i32
+        if self.get_type_kind(act_p_res) == TypeKind.TY_GENERIC_INST:
+            self.register_dyn_impl_specializations(act_p_res, dyn_trait_sym)
+        1
+
+    // Codegen queries (text-keyed: codegen and sema intern in different
+    // pools). Returns the row index into the dyn_impl flat vecs, or -1.
+    fn dyn_impl_method_row(concrete_resolved: i32, trait_text: str, method_text: str) -> i32:
+        let trait_sym = self.pool_lookup_symbol(trait_text)
+        if trait_sym == 0:
+            return -1
+        let key = sema_pair_key(concrete_resolved, trait_sym)
+        if not self.dyn_impl_starts.contains(key):
+            return -1
+        let start = self.dyn_impl_starts.get(key).unwrap()
+        let count = self.dyn_impl_counts.get(key).unwrap()
+        for i in 0..count:
+            if self.pool_resolve(self.dyn_impl_flat_method_names.get((start + i) as i64)) == method_text:
+                return start + i
+        -1
+
+    fn dyn_impl_row_sig(row: i32): self.dyn_impl_flat_sigs.get(row as i64)
+    fn dyn_impl_row_mono_sym(row: i32): self.dyn_impl_flat_mono_syms.get(row as i64)
+
+    // Frozen twin for MIR lowering; sema's acceptance of the coercion during
+    // checking preregistered any generic-inst impl answer it needs.
+    fn ref_to_dyn_pointee_coercible_frozen(exp_r: TypeId, act_r: TypeId) -> i32:
+        if self.get_type_d1(exp_r) != 0 and self.get_type_d1(act_r) == 0:
+            return 0
+        let exp_pointee = self.resolve_alias(self.get_type_d0(exp_r) as TypeId)
+        if self.get_type_kind(exp_pointee) != TypeKind.TY_TRAIT_OBJ:
+            return 0
+        let act_pointee = self.get_type_d0(act_r)
+        if act_pointee == 0:
+            return 0
+        if self.get_type_kind(self.resolve_alias(act_pointee as TypeId)) == TypeKind.TY_TRAIT_OBJ:
+            return 0
+        self.type_implements_trait_frozen(act_pointee, self.get_type_d0(exp_pointee))
 
     fn fn_types_compatible_frozen(expected: i32, actual: i32) -> i32:
         if self.get_type_d1(expected) != self.get_type_d1(actual):

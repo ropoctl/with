@@ -4262,7 +4262,19 @@ impl MirBuilder:
                 self.mark_string_base_fields_may_alias(self.place_base_local(place))
             let is_exclusive = op == UnaryOp.UOP_RAW_REF_MUT
             let rv = self.body.new_rvalue(RvalueKind.RK_REF, if is_exclusive: BorrowKind.EXCLUSIVE else: BorrowKind.SHARED, place, 0)
-            let ty = self.expr_type(node)
+            var ty = self.expr_type(node)
+            // §10.6/§10.8: `&x` in ref-to-dyn position takes the dyn ref type
+            // so codegen's RK_REF assign sees a dyn destination and builds the
+            // fat pointer (mir_build_dyn_trait_value_from_ref_place keys on
+            // the destination sema type) — e.g. `Some(&self.source)` for an
+            // Option[&dyn Error] payload. Sema already vetted the coercion, so
+            // the expected type governs even when the ref expr's own recorded
+            // type is void/unknown (ref temps often are).
+            if self.expected_type != 0 and self.expected_type != ty:
+                let ref_exp_res = self.sema.resolve_alias(self.expected_type as TypeId)
+                if self.sema.get_type_kind(ref_exp_res) == TypeKind.TY_REF:
+                    if self.sema.get_type_kind(self.sema.resolve_alias(self.sema.get_type_d0(ref_exp_res) as TypeId)) == TypeKind.TY_TRAIT_OBJ:
+                        ty = self.expected_type
             let temp = self.new_temp(ty)
             let temp_place = self.place_for_local(temp)
             self.body.push_stmt(self.cur_bb, StmtKind.Assign, temp_place, rv, self.ast.get_start(node))

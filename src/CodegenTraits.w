@@ -1002,6 +1002,77 @@ impl Codegen:
         wl_set_linkage(vg, wl_internal_linkage())
         self.vtable_globals.insert(key, vg)
 
+    // Vtable for a dyn-erased generic inst (blanket impls like
+    // `impl[E: Error] Error for ContextError[E]`): resolve each trait method
+    // through Sema's dyn_impl specialization rows (recorded when the
+    // ref-to-dyn coercion was accepted) instead of the Type__Arg.method
+    // monomorph naming, force-generating the MIR specialization if nothing
+    // referenced it yet. Falls back to the old-style monomorph per method.
+    mut fn ensure_generic_inst_trait_vtable(concrete_sema_ty: i32, impl_type_sym: i32, trait_sym: i32):
+        if self.lookup_trait_vtable_global(impl_type_sym, trait_sym) != 0:
+            return
+        let trait_idx_opt = self.trait_map.get(trait_sym)
+        if not trait_idx_opt.is_some():
+            return
+        let trait_idx = trait_idx_opt.unwrap()
+        let trait_text = self.intern.resolve(trait_sym)
+        let method_start = self.trait_method_starts.get(trait_idx as i64)
+        let method_count = self.trait_method_counts.get(trait_idx as i64)
+        let vtable_ty = self.trait_vtable_types.get(trait_idx as i64)
+        let type_name = self.intern.resolve(impl_type_sym)
+        let entries: Vec[i64] = Vec.new()
+        var used_row = 0
+        for mi in 0..method_count:
+            let method_sym = self.trait_method_names.get((method_start + mi) as i64)
+            let method_flags = self.trait_method_flags.get((method_start + mi) as i64)
+            let trait_method_idx = method_start + mi
+            let param_start = self.trait_method_param_starts.get(trait_method_idx as i64)
+            let param_count = self.trait_method_param_counts.get(trait_method_idx as i64)
+            let consumes_self =
+                if param_count > 0 and fn_param_is_move_self(self.pool.fn_param_flags(param_start, 0)) != 0: 1
+                else: 0
+            let method_text = self.intern.resolve(method_sym)
+            let row = self.sema.dyn_impl_method_row(concrete_sema_ty, trait_text, method_text)
+            var fv: i64 = 0
+            var ft: i64 = 0
+            var wrapper_fn_sym = 0
+            if row >= 0:
+                let cmf = self.ensure_concrete_mir_function(0, self.sema.dyn_impl_row_sig(row), self.sema.dyn_impl_row_mono_sym(row), 0, "dyn trait method " ++ type_name ++ "." ++ method_text)
+                fv = cmf.value
+                ft = cmf.fn_type
+                wrapper_fn_sym = cmf.sym
+                used_row = 1
+            else:
+                let concrete_sym = self.intern.intern(type_name ++ "." ++ method_text)
+                let ofv = self.fn_values.get(concrete_sym)
+                let oft = self.fn_fn_types.get(concrete_sym)
+                if ofv.is_some() and oft.is_some():
+                    fv = ofv.unwrap() as i64
+                    ft = oft.unwrap() as i64
+                    wrapper_fn_sym = concrete_sym
+            if fv == 0 or ft == 0:
+                with_eprint("error: missing monomorphized trait method '" ++ type_name ++ "." ++ method_text ++ "' for trait '" ++ trait_text ++ "' (dyn generic inst)")
+                self.had_error = 1
+                return
+            var dyn_ft = ft
+            if (method_flags / FnFlags.ASYNC) % 2 == 1:
+                dyn_ft = self.dyn_trait_method_fn_type(trait_sym, method_sym)
+                if dyn_ft == 0:
+                    self.had_error = 1
+                    return
+            let wrapper = self.create_dyn_wrapper(impl_type_sym, wrapper_fn_sym, method_sym, fv, ft, dyn_ft, consumes_self)
+            entries.push(wrapper)
+        if used_row == 0:
+            return
+        let key = codegen_hash_type_trait_key(impl_type_sym, trait_sym)
+        let global_name = "__vtable_" ++ type_name ++ "_" ++ trait_text
+        let vg = wl_add_global(self.llmod, vtable_ty, global_name)
+        let vconst = wl_const_named_struct(vtable_ty, vec_data_i64(&entries), method_count)
+        wl_set_initializer(vg, vconst)
+        wl_set_global_constant(vg, 1)
+        wl_set_linkage(vg, wl_internal_linkage())
+        self.vtable_globals.insert(key, vg)
+
     mut fn generate_trait_vtables():
         for i in 0..self.pool.decl_count():
             let decl = self.pool.get_decl(i)

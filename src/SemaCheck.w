@@ -3499,6 +3499,43 @@ impl Sema:
         self.generic_subst_type_ids = saved_types
         sig_idx
 
+    // Specialize every method a trait defines for a concrete generic inst
+    // that is being dyn-erased (ref-to-dyn coercion via a blanket impl like
+    // `impl[E: Error] Error for ContextError[E]`) — the Drop/user-Deref
+    // recipe — and record (method, sig, mono) rows for codegen's vtable
+    // builder. Idempotent per (inst, trait).
+    mut fn register_dyn_impl_specializations(concrete_resolved: i32, trait_sym: i32):
+        let reg_key = sema_pair_key(concrete_resolved, trait_sym)
+        if self.dyn_impl_starts.contains(reg_key):
+            return
+        var trait_idx = -1
+        for ti in 0..self.trait_name_syms.len() as i32:
+            if self.trait_name_syms.get(ti as i64) == trait_sym:
+                trait_idx = ti
+                break
+        if trait_idx < 0:
+            return
+        let owner_sym = self.get_generic_inst_base(concrete_resolved)
+        let start = self.dyn_impl_flat_method_names.len() as i32
+        self.dyn_impl_starts.insert(reg_key, start)
+        self.dyn_impl_counts.insert(reg_key, 0)
+        let m_start = self.trait_method_starts.get(trait_idx as i64)
+        let m_count = self.trait_method_counts.get(trait_idx as i64)
+        var rows = 0
+        for mi in 0..m_count:
+            let method_sym = self.trait_method_names.get((m_start + mi) as i64)
+            let method_fn = self.lookup_generic_method_fn(owner_sym, method_sym)
+            if method_fn == 0:
+                continue
+            let sig = self.concrete_owner_method_sig(owner_sym, concrete_resolved, method_fn)
+            if sig < 0:
+                continue
+            self.dyn_impl_flat_method_names.push(method_sym)
+            self.dyn_impl_flat_sigs.push(sig)
+            self.dyn_impl_flat_mono_syms.push(self.sig_names.get(sig as i64))
+            rows = rows + 1
+        self.dyn_impl_counts.insert(reg_key, rows)
+
     mut fn record_btree_insert_contract(owner_sym: i32, owner_type: i32, anchor_node: i32) -> i32:
         let insert_sym = self.pool_lookup_symbol("insert")
         let insert_fn = if insert_sym != 0: self.lookup_generic_method_fn(owner_sym, insert_sym) else: 0
