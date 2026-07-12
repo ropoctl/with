@@ -4341,7 +4341,33 @@ impl MirBuilder:
         // contract (behav_box_drop: field access through Box[T] hit the
         // generic-contract validator).
         if self.sema.autoderef_step_counts.contains(base_expr):
-            return self.lower_recorded_autoderef_place(base_expr)
+            var rec_place = self.lower_recorded_autoderef_place(base_expr)
+            // The recorded steps stop where sema's transparent-Box special
+            // case typed the payload field directly (it records no step for
+            // the Box unwrap). A PROJECTED place left Box-typed has no
+            // field-on-box codegen path — spec_ss03_7's `&&Box[T]` field
+            // access reached codegen as `_x.*.*.f` on the Box and collapsed
+            // to `i32 undef`. Mirror the unrecorded walk's payload
+            // projection below: land on the payload, not the Box.
+            let rec_start = self.sema.autoderef_step_starts.get(base_expr).unwrap()
+            let rec_count = self.sema.autoderef_step_counts.get(base_expr).unwrap()
+            var rec_ty = self.expr_type(base_expr)
+            if rec_count > 0:
+                rec_ty = self.sema.autoderef_step_tys.get((rec_start + rec_count - 1) as i64)
+            var rec_depth = 0
+            while rec_ty > 0 and rec_depth < 8:
+                let rec_resolved = self.sema.resolve_alias(rec_ty as TypeId)
+                if self.sema.get_type_kind(rec_resolved) != TypeKind.TY_GENERIC_INST:
+                    break
+                if self.sema.type_symbol_is_std_box(self.sema.get_type_d0(rec_resolved)) == 0 or self.sema.get_generic_inst_arg_count(rec_resolved as i32) != 1:
+                    break
+                let rec_payload = self.sema.get_generic_inst_arg(rec_resolved as i32, 0)
+                if self.sema.autoderef_type_has_field_frozen(self.sema.resolve_alias(rec_payload as TypeId), field) == 0:
+                    break
+                rec_place = self.body.new_deref_place(rec_place, rec_payload)
+                rec_ty = rec_payload
+                rec_depth = rec_depth + 1
+            return rec_place
         var place = self.lower_expr_place(base_expr)
         var current_ty = self.expr_type(base_expr)
         let place_ty = self.place_local_type(place)
