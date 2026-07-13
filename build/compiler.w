@@ -795,11 +795,19 @@ fn comp_spec_internal_attributes(spec: str) -> Vec[str]:
 
 fn comp_impl_attributes(fs: &ToolFs) -> Vec[str]:
     var text = fs.read_text("src/Parser.w")
-    let start = comp_index_of(text, "fn Parser.skip_attributes")
-    if start >= 0:
-        let marker = comp_find_from(text, "fn Parser.parse_module", start)
-        if marker > start:
-            text = text.slice(start as i64, marker as i64)
+    // D7 moved these into `impl Parser` — the old `fn Parser.*` anchors
+    // stopped matching and the scan silently widened to the whole file,
+    // sweeping keyword parsers (`biased`, `where`, `@TypeOf`, ...) into the
+    // "attributes" list.
+    let start = comp_index_of(text, "mut fn skip_attributes()")
+    let marker = if start >= 0: comp_find_from(text, "mut fn parse_module()", start) else: -1
+    if start < 0 or marker <= start:
+        // Loud sentinel: an unmatched anchor renders as an unspec'd
+        // "attribute" so the inventory fails instead of silently widening.
+        var missing: Vec[str] = Vec.new()
+        missing.push("PARSER_ATTRIBUTE_WINDOW_ANCHOR_MISSING")
+        return missing
+    text = text.slice(start as i64, marker as i64)
     var attrs = comp_collect_quoted_after(text, "is_ident_named(\"")
     let more = comp_collect_quoted_after(text, "attr_text == \"")
     for i in 0..more.len() as i32:
