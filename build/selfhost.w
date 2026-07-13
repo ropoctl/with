@@ -2883,7 +2883,7 @@ fn bs_check_emit_c_receiver_abi(ctx: &ActionCtx, compiler_path: str, case_dir: s
         "type Counter {\n" ++
         "    value: i32,\n" ++
         "}\n\n" ++
-        "fn Counter.bump(mut self: Counter, amount: i32) -> Counter:\n" ++
+        "fn Counter.bump(move self: Counter, amount: i32) -> Counter:\n" ++
         "    self.value = self.value + amount\n" ++
         "    self\n\n" ++
         "fn main() -> i32:\n" ++
@@ -6440,7 +6440,7 @@ fn bs_check_std_re_shared_dependency_imports(ctx: &ActionCtx, compiler_path: str
 fn bs_check_opaque_field_access_rejected(ctx: &ActionCtx, compiler_path: str, base_dir: str) -> i32:
     let root = ctx.project_info().project_root()
     let src = bs_join(base_dir, "opaque_field_access.w")
-    var rc = bs_write_fixture(ctx, src, "type T = opaque\n\nfn f(p: *mut T):\n    (p.x = 1)\n\nfn main:\n    let _ = 0\n", "opaque field access")
+    var rc = bs_write_fixture(ctx, src, "type T = opaque\n\nunsafe fn f(p: *mut T):\n    unsafe { p.x = 1 }\n\nfn main:\n    let _ = 0\n", "opaque field access")
     if rc != 0: return rc
     var args: Vec[str] = Vec.new()
     args |> push("check")
