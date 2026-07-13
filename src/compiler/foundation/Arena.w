@@ -38,7 +38,7 @@ impl Arena:
 
     pub fn len(): self.slots.len() as i32
 
-    pub mut fn alloc_i32(value: i32):
+    pub mut fn alloc_i32(value: i32) -> ArenaId:
         let id = arena_id_from_raw(self.slots.len() as i32)
         self.slots.push(ArenaSlot {
             kind: ARENA_SLOT_I32(),
@@ -47,7 +47,7 @@ impl Arena:
         })
         id
 
-    pub mut fn alloc_str(value: str):
+    pub mut fn alloc_str(value: str) -> ArenaId:
         let id = arena_id_from_raw(self.slots.len() as i32)
         self.slots.push(ArenaSlot {
             kind: ARENA_SLOT_STR(),
@@ -56,23 +56,23 @@ impl Arena:
         })
         id
 
-    pub fn contains(id: ArenaId):
+    pub fn contains(id: ArenaId) -> bool:
         if not arena_id_is_valid(id):
             return false
         let raw = arena_id_raw(id)
         raw > 0 and raw < self.slots.len() as i32
 
-    pub fn kind(id: ArenaId):
+    pub fn kind(id: ArenaId) -> i32:
         if not self.contains(id):
             return ARENA_SLOT_EMPTY()
         self.slots.get(arena_id_raw(id) as i64).kind
 
-    pub fn get_i32(id: ArenaId):
+    pub fn get_i32(id: ArenaId) -> i32:
         if self.kind(id) != ARENA_SLOT_I32():
             return 0
         self.slots.get(arena_id_raw(id) as i64).int_value
 
-    pub fn get_str(id: ArenaId):
+    pub fn get_str(id: ArenaId) -> str:
         if self.kind(id) != ARENA_SLOT_STR():
             return ""
         self.slots.get(arena_id_raw(id) as i64).str_value

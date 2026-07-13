@@ -72,7 +72,7 @@ impl DiagnosticStore:
 
     pub fn count(): self.items.len() as i32
 
-    pub fn count_by_severity(severity: i32):
+    pub fn count_by_severity(severity: i32) -> i32:
         var n = 0
         for i in 0..self.items.len() as i32:
             if self.items.get(i as i64).severity == severity:

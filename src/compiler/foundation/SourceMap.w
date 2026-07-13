@@ -21,7 +21,7 @@ pub fn SourceMap.init -> SourceMap:
     sm
 
 impl SourceMap:
-    pub mut fn add_source_text(path: str, text: str):
+    pub mut fn add_source_text(path: str, text: str) -> FileId:
         let existing = self.path_index.get(path)
         if existing.is_some():
             return file_id_from_raw(existing.unwrap())
@@ -32,7 +32,7 @@ impl SourceMap:
         self.sources.push(Source.from_string(path, text, id))
         id
 
-    pub mut fn add_source_file(path: str):
+    pub mut fn add_source_file(path: str) -> FileId:
         let existing = self.path_index.get(path)
         if existing.is_some():
             return file_id_from_raw(existing.unwrap())
@@ -43,23 +43,23 @@ impl SourceMap:
         self.sources.push(Source.from_file(path, id))
         id
 
-    pub fn contains(file_id: FileId):
+    pub fn contains(file_id: FileId) -> bool:
         if not file_id_is_valid(file_id):
             return false
         let raw = file_id_raw(file_id)
         raw >= 0 and raw < self.sources.len() as i32
 
-    pub fn get_source(file_id: FileId):
+    pub fn get_source(file_id: FileId) -> Source:
         if not self.contains(file_id):
             return self.sources.get(0)
         self.sources.get(file_id_raw(file_id) as i64)
 
-    pub fn offset_to_location(file_id: FileId, offset: i32):
+    pub fn offset_to_location(file_id: FileId, offset: i32) -> SourceLocation:
         if not self.contains(file_id):
             return SourceLocation { line: 0, col: 0 }
         self.get_source(file_id).offset_to_location(offset)
 
-    pub fn line_text(file_id: FileId, line: i32):
+    pub fn line_text(file_id: FileId, line: i32) -> str:
         if not self.contains(file_id):
             return ""
         self.get_source(file_id).line_text(line)
