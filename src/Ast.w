@@ -482,6 +482,10 @@ type AstPoolState {
     // index of the pre-reserved `collection.contains(x)` argument. Allocated at
     // parse time because the pool freezes before MIR lowering (#234, §9.9).
     membership_arg_map: HashMap[i32, i32],
+    // (parent for/comprehension node, binding value) pairs the parser built
+    // as PATTERN bindings; absent = plain symbol binding. See
+    // for_binding_is_pattern.
+    pattern_binding_keys: HashMap[i64, i32],
     type_meta_map: HashMap[i32, i32],
     pattern_qualifier_map: HashMap[i32, i32],
     where_meta_map: HashMap[i32, i32],
@@ -568,6 +572,7 @@ fn AstPool.new -> AstPool:
             impl_trait_type_args: Vec.new(),
             fn_meta_map: HashMap.new(),
             membership_arg_map: HashMap.new(),
+            pattern_binding_keys: HashMap.new(),
             type_meta_map: HashMap.new(),
             pattern_qualifier_map: HashMap.new(),
             where_meta_map: HashMap.new(),
@@ -1553,6 +1558,8 @@ impl AstPool:
     fn block_meta_label(meta: i32) -> i32:
         self.state.block_meta.get((meta + 1) as i64)
 
+fn ast_pattern_binding_key(parent: i32, binding: i32): (parent as i64) * 4294967296 + (binding as i64)
+
 fn ast_is_pattern_kind(kind: i32) -> bool:
     kind == NodeKind.NK_PAT_WILDCARD or
     kind == NodeKind.NK_PAT_IDENT or
@@ -1577,30 +1584,33 @@ impl AstPool:
             return false
         ast_is_pattern_kind(self.kind(node as NodeId))
 
+    // NK_FOR / comprehension binding slots hold an untagged union: a plain
+    // binding stores the SYMBOL id, a pattern binding stores the pattern
+    // NODE id. The parser records which case it built (key = parent,binding).
+    // Probing the pool to guess — the old heuristic — broke whenever a
+    // symbol id collided with a pattern-kinded node id whose span happened
+    // to overlap numerically (#660: interning one new symbol in Sema.w
+    // flipped a plain for-binding in CodegenTraits.w into a pattern match,
+    // unbinding the loop variable).
+    fn mark_pattern_binding(parent: NodeId, binding: i32):
+        self.state.pattern_binding_keys.insert(ast_pattern_binding_key(parent as i32, binding), 1)
+
+    fn has_pattern_binding(parent: NodeId, binding: i32) -> bool:
+        self.state.pattern_binding_keys.contains(ast_pattern_binding_key(parent as i32, binding))
+
     fn for_binding_is_pattern(node: NodeId) -> bool:
         if node <= 0 or node >= self.node_count():
             return false
         if self.kind(node) != NodeKind.NK_FOR:
             return false
-        let binding = self.get_data0(node)
-        if not self.is_pattern_node(binding):
-            return false
-        let bind_node = binding as NodeId
-        let for_start = self.get_start(node)
-        let for_end = self.get_end(node)
-        self.get_start(bind_node) >= for_start and self.get_end(bind_node) <= for_end
+        self.has_pattern_binding(node, self.get_data0(node))
 
     fn comprehension_binding_is_pattern(node: NodeId, binding: i32) -> bool:
         if node <= 0 or node >= self.node_count():
             return false
         if self.kind(node) != NodeKind.NK_ARRAY_COMPREHENSION and self.kind(node) != NodeKind.NK_MAP_COMPREHENSION:
             return false
-        if not self.is_pattern_node(binding):
-            return false
-        let bind_node = binding as NodeId
-        let comp_start = self.get_start(node)
-        let comp_end = self.get_end(node)
-        self.get_start(bind_node) >= comp_start and self.get_end(bind_node) <= comp_end
+        self.has_pattern_binding(node, binding)
 
 // ── Node Data Layout Reference ───────────────────────────────────
 //

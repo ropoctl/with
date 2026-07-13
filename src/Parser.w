@@ -5728,9 +5728,11 @@ impl Parser:
         self.skip_newlines()
         var binding = 0
         var index_binding = 0
+        var binding_is_pat = 0
 
         if self.for_binding_should_parse_pattern():
             binding = self.parse_pattern() as i32
+            binding_is_pat = 1
         else:
             binding = self.expect_ident()
             if self.peek() == TokenKind.TK_COMMA:
@@ -5753,6 +5755,8 @@ impl Parser:
 
         var for_node = self.pool.add_node(NodeKind.NK_FOR, start, self.prev_end(), binding, iterable, body)
         self.pool.add_for_meta(for_node, index_binding, label)
+        if binding_is_pat != 0:
+            self.pool.mark_pattern_binding(for_node, binding)
 
         // Parse optional else: clause: for x in iter: ... else: ...
         // Only match else: at the same column as the for keyword.
@@ -5778,6 +5782,8 @@ impl Parser:
             // Rebuild for node with wrapped body
             for_node = self.pool.add_node(NodeKind.NK_FOR, start, self.prev_end(), binding, iterable, wrapped_body)
             self.pool.add_for_meta(for_node, index_binding, label)
+            if binding_is_pat != 0:
+                self.pool.mark_pattern_binding(for_node, binding)
             // Build: if not __for_ran: else_body
             let flag_read = self.pool.add_node(NodeKind.NK_IDENT, start, start, flag_sym, 0, 0)
             let not_flag = self.pool.add_node(NodeKind.NK_UNARY, start, start, 1, flag_read, 0)
@@ -6936,7 +6942,10 @@ impl Parser:
                             self.pool.add_extra(patterns.get(ci as i64))
                             self.pool.add_extra(iterables.get(ci as i64))
                             self.pool.add_extra(if ci == clause_count - 1: filter as i32 else: 0)
-                        return self.pool.add_node(NodeKind.NK_MAP_COMPREHENSION, start, self.prev_end(), comp_extra_start, clause_count, 0)
+                        let map_comp_node = self.pool.add_node(NodeKind.NK_MAP_COMPREHENSION, start, self.prev_end(), comp_extra_start, clause_count, 0)
+                        for pci in 0..clause_count:
+                            self.pool.mark_pattern_binding(map_comp_node, patterns.get(pci as i64))
+                        return map_comp_node
                     values.push(value_expr as i32)
                     self.skip_newlines()
                     if self.peek() != TokenKind.TK_COMMA:
@@ -7008,7 +7017,10 @@ impl Parser:
                     self.pool.add_extra(patterns.get(ci as i64))
                     self.pool.add_extra(iterables.get(ci as i64))
                     self.pool.add_extra(if ci == clause_count - 1: filter as i32 else: 0)
-                return self.pool.add_node(NodeKind.NK_ARRAY_COMPREHENSION, start, self.prev_end(), first, extra_start, clause_count)
+                let arr_comp_node = self.pool.add_node(NodeKind.NK_ARRAY_COMPREHENSION, start, self.prev_end(), first, extra_start, clause_count)
+                for pci in 0..clause_count:
+                    self.pool.mark_pattern_binding(arr_comp_node, patterns.get(pci as i64))
+                return arr_comp_node
 
             elems.push(first as i32)
 
