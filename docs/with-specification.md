@@ -11616,7 +11616,9 @@ not marked internal is invalid.
 `@[before]`, `@[after]`, `@[stack_size]`, `@[callconv]`,
 `@[compiler_hook]`, `@[packed]`, `@[weak]`. These exist for compiler,
 test harness, migrator/runtime, and stdlib development, may change or
-vanish without notice, and are not part of the language.
+vanish without notice, and are not part of the language. The
+type-position operator `@TypeOf(expr)` (compile-time type of an
+expression) is likewise implementation-internal and unstable.
 
 ---
 

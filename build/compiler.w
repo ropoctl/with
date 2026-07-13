@@ -739,10 +739,15 @@ fn comp_collect_attr_names(items: Vec[str], text: str) -> Vec[str]:
     var out = items
     var start = 0
     while start < text.len() as i32:
-        let at = comp_find_from(text, "@[", start)
+        // Accept `@[name]` attributes and the bare `@Name` type-operator
+        // form (`@TypeOf(expr)`) so the internal-unstable list can carry
+        // both spellings.
+        let at = comp_find_from(text, "@", start)
         if at < 0:
             break
-        let name_start = at + 2
+        var name_start = at + 1
+        if name_start < text.len() as i32 and text.byte_at(name_start as i64) == 91:
+            name_start = name_start + 1
         if name_start < text.len() as i32 and comp_is_ident_start(text.byte_at(name_start as i64)):
             var name_end = name_start + 1
             while name_end < text.len() as i32 and comp_is_ident_continue(text.byte_at(name_end as i64)):
@@ -752,7 +757,7 @@ fn comp_collect_attr_names(items: Vec[str], text: str) -> Vec[str]:
                 out.push(item)
             start = name_end
         else:
-            start = at + 2
+            start = at + 1
     out
 
 fn comp_spec_keywords(spec: str) -> Vec[str]:
