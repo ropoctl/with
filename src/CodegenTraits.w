@@ -718,14 +718,30 @@ impl Codegen:
                     if dtm_tt > 0:
                         dtm_p_sema_ty = dtm_tt
                 if dtm_p_sema_ty == self.sema.ty_i32:
-                    let dtm_pk = self.pool.kind(dtm_p_type_node)
+                    // `self: &Self` (and `&T` generally) is an NK_TYPE_REF
+                    // wrapper; registering the receiver as ty_i32 made the
+                    // synthesized body's method-call marshalling read the
+                    // receiver through one extra indirection (spec_ss11_6:
+                    // "Ada\0" bytes folded as a str pointer).
+                    var dtm_tn = dtm_p_type_node
+                    var dtm_is_ref = 0
+                    if self.pool.kind(dtm_tn) == NodeKind.NK_TYPE_REF:
+                        dtm_is_ref = 1
+                        dtm_tn = self.pool.get_data0(dtm_tn)
+                    let dtm_pk = self.pool.kind(dtm_tn)
                     if dtm_pk == NodeKind.NK_TYPE_NAMED or dtm_pk == NodeKind.NK_IDENT:
-                        let dtm_type_sym = self.pool.get_data0(dtm_p_type_node)
+                        var dtm_type_sym = self.pool.get_data0(dtm_tn)
+                        if dtm_type_sym == self.sym_Self:
+                            dtm_type_sym = impl_type_sym
                         let dtm_prim = self.sema.primitive_type_by_sym(dtm_type_sym)
                         if dtm_prim != 0:
                             dtm_p_sema_ty = dtm_prim as i32
                         else if self.sema.named_types.contains(dtm_type_sym):
                             dtm_p_sema_ty = self.sema.named_types.get(dtm_type_sym).unwrap()
+                        if dtm_is_ref != 0 and dtm_p_sema_ty != self.sema.ty_i32 as i32:
+                            let dtm_ref_ty = self.sema.find_exact_type(TypeKind.TY_REF, dtm_p_sema_ty, self.pool.get_data1(dtm_p_type_node), 0) as i32
+                            if dtm_ref_ty != 0:
+                                dtm_p_sema_ty = dtm_ref_ty
             let dtm_p_local = dtm_builder.body.new_local(dtm_p_sema_ty, 1, dtm_p_name, 1)
             dtm_builder.bind_local(dtm_p_name, dtm_p_local)
 
@@ -800,6 +816,11 @@ impl Codegen:
                             let _ = wl_build_ret_void(self.builder)
                         else:
                             let _ = wl_build_ret(self.builder, wl_const_int(final_ret_ty, 0, 0))
+
+        // Synthesized bodies must pass the same cleanup + verification as
+        // every other function — an invalid synthesized default method
+        // previously shipped silently and crashed at runtime (spec_ss11_6).
+        self.run_mir_cleanup_passes(function, mangled)
 
         // Restore MIR state
         self.mir_local_ptrs = saved_mir_locals
