@@ -6498,12 +6498,19 @@ fn bs_check_pcre2_jit_no_support(ctx: &ActionCtx, compiler_path: str, base_dir: 
     let text = "use std.re.defs\nuse std.re.pcre2_jit_compile\n\nfn main() -> i32:\n    let rc_null = pcre2_jit_compile_8((null as *mut pcre2_real_code_8), 0)\n    if rc_null != PCRE2_ERROR_NULL: return 1\n\n    let rc_test_alloc = pcre2_jit_compile_8((null as *mut pcre2_real_code_8), PCRE2_JIT_TEST_ALLOC)\n    if rc_test_alloc != PCRE2_ERROR_JIT_UNSUPPORTED: return 2\n\n    let stack = pcre2_jit_stack_create_8(1, 1024, (null as *mut pcre2_real_general_context_8))\n    if stack != null: return 3\n\n    pcre2_jit_stack_assign_8((null as *mut pcre2_real_match_context_8), (null as *const fn(*mut c_void) -> *mut pcre2_real_jit_stack_8), (null as *mut c_void))\n    pcre2_jit_stack_free_8(stack)\n    pcre2_jit_free_unused_memory_8((null as *mut pcre2_real_general_context_8))\n    _pcre2_jit_free_rodata_8((null as *mut c_void), (null as *mut c_void))\n    _pcre2_jit_free_8((null as *mut c_void), (null as *mut pcre2_memctl))\n\n    if _pcre2_jit_get_size_8((null as *mut c_void)) != 0: return 4\n    if _pcre2_jit_get_target_8() == null: return 5\n    return 0\n"
     var rc = bs_write_fixture(ctx, src, text, "pcre2 jit no support")
     if rc != 0: return rc
+    // The migrated pcre2 jit surface is module-private (no pub); external
+    // code must be REJECTED. This case used to expect success — which only
+    // ever held while the pre-#660 pattern-binding corruption silently
+    // disabled visibility checks here — so it now guards the privacy
+    // enforcement instead. Re-testing the jit-unsupported contract needs a
+    // pub surface from the migrator: #662.
     var args: Vec[str] = Vec.new()
-    args |> push("run")
+    args |> push("check")
     args |> push(bs_abs(root, src))
-    let result = bs_pcre2_expect_success(ctx, compiler_path, base_dir, "pcre2-jit-no-support", args)
-    if result.rc != 0: return result.rc
-    0
+    let result = bs_run_cli_capture_cwd(ctx, compiler_path, "pcre2-jit-no-support", args, 120000, base_dir)
+    if result.rc == 0:
+        return bs_fail(ctx, "private pcre2 jit symbols were visible to external code")
+    bs_assert_contains(ctx, result.stderr, "is private to module", "pcre2_jit_no_support")
 
 fn bs_check_pcre2_generated_existing_main(ctx: &ActionCtx, case_dir: str) -> i32:
     let generated_dir = bs_join(case_dir, "generated")
