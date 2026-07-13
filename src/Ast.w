@@ -484,8 +484,10 @@ type AstPoolState {
     membership_arg_map: HashMap[i32, i32],
     // (parent for/comprehension node, binding value) pairs the parser built
     // as PATTERN bindings; absent = plain symbol binding. See
-    // for_binding_is_pattern.
+    // for_binding_is_pattern. The Vec mirrors the map in insertion order so
+    // pool clones (ComptimeTransform) can copy it deterministically.
     pattern_binding_keys: HashMap[i64, i32],
+    pattern_binding_pairs: Vec[i64],
     type_meta_map: HashMap[i32, i32],
     pattern_qualifier_map: HashMap[i32, i32],
     where_meta_map: HashMap[i32, i32],
@@ -573,6 +575,7 @@ fn AstPool.new -> AstPool:
             fn_meta_map: HashMap.new(),
             membership_arg_map: HashMap.new(),
             pattern_binding_keys: HashMap.new(),
+            pattern_binding_pairs: Vec.new(),
             type_meta_map: HashMap.new(),
             pattern_qualifier_map: HashMap.new(),
             where_meta_map: HashMap.new(),
@@ -1593,7 +1596,13 @@ impl AstPool:
     // flipped a plain for-binding in CodegenTraits.w into a pattern match,
     // unbinding the loop variable).
     fn mark_pattern_binding(parent: NodeId, binding: i32):
-        self.state.pattern_binding_keys.insert(ast_pattern_binding_key(parent as i32, binding), 1)
+        self.mark_pattern_binding_pair(ast_pattern_binding_key(parent as i32, binding))
+
+    fn mark_pattern_binding_pair(pair: i64):
+        if self.state.pattern_binding_keys.contains(pair):
+            return
+        self.state.pattern_binding_keys.insert(pair, 1)
+        self.state.pattern_binding_pairs.push(pair)
 
     fn has_pattern_binding(parent: NodeId, binding: i32) -> bool:
         self.state.pattern_binding_keys.contains(ast_pattern_binding_key(parent as i32, binding))

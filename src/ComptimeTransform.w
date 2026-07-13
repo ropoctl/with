@@ -106,6 +106,9 @@ fn astpool_clone_deep(src: AstPool) -> AstPool:
         )
         for_meta = for_meta + 3
 
+    for pbi in 0..src.state.pattern_binding_pairs.len() as i32:
+        out.mark_pattern_binding_pair(src.state.pattern_binding_pairs.get(pbi as i64))
+
     var block_meta = 0
     while block_meta < src.state.block_meta.len() as i32:
         out.add_block_meta(
@@ -724,6 +727,8 @@ impl AstPool:
             let for_meta = self.find_for_meta(node)
             if for_meta >= 0:
                 self.add_for_meta(cloned as NodeId, self.for_meta_index_binding(for_meta), self.for_meta_label(for_meta))
+            if self.for_binding_is_pattern(node as NodeId):
+                self.mark_pattern_binding(cloned as NodeId, self.get_data0(node))
             return cloned
 
         if kind == NodeKind.NK_BREAK:
