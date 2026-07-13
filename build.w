@@ -622,8 +622,20 @@ fn issue61_regression_action(ctx: ActionCtx) -> i32:
 
     let sema_path = build_project_join(repo_copy, "src/SemaCheck.w")
     let sema_text = fs.read_text(sema_path)
-    let marker = "    // Check all arguments (with expected-type propagation for Atomic ordering params)"
-    let replacement = marker ++ "\n    var mc_issue61_padding_local: i32 = 0"
+    // Find the marker line and copy ITS leading whitespace for the injected
+    // local: a fixed-indent splice rots when the surrounding code nests
+    // deeper (the 4-space injection dedented out of the enclosing block and
+    // the canary spent months red on a parse error instead of its real job).
+    let marker_comment = "// Check all arguments (with expected-type propagation for Atomic ordering params)"
+    let marker_at = sema_text.find(marker_comment)
+    if marker_at < 0:
+        return issue61_fail(ctx, "missing insertion point in " ++ sema_path)
+    var indent_start = marker_at
+    while indent_start > 0 and sema_text.byte_at((indent_start - 1) as i64) != 10:
+        indent_start = indent_start - 1
+    let indent = sema_text.slice(indent_start as i64, marker_at as i64)
+    let marker = indent ++ marker_comment
+    let replacement = marker ++ "\n" ++ indent ++ "var mc_issue61_padding_local: i32 = 0"
     let patched = build_replace_once(sema_text, marker, replacement)
     if patched.len() == 0:
         return issue61_fail(ctx, "missing insertion point in " ++ sema_path)
