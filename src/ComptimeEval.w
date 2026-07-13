@@ -2806,6 +2806,19 @@ impl ComptimeEvaluator:
             if old_signal.value.kind != ComptimeValueKind.CV_STR or new_signal.value.kind != ComptimeValueKind.CV_STR:
                 return self.fail(node, "str.replace() arguments must be strings")
             return comptime_control_value(comptime_value_str(with_str_replace(text, old_signal.value.text, new_signal.value.text)))
+        if method == "split":
+            if arg_count != 1:
+                return self.fail(node, "str.split() expects exactly one argument")
+            let sep_signal = self.eval_expr(self.ast.get_extra(extra_start))
+            if sep_signal.kind != ComptimeControlKind.CTL_VALUE:
+                return sep_signal
+            if sep_signal.value.kind != ComptimeValueKind.CV_STR:
+                return self.fail(node, "str.split() separator must be a string")
+            let pieces = text.split(sep_signal.value.text)
+            let start = self.extra_values.len() as i32
+            for i in 0..pieces.len() as i32:
+                self.extra_values.push(comptime_value_str(pieces.get(i as i64)))
+            return comptime_control_value(comptime_value_vec(self.node_type_or(node, 0), start, pieces.len() as i32))
         self.fail(node, "str method '" ++ method ++ "' is not comptime-evaluable yet")
 
     mut fn eval_resolved_method_call(fn_sym: i32, recv_value: ComptimeValue, extra_start: i32, arg_count: i32, node: i32) -> ComptimeControl:
