@@ -5804,6 +5804,12 @@ impl ComptimeEvaluator:
             if truthy < 0:
                 return self.fail(node, "logical not requires bool or integer comptime values")
             return comptime_control_value(comptime_value_bool(if truthy == 0: 1 else: 0))
+        if op == UnaryOp.UOP_DEREF or op == UnaryOp.UOP_REF:
+            // Comptime values are pure values (no reference kind), so `*x`
+            // and `&x` in value position are identity — e.g. std.build's
+            // `var out = *self` copying an &Self receiver
+            // (build-w-comptime-with-canonical hit this as unsupported).
+            return comptime_control_value(inner.value)
         self.unsupported(node)
 
     mut fn eval_binary_compare(node: i32, op: i32, lhs: ComptimeValue, rhs: ComptimeValue) -> ComptimeControl:
