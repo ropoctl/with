@@ -1,746 +1,686 @@
-# Handoff: D7 Eliminate-Self Flag Day and Integrated Analysis
-
-Updated 2026-07-10 (end of day). Supersedes the morning and mid-afternoon
-2026-07-10 handoffs at this path.
-
-## Executive Status
-
-- Branch: `main`. The D7 campaign is **committed and pushed** through
-  `01a79221` (seven commits on 2026-07-10); the box_drop codegen +
-  reset-on-move fixes below are the only uncommitted delta, awaiting gate
-  chain six.
-- **The integrated audit gate is GREEN on the migrated tree:**
-
-  ```
-  /tmp/with-analysis-fixed analyze src/main.w audit:all
-  compiler-analysis-audit: facts=2,077,276 violations=0 ok
-  ```
-
-  Key notes from the green run: method-registration methods=3765
-  inherent=3765 extensions=0 **missing=0**; impl-blocks=344 extend-blocks=0
-  provenance=parser-owned; receiver-projection mismatches=0;
-  **return-consistency: 8,948 unit-return calls checked, 0 dest-mismatches,
-  0 unit-switches** (the whole compiler tree is free of the #653 silent-undef
-  class); traits=27 trait-methods=32.
-- Every handoff-C completion outcome is met except the one that is a
-  maintainer decision: the exact trait-receiver list is produced (below) and
-  awaits the instance-vs-associated syntax ruling.
-- The morning's object-emission blocker was resolved as non-reproducible
-  (LLDB evidence recorded; two green builds; byte-identical binaries), and
-  the backend artifact invariant now makes any recurrence loud.
-
-## Root Causes Fixed Today (all uncommitted, in the dirty tree)
-
-1. **`CreateAlloca(void)` trap in analyze-path codegen.** LLDB-proven
-   (TypeID byte 7 at the trap). The default-trait-method fallback, the
-   async-block trampoline, and the module-initializer thunk all allocated
-   the return slot without the canonical void→dead-i32 policy used by the
-   normal MIR emitter. Fixed at all three sites
-   (`src/CodegenTraits.w` ×2, `src/CodegenDispatch.w` ×1).
-2. **Extern share-place violations (`clang_getTokenSpelling` ×4).** Two-part
-   fix: `impl Copy for CXToken` in `src/compiler/ClangBridge.w` (it was the
-   only CX POD missing Copy — Copy PODs never enter share-place
-   classification), and the share-place audits in `src/Codegen.w` now exempt
-   extern "C" callees from the ref-table failure verdicts while keeping the
-   facts (`value_ref_abi` on externs still truthfully records caller-retains
-   ownership; the C ABI decides the mechanical shape — D5/D6).
-3. **Untyped ownership-terminator place (`clang_str_to_with`).** Reduced to
-   an 18-line repro: an `extern fn` with no return annotation got sig return
-   `resolve_type_expr(0)` = TY_ERR, leaving the MIR call destination local
-   untyped. Fixed in `src/SemaDecl.w` `collect_extern_fn` (`ret_node==0 →
-   ty_void`, matching the no-meta branch) and the same guard on
-   `NK_TYPE_FN`/`NK_TYPE_EXTERN_FN` resolvers in `src/SemaCheck.w` (mutable
-   and frozen twins — the twins must intern identical types).
-4. **`not`-condition temps typed Unit in MIR.** Discovered by the new
-   return-consistency audit: `assert`/`require`/`check`/`Regex.replace_impl`
-   all carried `switchInt` subjects typed Unit because
-   `MirLower.fallback_expr_type` had no `UOP_NOT`/`UOP_NEGATE`/`UOP_BIT_NOT`
-   cases (the `typed_expr_types` sidecar does not record unary nodes; the
-   fallback is the authority). Fixed in `src/MirLower.w` mirroring
-   `check_unary`'s rules, plus `NK_UNARY` added to the recorded-unit
-   exemption list in `expr_type`. Functionally benign before (codegen emits
-   i1 regardless) but a typed-MIR violation indistinguishable from the
-   lethal class.
-
-## New Detector: `audit:returns` (Tool Gap #4 — DONE)
-
-Two legs, both wired into `audit:returns` and `audit:all`:
-
-- **MIR leg** (`src/Analysis.w` `analysis_audit_return_consistency`):
-  (a) call destinations typed non-void while the callee signature returns
-  Unit; (b) `switchInt` subjects typed Unit — "branch on a value that cannot
-  exist," which is exactly how a wrongly Unit-inferred callee (#653)
-  detonates. Self-test: on the #653 repro it reports precisely the one
-  genuine violation (`main`'s switch on a unit call result) and nothing else.
-- **Codegen leg** (`src/Codegen.w` `audit_return_shape_contracts`, called
-  from `Zcu.analyze_codegen_backend`): value-returning Sema signatures
-  emitted as LLVM void without sret; extern/async/generator/sret exempt.
-
-Renderer, dispatcher, help text, and the audit lists in `CLAUDE.md` /
-`AGENTS.md` all know the new request. `docs/deep-debugging-tools.md` gained
-a section of proven batch-LLDB recipes for compiler binaries.
-
-## Trait-Receiver List (maintainer decision input — do not decide silently)
-
-From `select:kind=declaration` trait facts on the green run, 32 trait
-methods across 27 traits:
-
-- **24 explicit `self` read receivers**: Add.add, Clone.clone,
-  Contains.contains, Debug.debug_str, Deref.deref, Display.to_str, Div.div,
-  Eq.eq, Error.display, Error.source, Hash.hash_value, IndexGet.get,
-  IndexPlace.get, MatMul.matmul, Mul.mul, MultiIndex.multi_index, Neg.neg,
-  Ord.cmp, Scoped.with_enter, Scoped.with_exit, ScopedMut.with_enter_mut,
-  Sub.sub, ToString.to_string.
-- **6 keyword-migrated**: IndexPlace.set (mut), IntoIter.iter (mut),
-  Iter.next (mut), MultiIndexMut.multi_index_set (mut),
-  ScopedMut.with_exit_mut (mut), Try.branch (move).
-- **2 associated functions**: Default.default, Try.from_break.
-- **Drop.drop**: was the bare-self spelling (`fn drop(self)`); migrated to
-  `move fn drop() -> Unit` per §2.4 ("the only destructor receiver mode").
-  All 179 `impl Drop for` sites already spelled `move fn drop()`.
-
-**RESOLVED — this was already ruled, not an open question.** The D7 session's
-ruling (recorded 2026-07-07/08, now written into `docs/decisions.md` D7 and
-`docs/eliminate-self.md` §5): **in a `trait` body only `mut fn`/`move fn`
-synthesise; plain `fn` keeps the explicit spelling** — with a receiver param
-it is an instance contract, without one it is associated. Traits are
-library-maintainer tier, so the residual ceremony lands on the right
-audience. The 24 explicit read receivers and 2 plain associated contracts
-above are therefore the **ruling-compliant end state**, not unfinished
-migration. The ruling previously lived only in session memory
-(`project_eliminate_self.md`) and was nearly re-litigated twice — hence the
-doc backfill. Raw TSV: session scratchpad `trait-receivers.tsv`.
-
-## Compiler Bugs Filed (pre-existing at HEAD, repro'd on v0.15.1)
-
-- **#653** — unannotated fn with early `return <value>` finalizes as Unit;
-  callers branch on undef; silent SIGTRAP. The new `audit:returns` catches
-  the call-site shape. Workaround: explicit return annotations.
-- **#654** — `if`/`while` condition types never checked
-  (`SemaCheck.w` `check_if_expr` discards the cond type). This is what lets
-  #653 survive to codegen.
-
-## Verification State (end of day)
-
-- Bridge check of the full dirty tree: `ok`. `audit:all`: **violations=0**
-  (2,077,372 facts, migrated stdlib embedded).
-- **First gate run:** build PASSED, **`:fixpoint` PASSED** (stage2 == stage3
-  byte-identical on the migrated tree), `:test` failed only the two
-  `std.build`-compiling capability tests → root-caused to the un-swept
-  `lib/std/build.w` + driver files (sections above), all repaired.
-- After repairs: `with build --dry-run` under full enforcement: clean; both
-  capability tests: `ok` (they are cwd-sensitive — run from repo root);
-  nested package builds green under the new compiler.
-- **Second full gate chain (build → :fixpoint → :test) launched** with all
-  repairs — the campaign completion gate. If green: the one-chain bootstrap
-  (`:test-green → :last-green → :update-seed → :install-user`) is next,
-  minding the reseed-convergence rule (bake the seed from the CONVERGED
-  new-compiler build).
-- Reduced repros: `cxstr-own.w --validate-all` ok; #653 repro flagged by
-  `audit:returns` with exactly one violation (detector self-test).
-
-### Trait-method record stride drift (root-caused + fixed, evening 2026-07-10)
-
-With the regenerated (migrated) prelude embedded, **every user program failed
-codegen** (`[type-resolve] unhandled type node …` twice, then "code
-generation failed") while compiler self-compilation stayed green. Root cause:
-the campaign widened the trait-method extra record from 6 to 8 slots
-(parser-owned SOURCE_START/SOURCE_END spans; `TRAIT_METHOD_STRIDE = 8` in
-`src/Ast.w`) and updated Parser/Sema/ComptimeTransform — but
-`CodegenTraits.collect_trait_info` still hand-walked 6 slots per method, so
-every method after the first read misaligned garbage (its "ret_node" was a
-neighbouring method's field; the bogus node ids decoded as arbitrary
-expression nodes — `explain:node:` on the live pool was the identifying
-tool). The old embedding masked it: pre-migration prelude shapes never
-steered the default-trait-method generator through the corrupted rows.
-Fixed by reading the records through the canonical
-`AstPool.trait_method_field` accessors (single source of truth; no other
-hand-walk exists — swept). Note for the toolset: codegen's trait tables
-(`trait_method_*`, vtables, `find_trait_method_offset`) had **no audit
-coverage** — that is why five green `audit:all` runs missed it; an
-`audit:trait-tables` comparing codegen's collected rows against the AST
-accessors is the systematic detector to add.
-
-### std/build.w enforcement debt (root-caused + fixed, late 2026-07-10)
-
-First full gate run: build PASSED, **`:fixpoint` PASSED (stage2 == stage3 on
-the migrated tree)**, `:test` failed on exactly two tests —
-`behav_action_capability_filesystem/process` — the only tests that compile
-`std.build` (they drive nested `with build` package runs). The nested child
-failed with receiver/ownership enforcement errors inside
-`<embedded-std>/std/build.w`. Root cause: **`lib/std/build.w` is compiled by
-no gate except those two tests** (the compiler's own `build.w` is evaluated
-by the DRIVER, whose old embedded std predates enforcement), so the receiver
-flag-day never swept it: 17 builder methods were `mut self: Target/Build`
-transition forms whose bodies consume (must be `move`), plus 26 call sites
-missing `move` on consumed args (tar/gzip append helpers). Fixed by a
-count-verified one-shot With repair
-(`scratchpad/fix_buildstd.w`, 43 edits, probe re-check = 0 errors).
-
-Follow-on findings while fixing: (a) the compiler's own driver files
-(`build.w` root + `build/emit_c.w`, `build/sdk.w`, `build/selfhost.w`)
-carried 30 more §3.8 sites — fixed by `scratchpad/fix_buildsys.w`
-(count-verified). (b) The 17 flipped builder methods mutated fields through
-`move self` (owned but immutable) — rewritten to the file's `var out = self`
-rebind idiom (`scratchpad/fix_builders.w`). (c) **Open inconsistency:** the
-plain module probe (`check` of a probe importing the module) accepted the
-assign-through-owned-`self` bodies; the driver's build-wrapper compilation
-rejected them ("cannot assign to field of immutable value", printed with no
-span — diagnostic also needs a location). Two Sema configurations disagree
-on place-mutability legality; needs a ruling on which is right and a fix for
-the span-less rendering.
-
-**Blind-spot lesson (twofold):** (1) analyzer facts and `migrate-receivers`
-are computed from the `src/main.w` entrypoint — modules only reachable from
-user programs (`std.build`) are invisible to audits and migrators; audit
-entrypoints must also cover a probe that imports the full std surface.
-(2) The gate chain's driver evaluates root `build.w` against the DRIVER's
-embedded std — a reseeded compiler would have failed to run `with build` at
-all. After any std/build change, verify with the NEW binary:
-`<new> build --dry-run` in the repo root.
-
-### sizeof[T] in monomorphized generics compiled to 0 (root-caused + fixed, night 2026-07-10)
-
-Second gate run went green except `behav_arena_vec.w` — every
-`arena_vec_push` silently stored nothing. Reduced to 16 lines: inside a
-monomorphized generic, `sizeof[T]()` emitted `i64 0` (IR-proven: memcpy
-size 0; Sema/MIR/ABI all correct). Worktree bisect exonerated the stride
-fix and the Drop def flip, then proved the **pure checkpoint compiler
-fails too** — the regression came in with the migration commit and gate 1's
-"pass" was test-graph cache carryover (**#655**: the cache key omits the
-compiler binary). Root cause: pre-campaign, codegen resolved a bare
-type-param ident via the mutable `sema.resolve_type_expr` whose
-specialization-recheck sidecar entries are gone under the frozen twin; the
-campaign's frozen resolver returns 0 and `gen_sizeof_alignof` swallowed it
-(silent-fallback `return 0`). Fix: monomorphized function emission now
-establishes the instance's type-binding frame from
-`sema.concrete_specialization_*` (both emitters — `gen_function_mir` AND
-`gen_function_mir_mono`; the first fix attempt missed the mono emitter and
-`[mono-bind]` diagnostics under `WITH_DEBUG_DTM=1` exposed it);
-`resolve_type` consults the frame first for NK_IDENT/NK_TYPE_NAMED; the
-three silent-0 paths in `gen_sizeof_alignof` are now loud errors naming the
-function. Pinned by `behav_generic_sizeof_param.w` (expects 42). Note:
-`gen_nameof`'s empty-string fallbacks are the same disease class, benefit
-from the binding frame, but keep their silent "" — follow-up candidate.
-
-### Embedded-stdlib staleness (discovered evening 2026-07-10)
-
-`out/gen/compiler/EmbeddedStdlibData.w` had been generated by the OLD
-standalone tool from **pre-migration** stdlib sources (`extend Arena`,
-top-level `fn Box.as_ref(self: &Self)`, bare-self `Drop.drop`) — a
-1,967-line diff against regeneration from the migrated tree. Targeted
-`bridge build -o` runs do NOT regenerate it (only the full `with build`
-graph's `compat-runtime-source` action does), so every binary built today
-embedded the old stdlib, and the green `audit:all` validated the compiler
-against the OLD prelude sources. Regenerated via
-`/tmp/with-impl-kind-bridge build :compat-runtime-source --no-deps`; the
-next rebuild embeds the migrated stdlib and its `audit:all` run is the
-first validation of the full migrated universe (compiler + stdlib). This
-staleness is also a plausible cause of finding B's method-registry delta.
-Lesson: after editing `lib/std/*` in a targeted-build workflow, regenerate
-`:compat-runtime-source` before rebuilding.
-
-## RESOLVED: behav_box_drop — final two layers (night 2026-07-10, gate six pending)
-
-Both remaining layers root-caused to the exact line and fixed; the full test
-passes at runtime (`scratchpad/bdgv_run.w` executes both test fns), all bd
-pins hold, `/drop-audit` 25/25 with 0 regressions, into_inner repro clean
-under `--debug-alloc`.
-
-1. **Codegen place-walk blind to transparent-box deref** (the icmp-undef
-   layer). MIR was already correct (`_2.*.f6`); the three place-walk twins —
-   `mir_place_projected_type` (~1204), `mir_place_ptr` (~1406), and
-   `mir_place_sema_type` (~5734) in `src/CodegenDispatch.w` — resolved a
-   PK_DEREF pointee only for TY_PTR/TY_REF. `Box[T]` is TY_GENERIC_INST, so
-   `cur_ty` stayed 0 after the deref; the PK_FIELD arm then pointer-chased an
-   extra load (landing on the payload's first 8 bytes) and failed
-   `mir_resolve_field_index` → returned 0 → operand emitter substituted
-   `i32 undef`. Fix: each twin resolves deref-of-std-Box to the payload type
-   via `sema.type_is_std_box_inst` + `get_generic_inst_arg(_, 0)` (the
-   emitted load was already landing on the payload; only the type
-   bookkeeping was blind).
-2. **`RK_CAST` skipped reset-on-move** (the into_inner double-drop layer).
-   `Box.into_inner`'s `self as *mut T` lowered to `cast(move _1 …)` with NO
-   `_1 = const zst` reset after it — `lower_cast` was the only rvalue path
-   embedding an operand without `consume_moved_operand` (corpus-verified:
-   the whole prelude+user MIR contains exactly one rvalue-embedded move;
-   binops/unops lower non-Copy operands as copies). The moved-from box local
-   stayed live, so its guarded scope-exit drop re-dropped the payload (trace
-   pollution + latent double-free with the body's own `with_free`). Fix:
-   `consume_moved_operand(op)` in `MirLower.lower_cast` — **gated to
-   transparent std Box sources only** (see the flip below).
-
-   **SELF-HOST FLIP caught by gate chain six** (a61a0410's unconditional
-   consume): build PASSED, fixpoint PASSED (6th consecutive), but gate 3's
-   `behav_box_drop` died at the generic-contract validator (`body=13 call=2
-   sig=-1 mono=0`) — under the STAGE-CHAIN binaries only. Bridge-built
-   compiler from identical sources: `check` ok. Diagnosis without
-   instrumentation: whole-compiler `--dump-mir` (28 MB) has exactly 18
-   `cast(move _K)` sites; a With scanner (`scratchpad/scan_cast_moves.w`)
-   showed nearly all are the comptime evaluator's **address-taking
-   `self as *mut Sema` casts of the share-place receiver** with heavy later
-   use of `_1` (self). Their OK_MOVE operand kind is classification noise
-   (non-Copy by-value operand defaults to move); the unconditional consume
-   put `_1 = const zst(Sema)` into stage2's own machine code — zeroing the
-   caller's Sema THROUGH THE ALIAS mid-function, so the self-hosted compiler
-   silently lost resolved-call-contract lookups. Fixpoint cannot catch this
-   class (determinism ≠ correctness). Fix: consume only when
-   `sema.type_is_std_box_inst(src)` — the box value-reinterpret is the one
-   real consuming cast; compiler sources never instantiate std Box, so the
-   self-host surface is closed.
-
-   **Open follow-up (principled fix):** `place as *mut T` has two semantics
-   sharing one syntax — value reinterpret (transparent Box: operand IS the
-   pointer) vs address-taking (`self as *mut Sema`: wants the place address,
-   must not consume). The operand-kind decision should distinguish them
-   (address-casts want a place-based lowering, not a value move operand);
-   the 18-site scan list is the evidence base.
-
-   **CORRECTION (later that night):** the gated consume was right to do (the
-   Sema-zeroing hazard was real), but it was NOT the cause of the gate-six
-   contract BUG — gate seven failed identically with the gate in place. The
-   real cause is the bridge-lineage deviance below.
-
-## ROOT CAUSE (gate six/seven): bridge-lineage deviance + missing sema box case
-
-Method: two-generation instrumented builds (gen-1 = bridge-built from current
-sources, gen-2 = gen-1-built from the same sources) with env-gated decision
-traces, diffed. `WITH_DEBUG_BOXWALK` (MirLower field-base walk),
-`[deref-walk]`/`[deref-record]` under `WITH_DEBUG_DEREF` (sema autoderef
-walk), `WITH_DEBUG_BOXSYM` (std-box predicate). Findings, each trace-proven:
-
-- `stage1 check behav_box_drop` ok; `stage2 check` aborts (validator,
-  `sig=-1 mono=0`) — divergence enters at generation 2. Sema resolution
-  facts identical; the diverging artifact is sema's RECORDED autoderef
-  steps: gen-1 records `steps=0` for `guard` (expr 31, `Box[BoxDropGuard]`),
-  gen-2 records `steps=2` — a step through the GENERIC `Deref.deref` plus a
-  ref peel. MirLower's recorded path lowers the generic deref as a call
-  with no specialization contract → the abort.
-- Iteration-0 walk state is IDENTICAL across generations (`has0=0` both),
-  and per source `autoderef_type_has_field(Box[G], id)` = 0 — **gen-2 is
-  per-source-correct; gen-1 (and the whole bridge lineage, i.e. every
-  binary in daily use) deviates**, accidentally producing the INTENDED
-  stop-at-box behavior. Same verdict for `autoderef_type_has_method(&T)`
-  (source says refs have no methods → one builtin step; gen-2 records it,
-  gen-1 doesn't). The dirty-tree bridge miscompiles current sema sources in
-  the autoderef has-field/has-method region; fixpoint can't see it
-  (determinism ≠ correctness), and the 36-entry bridge-vs-stage1 ABI flip
-  catalog is mostly this deviance, not real rule changes.
-- **The real source bug**: the transparent-box contract ("sema types
-  payload fields directly and records ZERO autoderef steps") was never
-  encoded in the mutable sema walk/typing path — only the deviant bridge
-  made it appear so. Fix (uncommitted, verifying):
-  `field_access_type_direct` gains the box→payload fallback (one
-  authority; `autoderef_type_has_field` inherits it, so the walk stops AT
-  the box with zero steps), and the field-access checker's GENERIC_INST
-  typing branch calls `field_access_type_direct` instead of raw
-  `struct_field_type`. The FROZEN twin deliberately keeps NO box case —
-  it serves MirLower's manual walk, which must walk INTO the box to emit
-  the typed deref projection (the verified f50684ec/a61a0410 pipeline).
-- Consequence for the campaign: the reseed at the end of the gates is not
-  just ceremony — it retires the deviant bridge lineage. Until then, every
-  bridge-built binary embeds sema semantics that differ from source in
-  this region.
-
-## Gate strata nine/ten (2026-07-11, early AM): c_import legacy emitters + channel machinery
-
-- **c_import auto-method wrappers** (gate 8/9): synthesized member wrappers
-  and the flex-array accessor still emitted the pre-D7 top-level
-  explicit-self form → receiver-mode enforcement rejects them. Fixed
-  (4f0b66c8, 1185f6d0): impl-block methods, mode from C pointer constness
-  (`const T*` → `fn`, `T*` → `mut fn`), receiver rebuilt via
-  `self as *const/mut T` (NOT `&raw const self` — that takes the address of
-  the reference cell, `*const &T`). Constructor wrappers stay top-level
-  associated. En route, a real grammar gap: unsafe instance methods had no
-  post-D7 spelling — the impl-body parser now accepts
-  `[pub] unsafe [mut|move] fn` with top-level-identical FN_BODY
-  unsafe-block wrapping. RAII-wrapper emissions (`fn drop(move self: Self)`,
-  `fn handle(self: &Self)`) are D7-legal and untouched.
-- **Channel endpoints** (gate 10, cache-masked since ≤f68403f5):
-  `Sender.send`/`Receiver.recv` resolve outside-registry (like `scope.track`)
-  and MirLower contract-required their GENERIC_CALL → validator abort.
-  The scope-machinery waiver now covers channel-endpoint receivers, keyed
-  on the RECORDED type sidecar only — the first attempt used
-  `expr_type(self_expr)`, whose fallback resolution reaches uninstantiated
-  generic bodies and emitted `unknown type 'T'` at the blanket
-  `impl[T] Drop for Receiver[T]` (a lesson: machinery predicates in
-  lowering must not force type resolution).
-- Worktree-isolation note: a fresh worktree needs `out/gen` (embedded-stdlib
-  data) AND `out/lib` (LLVM static bridge artifacts) copied in before a
-  bridge build works; simpler to reason from binary provenance when the
-  uncommitted delta is one edit.
-
-## Test cache redesign (maintainer-directed, 2026-07-11 early AM)
-
-Maintainer ruling after the ten-gate strata crawl: "redesign the test
-cache." Reference survey (receipts): Go keys test verdicts on the test
-binary's action ID (toolchain chains in transitively) × a hash of
-runtime-observed inputs (`go/src/cmd/go/internal/test/test.go:1879`);
-Rust compiletest's up-to-date stamp starts with
-`Stamp::from_path(rustc_path)` (`compiletest/src/lib.rs:666`); Zig seeds
-every cache manifest with compiler version+backend
-(`zig/src/Compilation.zig:2115`); Vale has no cache and just runs
-everything. Unanimous principle: compiler identity is the first key input.
-
-What ours did: Test targets (kind 2) had NO scheduler cache at all — every
-gate re-ran the full suite — and the runner ABORTED at the first failing
-parallel batch over alphabetically-ordered files (box_drop → c_import_auto
-→ offsetof → channel IS the alphabet: that fail-fast, not staleness, made
-each gate surface exactly one bug). Separately, the `.test-pass` evidence
-manifest consumed by `:test-green`/`:last-green` recorded the test compiler
-by PATH only (#655's real hazard: stale evidence surviving rebuilds).
-
-The redesign (src/BuildGraphCache.w, src/BuildGraphTests.w,
-build/retention.w):
-
-- **Per-file PASS verdict cache** at `out/.build-state/<target>.test-verdicts`,
-  key = sha256(target config + env WITH_MEMORY_LIMIT_BYTES + compiler
-  CONTENT fingerprint + test file rel path + test file fingerprint).
-  Passes only (Go semantics — failures always re-run). The store is
-  rewritten each run with exactly the proven-set (self-compacting), and a
-  RED run still banks its greens: the next run re-executes only failures
-  and changed files.
-- **Run-all-report-all**: the runner never aborts the sweep; every failing
-  file is listed (`N of M files failed (K cached, R ran)`), and the
-  always-printed summary line makes cache behavior visible in gate logs.
-- **Evidence manifest v2**: `.test-pass` now records `compiler-sha256:` and
-  per-file content hashes; `build/retention.w`'s expected-marker builder
-  mirrors it byte-for-byte via its external sha256-tool flow (plain content
-  hashes on both sides so they stay reproducible).
-
-Verified by a six-step sandbox matrix (scratchpad/tcache): fresh red run
-banks greens; cached rerun executes only the failure; fix → only it runs;
-all-cached; file edit invalidates exactly that file; compiler swap
-invalidates everything. Path is part of the key (content-identical files
-may still differ via sibling-relative behavior, e.g. c_import headers).
-In-process (worker-mode) test targets remain uncached — external-compiler
-targets are the gate-relevant surface.
-
-Also applied: `test/behavior/behav_box_drop.w` line 1 `var` → `global var`
-(§9.1c; pre-verified spelling in `scratchpad/bdgv.w`).
-
-**New findings parked while verifying (both pre-existing, proven with the
-pre-fix `/tmp/with-gap2` binary):**
-
-- `analyze <box-drop-repro> audit:all` reports 2 violations on ANY program
-  instantiating `Box[T: Drop]` — `sig N: receiver requirement is not the
-  finalized param[0] effect` (the sig is the `Box.drop__receiver__*`
-  specialization, one past the emitted signature-fact range) and
-  `call with_free … no Codegen marshalling fact` (the specialization's body
-  exists in MIR but codegen inlines drop glue instead of emitting it, so its
-  calls never pass the instrumented emitter). First time this shape was ever
-  audited; the whole-compiler green runs never instantiate box
-  specializations. Needs: exempt-or-emit decision for never-emitted mono
-  drop bodies in the marshalling-coverage audit, and the receiver-req
-  checker taught about the specialization sig row.
-- `--debug-alloc` flags a 16-byte exit leak for ANY `global var` str that
-  holds a concat result at program exit (globals are not dropped at exit) —
-  isolated to `scratchpad/gleak.w`, no box involvement. Language-level
-  question (should module globals drop at exit?), not a gate blocker.
-- `Box.new`'s MIR emits `drop(_2.*) @ drop-before-overwrite` on the
-  freshly-allocated uninit slot before `_2.* = move _1`; the runtime niche
-  guard is what keeps it from firing on garbage. Correct only if
-  `with_alloc` memory reads as niche — worth a deliberate zero-or-exempt
-  decision.
-- `Box.into_inner` MIR orders `StorageDead(_4)` BEFORE `_0 = move _4`
-  (benign today — codegen ignores StorageDead — but a validator-worthy
-  smell).
-
-## PREVIOUS LOOP NOTES: behav_box_drop diagnosis trail
-
-Gate 5 (build PASS, **fixpoint PASS — 5th consecutive**, box_as_* strata
-green) surfaced `behav_box_drop`: under the current compiler it dies at the
-generic-contract validator (`body=13 call=2 sig=-1 mono=0`, body sym maps
-near BoxDropGuard.drop); under the PRE-autoref compiler (`/tmp/with-gap2`
-≈ f68403f5) it fails differently — two "error: undefined variable"
-(suspect: the module-level `var BOX_DROP_TRACE` global accessed from fns
-and a Drop impl). Two failure layers to reconcile; NOT caused by the
-autoref fix (pre-existing at f68403f5, cache-masked). Candidates in the
-test: module-level `var` global handling, `drop(guard)` builtin lowering,
-`Box.new(non-Copy payload)` drop glue, `into_inner` move-receiver chain.
-
-## RESOLVED THIS SESSION: Box transparent-receiver autoref regression
-
-Gate 4 (build PASS, **fixpoint PASS — 4th consecutive**, async test now
-green) surfaced the next cache stratum: `behav_box_as_ptr/as_ref/
-as_ref_struct` SIGSEGV (139). Diagnosis complete, fix not started:
-
-- IR (box-ref repro): `Box.new` returns the payload ptr; caller passes it
-  DIRECTLY to `Box.as_ref__receiver__324_3(ptr %0)`; the body double-derefs
-  (`load ptr, ptr %0`) per its `&Self` contract → loads 42-as-address →
-  caller loads from it → SEGV. One indirection too shallow — #627's exact
-  class, reintroduced for the MIGRATED `impl[T] Box[T]:` synthetic-read
-  receiver form (old top-level `fn Box.as_ref[T](self: &Self)` worked).
-- `--dump-abi`: instantiated `Box.as_ref__receiver__324_3` param[0]
-  ty=326 eff=[read] value_ref_abi=0 → COPY — the `&Self` receiver arrives
-  as a plain pointer VALUE and the call site binds the box value, not the
-  box slot's address. The `__receiver__` mangled instantiation path skips
-  the autoref the explicit-`&Self` path performs.
-- method-resolution fact: verdict=late-resolved sig=172 recv-type=324 —
-  resolution is fine; the defect is call-site receiver marshalling.
-- Suspect surface: `lower_receiver_with_method_autoderef_for_method` (and
-  the generic `__receiver__` instantiation's receiver binding) — for a
-  transparent std Box (sema_type_to_llvm special-cases Box[T] → ptr), the
-  "already a pointer" shape must not be mistaken for "already a
-  reference"; the decision must key on SEMA types (recv 324 = Box inst vs
-  param 326 = &Box) and take the receiver PLACE address.
-- **FIXED + VERIFIED (night 2026-07-10):** `MirLower.lower_generic_receiver_arg`
-  wraps the generic-method receiver per the instantiated signature — autoref
-  via `operand_for_place_arg` ONLY when param0 is a ref the bare-owner
-  receiver lacks (`can_auto_ref_arg_frozen` gate); every other shape keeps
-  the raw autoderef path, move receivers untouched. Evidence: the three box
-  pins print 42/42/7; `/drop-audit` 25/25 cells, 0 regressions (its fixture
-  needed a one-token D7 migration: `S.plain(self: S)` → `(self: &S)` — bare
-  by-value self is now rejected, which had turned every audit cell into an
-  identical check-fail); all seven prior session pins re-verified under the
-  same binary; `audit:all` 2,145,022 facts 0 violations; fixpoint held.
-
-## THE COMPLETE FAILURE INVENTORY (first run-all sweep, gate 11b, 2026-07-11 ~03:40)
-
-`behavior-tests: 27 of 849 files failed (0 cached, 849 ran)` under the
-stage-built release compiler — the first complete list in the campaign
-(ten previous gates each showed exactly one, by alphabetized fail-fast).
-822 greens banked in the new verdict store; the next `:test` run (with a
-current-tree driver) costs only these:
-
-- **A. receiver-mode too-weak (test/hook sources)**: compiler_hook ×4,
-  std_compiler_project_info, mut_self_vec_return — "mut receiver is too
-  weak; effects require move fn" on builder-shaped methods (the std.build
-  lesson: bodies must use the `var out = self` rebind idiom, or the
-  sources predate D7 spelling).
-- **B. machinery contract BUGs (sig=-1 mono=0)**: scope_spawn,
-  scope_spawn_mut_capture, scope_join_vec_join, scope_block_forms,
-  enum_discriminant_from_int (+likely guard/iter cousins) — MORE
-  outside-registry machinery families (async-scope spawn/join, disc-enum
-  from_int) needing the same GENERIC_CALL contract waiver as scope.track
-  and channel endpoints (f02070da) — or proper resolution registration.
-- **C. derive machinery**: derive_serialize/deserialize/soa/soa_generic —
-  "return type does not implement Default".
-- **D. std.rc is broken post-campaign**: rc_arc_basic, rc_as_ref,
-  task_non_send_same_thread_storage — errors INSIDE
-  `<embedded-std>/std/rc.w` ((unsafe *ptr).strong → "undefined variable";
-  raw-ptr conversion requires unsafe; Default missing). std.rc is another
-  std.build-class blind spot: compiled by no gate except its own
-  previously-masked tests, never swept by the flag-day. Also
-  rc_arc_basic's top-level `var RC_ARC_DROP_TRACE` needs §9.1c
-  `global var` (box_drop precedent).
-- **E. tailrec codegen**: mutual_tailrec, tailrec_three_cycle — LLVM
-  verification failure after MIR cleanup (with_panic call shape in
-  is_even).
-- **F. assorted sema**: extension_coherence (candidate list shows the same
-  candidate thrice — dedup bug in ambiguity reporting?),
-  generic_nested_type_param ("cannot infer single T: Vec[i64] vs Vec"),
-  blanket_impl_basic (int_to_string arg type), iter_pipeline_local
-  (BUG: frozen generic type base not visible — SemaCheck.w:739),
-  guard_local_use (cannot dereference non-pointer), ffi_box_roundtrip
-  (§3.8 move required — likely test spelling).
-- **G. share-place matrix RUNTIME failure**: method_arg_share_place_matrix
-  exits 134 — D5 calling-card semantics; treat as high priority.
-
-Provenance note: the blanket-Drop `unknown type 'T'` chased earlier fires
-only under BRIDGE-BUILT binaries (channel tests PASS under the stage-built
-release) — another deviance artifact, not a source bug; verify everything
-against out/release/bin/with from here on.
-
-## Inventory burn-down (2026-07-11, 04:00-05:00)
-
-Clusters closed and committed (702e3c17, ba547df4): A (std.compiler
-builders + vec_return test → move-fn rebind idiom), B (GENERIC_CALL
-contract requirements consolidated into require_generic_call_contract —
-discriminator: real resolutions always record a signature, machinery never
-does; validator failures now name function+node), C (std.json
-prefix_value #653 annotation unblocked all four derive tests; SoA derive
-generator emits D7 move-receiver push), D-mostly (std.rc rewritten in
-std.box idioms — move-assign ctors fixing the same double-drop, self.ptr,
-braced-unsafe tails), E (musttail must be immediately followed by ret).
-Eager user-Deref specializations now recorded on the base expr
-(Drop-registration recipe) — the dispatch keeps its full contract
-requirement, no waiver.
-
-Still red going into gate twelve: rc_arc_basic (NEW bounded layer:
-'unknown method as_ref for &<error>' at rc.w:91 during Arc's deref
-concrete check — Self resolution in ensure_user_deref_specialization's
-context; FIRST TARGET next session), share-place matrix (generic-method
-share-place ARGS don't land in the caller's place — D5-critical, the
-argument-side sibling of fcb3d38b), extension_coherence (triple-duplicate
-candidate list), generic_nested_type_param, blanket_impl_basic,
-iter_pipeline_local (frozen generic base BUG), guard_local_use,
-ffi_box_roundtrip. Gate twelve (stage-built driver + redesigned cache)
-gives the definitive list without bridge-deviance noise.
-
-Systemic finding worth a gate: four std modules (build, rc, compiler,
-json) all broke the same way — compiled by no gate except their own
-masked tests. A use-everything std-surface probe target would catch the
-whole class at build time.
-
-## GATE TWELVE VERDICT (2026-07-11 ~05:50): 7 of 849 — the definitive list
-
-Build PASS, fixpoint PASS (ninth consecutive), test: **7 of 849 failed
-(849 ran, 842 banked)** under the stage-built compiler with the
-redesigned cache. behav_rc_arc_basic PASSES — the '&<error>' deref layer
-chased pre-gate was ANOTHER bridge-deviance artifact (probe plan in
-scratchpad/deref_self_probe_plan.md retired); the eager-Deref
-specialization work is correct under correct lineage. Verify ONLY against
-stage-built binaries until the reseed.
-
-The seven, with everything known:
-
-1. **method_arg_share_place_matrix (D5-critical, NEXT TARGET — root
-   vicinity pinned):** generic-method share-place ARGS marshal as
-   direct-value. Repro `scratchpad/gwm.w` (16 lines, panic at
-   cell.value.id==51). The full disagreement, from the campaign's own
-   instrumentation: sema sig 171 param[1] = eff=[write] value_ref_abi=1 →
-   SHARE-PLACE (--dump-abi); MIR passes the caller's place operand
-   (`move _3`, correct place identity); but codegen-argument facts show
-   `direct-value ... sig=171 sema-share=false` — codegen's share-place
-   lookup for GENERIC_CALL (intrinsic=103) args reads FALSE from the same
-   signature sema reads TRUE. Two lookups of one sig disagree — a D6
-   violation in codegen's mono-call argument marshalling
-   (push_call_arg / record_codegen_call_argument's sema_share
-   computation, likely a sema-vs-codegen sig-id or param-index mapping on
-   the monomorphize path). One function to dissect; `matrix:name~` shows
-   the row instantly.
-2. extension_coherence — ambiguity report lists the same candidate
-   thrice (dedup in the candidate collection).
-3. ffi_box_roundtrip — §3.8 move spelling (likely test-source migration).
-4. generic_nested_type_param — "cannot infer a single type for 'T': saw
-   'Vec[i64]' and 'Vec'" (bare-vs-instantiated unification).
-5. guard_local_use — "cannot dereference non-pointer value".
-6. iter_pipeline_local — "BUG: frozen generic type base not visible"
-   (SemaCheck.w:739, resolve_generic_type_frozen).
-7. blanket_impl_basic — "wrong argument type in call to 'int_to_string'".
-
-## Autonomous-loop progress (2026-07-11, ~06:00-06:40)
-
-- **D5 matrix FIXED and pushed (38101816)**: the [vra] trace proved both
-  concrete-check passes compute value_ref_abi=0; the effects-based
-  classification was wiped by the mid-lowering re-check's sig reset. Fix:
-  assign_share_place_abi_for_sig re-applied after every concrete re-check.
-  gwm.w + the full matrix test green; sentinels hold.
-- **std.ffi fixed and pushed (66258e19)**: box_ctx moves into Box.new
-  (§3.8) — fifth std module of the masked-test class. Test global-var
-  spelling fixed; compile-clean (direct run hits the runner-less
-  missing-main link only).
-- **std.sync repaired, UNCOMMITTED — segv layer found**: all six
-  memcpy-of-(&raw const (move value)) sites → move-assign; eight nested
-  `unsafe *((unsafe *state)...)` forms → braced. Module compiles; the
-  guard test's mut-block `*data` stars removed (with_enter_mut returns T
-  by value; write-back via with_exit_mut). behav_guard_local_use now
-  CHECKS ok but at runtime: rc=139 silent (no output at all — print never
-  runs) WITHOUT debug-alloc, rc=0 still-silent WITH it. Timing-dependent
-  runtime bug in the mutex/guard path (suspects: the new move-assign
-  interacting with guard exit/store, or Scoped machinery lowering).
-  NEXT: lldb + tools/debug_drop protocol on the isolated test fns.
-  sync.w commit HELD until diagnosed — do not ship a silent segv behind a
-  compile fix.
-- **Last two sema singletons scoped**: blanket_impl_basic — blanket
-  `impl[T] for T` read receiver specializes to &i32 for Copy T and
-  `int_to_string(self)` rejects &i32 (needs &Copy→Copy arg coercion or
-  Copy-receiver reclassification in concrete checks). extension_coherence
-  — ambiguity lists the SAME candidate thrice (w.label ×3): duplicate
-  extension registration across check passes; dedupe by fn sym at
-  collection or guard registration. generic_nested_type_param — struct
-  literal `Pair { a: v, b: Vec.new() }`: field-expected type does not
-  propagate into the bare generic ctor (Vec[i64] vs Vec unification).
-  iter_pipeline_local — frozen-base BUG at resolve_generic_type_frozen
-  (SemaCheck.w:739) still unexplored.
-
-## Loop session close (2026-07-11 ~08:00): 27 → 3, provenance rule absolute
-
-Gate thirteen measured **4 of 849** (fixpoint tenth-consecutive). Since:
-iter_pipeline_local FIXED (frozen generic-base resolution falls back to
-the raw type registry — the frozen twin recovers TYPE IDENTITY, it does
-not re-police visibility; 68609808). Suite debt now **three**:
-
-1. **extension_coherence** — after the registration dedupe (40b20fc6) the
-   ambiguity STILL lists w.label ×3 with three DIFFERENT raw source paths
-   sharing one display name: the `w` support module is checked under
-   multiple path spellings (module-identity/normalization upstream of the
-   extension registry). Probe: print extension_method_paths raw at the
-   ambiguity site, then find who checks the module thrice.
-2. **generic_nested_type_param** — struct-literal field expected type does
-   not propagate into a bare generic ctor (`Pair { a: v, b: Vec.new() }`
-   → "saw Vec[i64] and Vec").
-3. **blanket_impl_basic** — blanket `impl[T] for T` read receiver
-   specializes to &i32 for Copy T; `int_to_string(self)` rejects &i32
-   (needs &Copy→Copy arg coercion or Copy-receiver reclassification in
-   concrete checks).
-
-**PROVENANCE RULE IS NOW ABSOLUTE (2421cc6c):** the bridge was caught
-miscompiling the noalias-guard code ITSELF — gen-1 binaries crash on
-shapes gen-2 runs perfectly (mx1 40, guard ok). Verify NOTHING under
-bridge-built (gen-1) binaries; every verification builds two generations
-and trusts only gen-2. The defensive noalias walk (non-function bail,
-negative/OOB index skip, WITH_MIR_AUDIT prints) stays as a real
-invariant guard regardless. The reseed retires the whole hazard class —
-it is the top of the queue after the three singletons (or before, at the
-maintainer's call: every remaining red is pure sema, reproducible
-post-reseed).
-
-## Remaining Work (in order)
-
-1. ~~Trait instance/associated syntax ruling~~ — **resolved by the existing
-   D7 trait carve-out** (see above); Drop.drop migrated to `move fn`;
-   Phase 4's "reject explicit self" must exempt trait plain-`fn`.
-2. ~~Finding B~~ — **RESOLVED (dissolved).** With the stride fix in,
-   `WITH_DEBUG_DTM=1` shows build and analyze generate the IDENTICAL
-   default-method set with identical metadata (BuilderError.source,
-   ContextError.source on the mini probe). The original analyze-only trap
-   was stride-corruption noise: analyze's fact collection interns extra
-   nodes before codegen, shifting pool extras, so the misaligned 6-wide
-   reads yielded different garbage per pipeline. No pipeline-selection
-   divergence exists.
-3. ~~Tool Gap #2~~ — **DONE (night 2026-07-10).** Sema records a
-   method-resolution trace row per checked call
-   (`trace_method_resolution` in `SemaCheck.w`, called from
-   `check_method_call_parts`'s resolution point): receiver type, owner,
-   method, inherent-registry hit, extension candidate/visibility counts,
-   selected sig/fn. `analysis_collect_method_resolutions` joins each row
-   against the final `resolved_call_sigs` sidecar and renders
-   `kind=method-resolution` facts with verdicts: `inherent`, `extension`,
-   `late-resolved`, `ambiguous-extensions`, `candidates-not-visible`,
-   `outside-registry` (compiled but resolved via builtin/trait/deref/
-   machinery surfaces), `unknown-method`. Requests: `select:kind=
-   method-resolution`, `explain:resolution:<name>` — both
-   semantic-snapshot-safe. **First field use:** proved in one query that
-   `s.track(...)` carries no Sema resolution (by design), which pinned gate
-   3's async-scope contract abort to MirLower's new `method_is_unresolved`
-   guard dragging language machinery into the generic-contract branch —
-   fixed by keeping `track` on GENERIC_CALL (codegen name-dispatches
-   `with_scope_track`) while waiving only the impossible contract
-   requirement. Whole-tree audit with the new facts: 2,144,752 facts,
-   0 violations.
-4. Focused tests per handoff D (cross-file inherent impl, scoped extend
-   visibility, same-named methods on different owners, generic owner
-   identity, comptime impl-kind preservation, return-ABI consistency,
-   missing-backend-artifact failure, extern-no-ret Unit, unary fallback
-   types, void-return default trait methods).
-5. Remove temporary repair tools (`out/restore_migrated_impl_headers.w`)
-   after the expensive gates pass.
-6. **Expensive gates once, then bootstrap:** gate chain six (build →
-   `:fixpoint` → `:test`) is IN FLIGHT with both box_drop fixes
-   (`scratchpad/gates6.log`). On `GATES EXIT: 0`: `:test-green`,
-   `:last-green`, then the one-chain seed update. Keep `-O1`.
-
-## Temporary Assets
-
-- `/tmp/with-analysis-fixed` — **current working compiler** (dirty tree +
-  all of today's fixes); the green-gate binary.
-- `/tmp/with-impl-kind-bridge` — bridge that checks/builds the dirty tree.
-- `/tmp/with-analysis-migrated`, `.lldb-built` — superseded pre-fix builds
-  (kept only as byte-identical determinism evidence).
-- `/tmp/with-call-key-bridge`, `/tmp/with-method-identity-bridge`,
-  `/tmp/with-head-check`, `/tmp/with-receiver-migration.diff`,
-  `out/restore_migrated_impl_headers.w` — unchanged from morning handoff.
-- Session scratchpad: LLDB probe scripts/logs (emit-probe, trap-frames,
-  trap-name), repro files (`v1m.w`, `cxstr-own.w`, variant matrix),
-  `trait-receivers.tsv`, and all audit logs.
-
-## Completion Criteria
-
-Unchanged: no explicit receiver syntax on ordinary instance methods;
-compiler-proven read/mut/move contracts; top-level functions
-associated/static only; `impl`/`extend` distinct tested semantics;
-collision-free method identity; frozen phases cannot re-enter mutable
-checking; all integrated audits pass (**now true**); byte-identical
-fixpoint; full test suite; seed updated; obsolete tools removed.
+# Handoff: final spec-suite debt, gates, and reseed
+
+Rewritten 2026-07-12 as a self-contained takeover document. Read
+`AGENTS.md` and `out/project-state.md` first. This document supersedes the
+older D7 session log; git history retains that version at `ecd60f5c`.
+
+## 1. Executive status
+
+- Branch: `main`.
+- HEAD: `10f7771e Sema: complete generic call contracts`.
+- Tracked working tree when this handoff was written: only
+  `docs/handoff.md` is modified. The compiler/stdlib work is committed.
+- Do not reseed, update the installed compiler, or run `:install-user`
+  without explicit maintainer approval.
+- The bridge `/tmp/with-impl-kind-bridge` is still a deviant seed lineage.
+  A binary built directly by it is generation 1 and is not trustworthy for
+  semantic or runtime verdicts. Build two generations and trust generation 2.
+- No new tools are needed. The next work is compiler/runtime/test debt, not
+  missing tooling.
+
+The last completed full-suite inventory, before `10f7771e`, was:
+
+- behavior: 850/850 pass
+- compile-error: 697/697 pass
+- codegen: 16/16 pass
+- spec: 196/209 pass, 13 fail
+
+`10f7771e` fixes five of those 13 spec files. All five pass individually
+under a fresh generation-2 compiler, so eight failures are expected to remain,
+but that expected count is not yet a completed full-suite verdict.
+
+A post-commit current-driver `:test` run was started and then interrupted at
+the user's request while it was rebuilding stage 1. It did not reach any test
+verdict. The background graph was stopped cleanly. Do not report that run as
+test evidence.
+
+## 2. Provenance rule: generation 2 only
+
+`/tmp/with-impl-kind-bridge` descends from a dirty-tree compiler known to
+miscompile current sources. Proven bad regions include autoderef
+has-field/has-method decisions, transparent Box handling, and noalias guard
+code. A generation-1 crash, diagnostic, timing, or runtime result is not
+evidence about the source.
+
+For every compiler/stdlib source change:
+
+```
+/tmp/with-impl-kind-bridge build src/main.w -O1 -o /tmp/change-g1
+/tmp/change-g1 build src/main.w -O1 -o /tmp/change-g2
+/tmp/change-g2 run test/spec/<focused-test>.w
+```
+
+Trust only `/tmp/change-g2`. A one-generation build answers only “does the
+source compile at all?”
+
+Current useful binaries:
+
+- `/tmp/with-impl-kind-bridge`: deviant bridge; never trust its behavior.
+- `/tmp/gc-contract6-g1`: generation 1 for the source now committed as
+  `10f7771e`.
+- `/tmp/gc-contract6-g2`: trusted generation 2 for that source.
+- `/tmp/gate-generic-contract-driver`: copied from the green full build
+  before the commit was created. It contains the committed source changes, but
+  its embedded version string names the preceding commit because the commit
+  happened after the gate.
+- `out/release/bin/with`: same caveat as the preceding driver. Re-run the
+  graph before treating its version/provenance as current HEAD.
+
+The bridge-driven graph gate remains:
+
+```
+WITH=/tmp/with-impl-kind-bridge /tmp/with-impl-kind-bridge build
+WITH=/tmp/with-impl-kind-bridge /tmp/with-impl-kind-bridge build :fixpoint
+cp out/release/bin/with /tmp/gate-driver
+WITH_MEMORY_LIMIT_BYTES=0 WITH=/tmp/gate-driver /tmp/gate-driver build :test
+```
+
+The test step must use the newly copied release driver. An older driver can
+silently use an older test runner/cache policy.
+
+## 3. Work completed in this takeover
+
+Commits after the old handoff:
+
+- `2f94cee6` — prefer same-module extensions during lookup.
+- `9288ad94` — infer generic struct fields from concrete siblings.
+- `dc20cc8f` — copy referenced Copy values at calls.
+- `dd337352` — audit trait-table contracts.
+- `42697b3b` — permit opaque share-place receivers.
+- `5cf5eac9` — associate Builder constructors with their source type.
+- `10f7771e` — complete generic call contracts and the related async/stdlib
+  corrections described below.
+
+Before `10f7771e`, the three behavior failures named by the old handoff were
+fixed; the completed current-driver inventory reached behavior 850/850.
+Trait-table auditing was also implemented and folded into `audit:all`.
+
+### 3.1 Synthetic generic-call contracts
+
+Changed files:
+
+- `src/Sema.w`
+- `src/SemaCheck.w`
+- `src/MirLower.w`
+
+Synthetic calls did not pass through the ordinary resolved-call path, so MIR
+could emit `GENERIC_CALL` without a concrete signature/monomorph symbol:
+
+- BTreeSet/BTreeMap literal insertion
+- BTree comprehensions
+- user-defined `Try.branch` and `Try.from_break` for `?`
+
+Sema now records dedicated sidecars:
+
+- `try_branch_sigs` / `try_branch_mono_syms`
+- `try_from_break_sigs` / `try_from_break_mono_syms`
+- `btree_insert_sigs` / `btree_insert_mono_syms`
+
+`Sema.concrete_owner_method_sig` is the single helper used to specialize an
+owner method. MIR consumes those exact contracts through
+`lower_resolved_call_with_operand_args_contract`.
+
+`MirBuilder.generic_call_uses_codegen_dispatch` is now the single decision
+point for true codegen-dispatched machinery. The exemptions are intentionally
+narrow: Task/scoped-task/join handles, channel endpoints, Atomic, and
+unrecorded track/spawn/join/from_int plus Atomic static `new`. Ordinary user
+generic calls require a recorded contract even when their names collide with
+machinery names.
+
+Generic free functions on the right side of a pipeline are now specialized
+with the pipeline LHS prepended to both the type and argument-node vectors.
+This is required by `tasks |> await_all`.
+
+### 3.2 Async signature normalization
+
+Changed files:
+
+- `src/SemaDecl.w`
+- `src/SemaCheck.w`
+
+Root cause: `check_fn_body_concrete` built a generic async specialization
+signature from the raw declared return type, while normal declaration
+collection exposed `Task[T]`. The same source function therefore had two
+return contracts.
+
+`Sema.fn_signature_return_type(flags, declared_ret_type)` is now the single
+normalizer. It is used by ordinary declaration collection, trait effective
+returns, concrete generic body checking, and generic call return typing.
+
+### 3.3 Generic substitution state restoration
+
+Changed file:
+
+- `src/TypeLayout.w`
+
+The exact bad function was
+`type_layout_generic_struct_field_type`. It called
+`setup_generic_inst_substitution`, whose clear/setup replaced the caller's
+active substitution vectors, then returned without restoring them.
+
+LLDB proof from the nested `await_settled` repro:
+
+- outer environment entered with `[T=i32, E=str]`
+- while checking the nested Result field, the vector became only
+  `[T=Result[i32,str]]`
+- a hardware watchpoint caught the length transition `2 -> 1` at the old
+  `TypeLayout.w:52` call to `setup_generic_inst_substitution`
+- call chain: `type_needs_drop -> check_struct_literal -> check_bodies`
+
+The helper now clones both substitution vectors, uses a single-exit shape, and
+restores them before returning. This removed the erroneous
+`Result[Result[i32,str],str]` type.
+
+### 3.4 Await combinators suspend in the caller
+
+Changed file:
+
+- `lib/std/task.w`
+
+The five collection combinators were declared `async fn`, which made their
+surface return `Task[...]`. The normative §14.11 examples use
+`tasks |> await_all` without a trailing `.await`, and their stated returns
+are direct `Vec`, `Result`, or `T`.
+
+With permits a plain `fn` to suspend; `async fn` means spawn immediately
+and return a Task. The following declarations are now plain `pub fn`:
+
+- both `await_all` overloads
+- `await_first`
+- `await_any`
+- `await_settled`
+
+After this stdlib edit the embedded prelude was regenerated. Future
+`lib/std/**` edits must do the same:
+
+```
+WITH=/tmp/change-g2 /tmp/change-g2 build :compat-runtime-source --no-deps
+```
+
+Skipping this step makes focused tests and audits compile the old embedded
+stdlib.
+
+## 4. Verification evidence for 10f7771e
+
+The following unchanged spec files all ran successfully under
+`/tmp/gc-contract6-g2`:
+
+- `test/spec/spec_ss04_3c_btree_collection_literals.w`
+- `test/spec/spec_ss13_6_comprehensions.w`
+- `test/spec/spec_ss11_7_try_trait.w`
+- `test/spec/spec_ss14_17_1_atomic_generic.w`
+- `test/spec/spec_ss14_11_await_combinator_cancel_joins.w`
+
+Compiler analysis:
+
+```
+/tmp/gc-contract6-g2 analyze src/main.w audit:all
+```
+
+Verdict: 2,165,080 facts, 0 violations, `ok`.
+
+Mandatory drop audit:
+
+```
+python3 .claude/skills/drop-audit/audit.py --with /tmp/gc-contract6-g2
+```
+
+Verdict: 25 cells, 0 failures, 0 regressions.
+
+Full graph:
+
+```
+WITH=/tmp/with-impl-kind-bridge /tmp/with-impl-kind-bridge build
+WITH=/tmp/with-impl-kind-bridge /tmp/with-impl-kind-bridge build :fixpoint
+```
+
+Verdicts:
+
+- full build exited 0 and wrote `out/release/bin/with`
+- fixpoint printed `FIXPOINT` and exited 0
+- `git diff --check` passed before the commit
+
+The full suite has not been completed after `10f7771e`; see §1.
+
+## 5. Build-timeout incident: do not “fix” the timeout
+
+The first full-build attempt timed out while stage 1 was compiling stage 2 at
+the hard 600-second graph limit. Both stage logs were empty. The exact command
+from `out/.build-state/stage2.effects` was:
+
+```
+out/bootstrap/bin/with-stage1 build out/gen/main.w -O1 \
+  -o out/stage/bin/with-stage2.tmp
+```
+
+Important evidence:
+
+- `src/main.w` and `out/gen/main.w` differed only in the version string.
+- A slow stage-1 run did eventually produce a stage-2 binary with exactly the
+  same Mach-O section sizes as a trusted gen-2 compile. The byte differences
+  began in UUID/output-path metadata, not excess code sections.
+- Trusted gen-2 compiled the identical generated source in 378.08 seconds
+  wall / 369.80 seconds user, peaking around 17.6 GB RSS.
+- A pressured stage-1 diagnostic took 1004.62 seconds wall but only 314.64
+  seconds user, showing severe off-CPU/resource pressure rather than a loop.
+- A clean rerun of the actual graph published stage 2 in roughly seven
+  minutes, then completed stage 3 and the release build; fixpoint passed.
+
+Conclusion: this was transient resource pressure amplified by the deviant
+generation-1 compiler, not a source/code-size regression. Do not raise the
+600-second timeout and do not change optimization. `-O1` remains mandatory.
+
+Timing lesson: attaching LLDB during a timing run suspends or perturbs the
+process and destroys wall-time evidence. Use LLDB for exact branch proof, not
+for performance timing.
+
+Analysis-query lesson: `summary:kind=specialization` is not classified as a
+semantic snapshot and proceeds into MIR. `select:kind=specialization` returns
+at sema, but this compiler registers the concrete specialization queue during
+MIR preparation, so the early query correctly returned zero rows.
+
+## 6. Exact prior 13-file spec inventory
+
+The captured prior failures remain under `out/test-graph/native-spec-tests`.
+The 13 files were:
+
+1. `spec_ss03_7_box_auto_deref.w`
+2. `spec_ss04_3c_btree_collection_literals.w`
+3. `spec_ss07_with_blocks.w`
+4. `spec_ss10_8_error_trait.w`
+5. `spec_ss11_6_trait_default_methods.w`
+6. `spec_ss11_7_try_trait.w`
+7. `spec_ss13_6_comprehensions.w`
+8. `spec_ss14_11_await_combinator_cancel_joins.w`
+9. `spec_ss14_17_1_atomic_generic.w`
+10. `spec_ss14_17_mutex_generic.w`
+11. `spec_ss14_17_rwlock_generic.w`
+12. `spec_ss16_10_null_pointer_literal.w`
+13. `spec_ss16_7_callback_context.w`
+
+Items 2, 6, 7, 8, and 9 pass under generation 2 after `10f7771e`.
+The remaining eight are described below.
+
+## 7. Remaining expected failures
+
+### 7.1 Box auto-deref through nested references — compiler bug
+
+Test and spec:
+
+- `test/spec/spec_ss03_7_box_auto_deref.w`
+- §3.7, `docs/with-specification.md:841`
+
+Only the nested-reference case is known to fail:
+
+```
+let r = &user
+let rr = &r
+assert(rr.name == "Barbara")
+```
+
+Captured LLVM contains:
+
+```
+%4 = icmp eq i32 undef, %str ...
+```
+
+LLVM verification then fails for
+`test_box_auto_deref_through_reference`. Direct Box field and method access
+are separate cases in the same file.
+
+Strong first-breakpoint candidate, not yet debugger-proven:
+
+- `MirLower.w:4343` returns immediately from
+  `lower_field_base_place_for_field` whenever recorded autoderef steps exist.
+- For `&&Box[T]`, the recorded steps remove the two references and land on
+  `Box[T]`.
+- That early return bypasses the transparent-Box payload projection at
+  `MirLower.w:4370-4377`.
+- The resulting field place is typed/projected as the Box rather than its
+  payload, eventually reaching the silent `i32 undef` class.
+
+Do not patch from that characterization alone. Confirm the exact branch with:
+
+```
+WITH_DEBUG_DEREF=1 WITH_DEBUG_BOXWALK=1 /tmp/change-g2 check \
+  test/spec/spec_ss03_7_box_auto_deref.w
+/tmp/change-g2 check --trace-place test/spec/spec_ss03_7_box_auto_deref.w
+```
+
+Then break in `lower_field_base_place_for_field`/the place projection that
+produces the bad type. Existing traces are `[deref-walk]` in
+`SemaCheck.w`, `[boxwalk]` in `MirLower.w`, and `[boxsym]` in
+`Sema.w`.
+
+Separately, codegen still contains silent `wl_get_undef(i32)` fallbacks. Do
+not use one to make this compile. The real fix is the place/type path, and any
+impossible fallback encountered should become a loud non-zero failure.
+
+### 7.2 &Concrete to &dyn Error — compiler coercion bug
+
+Test and spec:
+
+- `test/spec/spec_ss10_8_error_trait.w`
+- §10.6 context contract around
+  `docs/with-specification.md:4608-4619`
+- §10.8 error declarations at `docs/with-specification.md:4674`
+
+The specification literally requires:
+
+```
+fn source(self: &Self) -> Option[&dyn Error]: Some(&self.source)
+```
+
+Current diagnostics in embedded `std/result.w:30` reject both:
+
+- `&ParseError -> &dyn Error`
+- `&ContextError[ParseError] -> &dyn Error`
+
+Relevant implementation:
+
+- `SemaCheck.w:379-387`,
+  `call_arg_type_compatible_base/call_arg_type_compatible`
+- ordinary call checking around `SemaCheck.w:13564-13579`
+- codegen's existing dyn-argument coercion around
+  `CodegenDispatch.w:14269-14282`
+
+The checker special-cases a direct dyn-object expected type, but `&dyn Error`
+has outer kind `TY_REF`, so it falls through ordinary compatibility and is
+rejected. Codegen already has machinery to build a dyn fat pointer; verify its
+reference path rather than merely suppressing the diagnostic.
+
+Exhaust the small coercion matrix in one repro:
+
+- concrete value to `dyn Trait`, if spellable
+- `&Concrete -> &dyn Trait`
+- mutable/reference variants allowed by the spec
+- `Box[Concrete] -> Box[dyn Trait]`
+- a concrete type that does not implement the trait must still fail
+
+### 7.3 ScopedMut fixtures still use the old pointer-shaped binding
+
+Tests and spec:
+
+- `test/spec/spec_ss07_with_blocks.w:22-27`
+- `test/spec/spec_ss14_17_rwlock_generic.w:54-63`
+- §7.1/§7.2 at `docs/with-specification.md:2666` and `:2704`
+- §14.17 at `docs/with-specification.md:7390`
+
+These are stale fixtures, not evidence that the compiler should accept the old
+shape.
+
+`lib/std/sync.w:182-190` and `:283-291` implement
+`ScopedMut[T]`; `with_enter_mut` returns `T`, the body mutates that local
+value, and `with_exit_mut` writes it back. Therefore:
+
+- change `*data = *data + 2` to `data = data + 2`
+- change `seen = *data` to `seen = data`
+- change `*value = *value + 2` to `value = value + 2`
+
+Do not remove the dereference in read-guard cases. `Scoped[&T]` still binds a
+reference, so lines such as `*data + 2` and read-side `*value` remain
+correct.
+
+### 7.4 Mutex generic fixture needs explicit ownership transfer
+
+Test:
+
+- `test/spec/spec_ss14_17_mutex_generic.w:36`
+- `test/spec/spec_ss14_17_mutex_generic.w:47`
+
+`Counter` is non-Copy. `Mutex.new(value: T)` and
+`Mutex.set(value: T)` consume/store their value. The fixture must say:
+
+```
+Mutex[Counter].new(move initial)
+lock.set(move next)
+```
+
+The language rule is stated at `docs/with-specification.md:904-912`: a plain
+`T` parameter consumes, and `move x` explicitly transfers ownership.
+
+This is test migration, not a reason to weaken the consume/escape check. After
+updating it, verify the existing drop trace still produces exactly
+`oldnew`; that is the semantic acceptance criterion.
+
+### 7.5 Default trait method calling a required method — runtime abort
+
+Test and spec:
+
+- `test/spec/spec_ss11_6_trait_default_methods.w`
+- §11.6 at `docs/with-specification.md:4893`
+
+The harness reports exit 134 only for:
+
+`test_default_trait_method_can_call_required_method`
+
+The failing source is:
+
+```
+fn label(self: &Self) -> str:
+    self.name() ++ "!"
+```
+
+An omitted constant default, an explicit override, and a generic default are
+separate tests in the same file. Do not assume they fail.
+
+This failure has not been root-caused to an exact compiler line. Start with the
+debug allocator, then LLDB. Relevant paths:
+
+- Sema re-check of default bodies:
+  `SemaCheck.w:1876`,
+  `check_trait_default_method_body_for_impl`
+- default method generation:
+  `CodegenTraits.w:484`,
+  `generate_default_trait_method_for_impl_ext`
+- MIR-based default body generation:
+  `CodegenTraits.w:520` and `:684+`
+- existing trace: `WITH_DEBUG_DTM=1`
+
+The key question is whether `self.name()` resolves to the Person impl method
+with the correct receiver address, or whether synthesized default-method MIR
+retains trait/Self identity and calls through the wrong ABI.
+
+### 7.6 Option-pointer null at a call site — lowering bug
+
+Test and spec:
+
+- `test/spec/spec_ss16_10_null_pointer_literal.w`
+- §16.10 at `docs/with-specification.md:8976`
+
+Fresh trusted-gen-2 evidence:
+
+```
+WITH_DEBUG_ALLOC=1 /tmp/gc-contract6-g2 run \
+  test/spec/spec_ss16_10_null_pointer_literal.w
+```
+
+Result:
+
+```
+panic at test/spec/spec_ss16_10_null_pointer_literal.w:27:5: assertion failed
+```
+
+The preceding local assignment works:
+
+```
+let optional: Option[*mut i32] = null
+assert(optional.is_none())
+```
+
+The direct call does not:
+
+```
+assert(takes_optional_ptr(null))
+```
+
+Strong first-breakpoint candidate:
+
+- Sema records the expected target through
+  `SemaCheck.w:5352-5357`.
+- `MirLower.expr_type` nevertheless hardcodes a null literal to `i32` at
+  `MirLower.w:1949-1950`.
+- `MirLower.lower_expr` emits `CK_INT(0, ty_i32)` at
+  `MirLower.w:11171-11173`.
+- Assignment has a destination type that can repair/coerce the zero. A call
+  operand has no such place context, so the Option-pointer ABI receives the
+  wrong shape.
+
+Confirm with `--dump-mir`/`--trace-place` and a breakpoint before changing
+the representation. The same test already enumerates raw const/mut pointers,
+Option pointer, null function pointer, and non-null function pointer; all cases
+must remain correct.
+
+### 7.7 C callback context prints bad, without an allocator leak
+
+Test and spec:
+
+- `test/spec/spec_ss16_7_callback_context.w`
+- §16.7 at `docs/with-specification.md:8931`
+- helpers in `lib/std/ffi.w:37-59`
+
+Fresh trusted-gen-2 evidence:
+
+```
+WITH_DEBUG_ALLOC=1 /tmp/gc-contract6-g2 run \
+  test/spec/spec_ss16_7_callback_context.w
+```
+
+Result:
+
+```
+bad
+debug-alloc: leak count=0
+```
+
+This is not yet root-caused. The test's `ok` flag can be cleared by:
+
+- Drop running during `box_ctx`
+- callback results not being 15 and 115
+- `ctx_ref` not observing 115
+- destroy not making `SS167_DROPS == 1`
+
+Do not add trace prints and rebuild. Compile the test with debug symbols and
+use LLDB breakpoints at its existing condition lines (44, 49, 52, 56, 60) to
+identify the first false condition. Then break in the exact relevant path:
+`box_ctx`, indirect extern-C call marshalling, `ctx_ref`, or `drop_ctx`.
+The allocator already rules out a surviving leak; it does not rule out an
+early/drop-count or ABI-value bug.
+
+### 7.8 RwLock and Mutex may reveal deeper runtime work after fixture migration
+
+The currently captured RwLock failure is the stale mutable-binding syntax, and
+the Mutex failure is missing `move`. Their tests also cover:
+
+- generic aggregate payloads
+- replacement/drop order
+- contention and fiber yielding
+- reader/writer exclusion
+
+After the fixture corrections, run the complete files. A compile pass alone is
+not success; their runtime assertions and drop traces must pass. Any allocator
+failure begins with `WITH_DEBUG_ALLOC=1`, followed by
+`--dump-drop-state`, `--trace-ownership`, `--dump-drop-plan`, and LLDB.
+
+## 8. Recommended next sequence
+
+1. Re-read `AGENTS.md`, this file, and `out/project-state.md`; check
+   `git status --short`.
+2. Rebuild the committed current-driver graph and run the full inventory:
+
+   ```
+   WITH=/tmp/with-impl-kind-bridge /tmp/with-impl-kind-bridge build
+   WITH=/tmp/with-impl-kind-bridge /tmp/with-impl-kind-bridge build :fixpoint
+   cp out/release/bin/with /tmp/gate10f7771e-driver
+   WITH_MEMORY_LIMIT_BYTES=0 WITH=/tmp/gate10f7771e-driver \
+     /tmp/gate10f7771e-driver build :test
+   ```
+
+   Read the graph's own “N of M files failed” and per-suite summaries. The
+   expected spec count is eight, but record facts rather than assuming it.
+3. Commit the three fixture-only corrections as their own logical change:
+   ScopedMut binding syntax in two files and explicit moves in the Mutex file.
+   Run all three files, including their drop/runtime assertions.
+4. Fix `&Concrete -> &dyn Trait` and Box nested autoderef as separate compiler
+   changes. For each: exact-line proof, focused regression, two generations,
+   `audit:all`, then full build/fixpoint.
+5. Root-cause the three remaining runtime/dispatch items independently:
+   default trait method, Option-pointer null call, callback context.
+6. After any receiver/drop/ownership/cancellation change, run:
+
+   ```
+   python3 .claude/skills/drop-audit/audit.py --with /tmp/change-g2
+   ```
+
+7. Once every suite is green:
+
+   ```
+   with build
+   with build :fixpoint
+   with build :test
+   with build :test-green
+   with build :last-green
+   ```
+
+   Use the converged current compiler, not the deviant bridge, for the final
+   evidence chain.
+8. Stop and request explicit maintainer authorization before:
+
+   ```
+   with build :update-seed
+   with build :install-user
+   ```
+
+Never reseed from an uncommitted tree or from an intermediate generation.
+
+## 9. Workflow rules that mattered
+
+- Build and fixpoint are mandatory after every compiler/runtime/stdlib or
+  generated-source logical change.
+- A build is a specific verification question, not an experiment. Prefer
+  source inspection, `rg`, `nm`, `otool`, MIR diagnostics, and LLDB before
+  paying for a five-minute build.
+- Do not edit source while a compiler build is running.
+- Never switch to `-O0`; every stage is `-O1`.
+- For deep compiler repros, minimize with `with reduce` and use
+  `--trace-place`, `--explain-mir-origin`, `--trace-ownership`,
+  `--dump-drop-plan`, `--dump-place-map`, `--trace-cleanup-edge`, and
+  `--validate-all` before adding temporary traces.
+- For memory/drop bugs, begin with the native debug allocator, then use LLDB
+  to name the compiler branch that emitted the bad drop.
+- Root cause means the exact function, branch, and condition. Output counts or
+  malformed LLVM are characterization until a breakpoint/watchpoint proves
+  the producer.
+- Never add a silent fallback. If correct output cannot be generated, emit a
+  diagnostic and exit non-zero.
+- Preserve one logical change per commit. Eric Hartford is the sole author;
+  never add AI co-author or credit trailers.
+
+## 10. Working-tree and generated-state notes
+
+- `10f7771e` contains all compiler/stdlib edits from this phase.
+- `docs/handoff.md` is intentionally modified by this rewrite.
+- `out/project-state.md` is ignored scratch state. It still names
+  `5cf5eac9` in its HEAD summary and says the contract cluster needs a
+  commit; update it at the start of the next phase.
+- Generated/ignored files include the embedded stdlib and generated
+  `out/gen/main.w`. Regenerate them through build targets, never hand-edit
+  generated output.
+- No full post-`10f7771e` suite verdict exists.
+- No seed or installed compiler was changed.
+
+## 11. Completion criteria
+
+The D7 receiver campaign itself is substantially complete, but the repository
+is not done until:
+
+- the remaining spec failures are corrected with runtime semantics verified
+- behavior, compile-error, codegen, and spec suites all pass
+- `audit:all` and the drop audit pass
+- stage 2 and stage 3 are byte-identical
+- test-green/last-green evidence is recorded
+- the maintainer explicitly approves reseeding
+- the converged compiler is used for `:update-seed` and `:install-user`
+
+Do not redefine success as “the files compile.” The runtime assertions, drop
+counts, ABI behavior, and spec-prescribed coercions are the success condition.
