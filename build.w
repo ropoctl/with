@@ -660,6 +660,112 @@ fn issue61_regression_action(ctx: ActionCtx) -> i32:
         return issue61_fail(ctx, "check produced unexpected output: " ++ output)
     0
 
+// Benign-edit invariance: the compiler's verdict on its own tree must be
+// invariant under meaning-preserving perturbations (a comment, a fresh
+// local, a fresh top-level let, at any position). Every #660-class defect
+// — untagged unions probed by content, silent id-alignment sensitivity —
+// breaks exactly this property, so this harness catches the CLASS without
+// knowing the instance. Variants are a fixed deterministic list; each is
+// applied to a pristine repo copy and `check src/main.w` must still say ok.
+fn invariance_fail(ctx: &ActionCtx, message: str) -> i32:
+    ctx.diagnostics().error("invariance-check: " ++ message)
+    1
+
+fn invariance_run_check(ctx: &ActionCtx, compiler_path: str, repo_copy: str, label: str) -> i32:
+    let root = ctx.project_info().project_root()
+    let stdout_path = build_project_abs(root, build_project_join(ctx.output(), label ++ ".stdout"))
+    let stderr_path = build_project_abs(root, build_project_join(ctx.output(), label ++ ".stderr"))
+    var check_args: Vec[str] = Vec.new()
+    check_args |> push(compiler_path)
+    check_args |> push("check")
+    check_args |> push("src/main.w")
+    let check = ctx.process_runner().run_capture_cwd(check_args, stdout_path, stderr_path, 240000, build_project_abs(root, repo_copy))
+    if check.rc != 0:
+        return invariance_fail(ctx, f"variant '{label}' changed the verdict (exit {check.rc}); the perturbed tree is left at " ++ repo_copy ++ " — stderr=" ++ stderr_path)
+    if build_trim_trailing_line_endings(check.stdout) != "ok":
+        return invariance_fail(ctx, "variant '" ++ label ++ "' produced unexpected output; stdout=" ++ stdout_path)
+    0
+
+fn invariance_check_action(ctx: ActionCtx) -> i32:
+    let inputs = ctx.inputs()
+    if inputs.len() == 0:
+        return invariance_fail(ctx, "missing compiler input")
+    let fs = ctx.fs()
+    let output_dir = ctx.output()
+    if fs.mkdir_all(output_dir) != 0:
+        return invariance_fail(ctx, "could not create output directory: " ++ output_dir)
+    let root = ctx.project_info().project_root()
+    let compiler_path = build_project_abs(root, inputs.get(0))
+    if not fs.exists(inputs.get(0)):
+        return invariance_fail(ctx, "missing compiler: " ++ inputs.get(0))
+
+    let repo_copy = build_project_join(output_dir, "repo")
+    if fs.exists(repo_copy) and fs.remove_tree(repo_copy) != 0:
+        return invariance_fail(ctx, "could not remove existing repo copy: " ++ repo_copy)
+    if fs.mkdir_all(repo_copy) != 0:
+        return invariance_fail(ctx, "could not create repo copy directory: " ++ repo_copy)
+    if fs.copy_tree("src", build_project_join(repo_copy, "src")) != 0:
+        return invariance_fail(ctx, "could not copy src into repo fixture")
+    let copied_seed = build_project_join(repo_copy, "src/main")
+    if fs.exists(copied_seed) and fs.remove_file(copied_seed) != 0:
+        return invariance_fail(ctx, "could not remove copied seed from repo fixture")
+    if fs.symlink("lib", build_project_join(repo_copy, "lib")) != 0:
+        return invariance_fail(ctx, "could not link lib into repo fixture")
+    if fs.mkdir_all(build_project_join(repo_copy, "out/gen/compiler")) != 0:
+        return invariance_fail(ctx, "could not create embedded gen directory")
+    if fs.write_text(build_project_join(repo_copy, "out/gen/compiler/EmbeddedStdlibData.w"), fs.read_text("out/gen/compiler/EmbeddedStdlibData.w")) != 0:
+        return invariance_fail(ctx, "could not copy embedded stdlib data module")
+    if fs.write_text(build_project_join(repo_copy, "out/gen/compiler/EmbeddedClangResourceData.w"), fs.read_text("out/gen/compiler/EmbeddedClangResourceData.w")) != 0:
+        return invariance_fail(ctx, "could not copy embedded clang resource data module")
+
+    // Pristine copies of the files the variants touch.
+    let sema_copy = build_project_join(repo_copy, "src/Sema.w")
+    let parser_copy = build_project_join(repo_copy, "src/Parser.w")
+    let main_copy = build_project_join(repo_copy, "src/main.w")
+    let sema_pristine = fs.read_text(sema_copy)
+    let parser_pristine = fs.read_text(parser_copy)
+    let main_pristine = fs.read_text(main_copy)
+    if sema_pristine.len() == 0 or parser_pristine.len() == 0 or main_pristine.len() == 0:
+        return invariance_fail(ctx, "could not read pristine sources from the repo copy")
+
+    // Variant 1: comment appended mid-merge (byte shift, no tokens).
+    if fs.write_text(sema_copy, sema_pristine ++ "\n// invariance probe comment\n") != 0:
+        return invariance_fail(ctx, "could not write variant comment-sema")
+    var rc = invariance_run_check(ctx, compiler_path, repo_copy, "comment-sema")
+    if rc != 0: return rc
+
+    // Variant 2: fresh top-level let mid-merge (the #660 killer shape:
+    // one new interned symbol shifts every later-first-seen symbol id).
+    if fs.write_text(sema_copy, sema_pristine ++ "\nlet __INVARIANCE_PAD_A: i32 = 0\n") != 0:
+        return invariance_fail(ctx, "could not write variant let-sema")
+    rc = invariance_run_check(ctx, compiler_path, repo_copy, "let-sema")
+    if rc != 0: return rc
+
+    // Variant 3: two fresh lets (larger id shift).
+    if fs.write_text(sema_copy, sema_pristine ++ "\nlet __INVARIANCE_PAD_B: i32 = 0\nlet __INVARIANCE_PAD_C: i32 = 0\n") != 0:
+        return invariance_fail(ctx, "could not write variant two-lets-sema")
+    rc = invariance_run_check(ctx, compiler_path, repo_copy, "two-lets-sema")
+    if rc != 0: return rc
+    if fs.write_text(sema_copy, sema_pristine) != 0:
+        return invariance_fail(ctx, "could not restore Sema.w")
+
+    // Variant 4: fresh let in a different merge position (Parser.w).
+    if fs.write_text(parser_copy, parser_pristine ++ "\nlet __INVARIANCE_PAD_D: i32 = 0\n") != 0:
+        return invariance_fail(ctx, "could not write variant let-parser")
+    rc = invariance_run_check(ctx, compiler_path, repo_copy, "let-parser")
+    if rc != 0: return rc
+    if fs.write_text(parser_copy, parser_pristine) != 0:
+        return invariance_fail(ctx, "could not restore Parser.w")
+
+    // Variant 5: fresh let in the root module (parsed first, ids lowest).
+    if fs.write_text(main_copy, main_pristine ++ "\nlet __INVARIANCE_PAD_E: i32 = 0\n") != 0:
+        return invariance_fail(ctx, "could not write variant let-main")
+    rc = invariance_run_check(ctx, compiler_path, repo_copy, "let-main")
+    if rc != 0: return rc
+    if fs.write_text(main_copy, main_pristine) != 0:
+        return invariance_fail(ctx, "could not restore main.w")
+    0
+
 // Debug-allocator fixture lane: build tools/debug_drop.w, then run it in `check`
 // mode over test/debug_alloc/*.w. Gives the floor eyes for the over/under-drop
 // blind spot it is structurally unable to see. See docs/debug-allocator.md.
@@ -1400,6 +1506,12 @@ pub fn build(ctx: BuildCtx) -> Build:
     native_spec_tests = native_spec_tests.dep("selfcheck")
     out = out.add_target(native_spec_tests)
 
+    var comptime_diff_tests = target_new(.Test, "comptime-diff-tests", "test/comptime_diff/*.w")
+    comptime_diff_tests = comptime_diff_tests.arg("compiler=" ++ release_compiler_bin("with"))
+    comptime_diff_tests = comptime_diff_tests.dep("build")
+    comptime_diff_tests = comptime_diff_tests.dep("selfcheck")
+    out = out.add_target(comptime_diff_tests)
+
     var native_phase_tests = target_new(.Test, "native-phase-tests", "test/phase/*.w")
     native_phase_tests = native_phase_tests.arg("compiler=" ++ release_compiler_bin("with"))
     native_phase_tests = native_phase_tests.dep("build")
@@ -1503,6 +1615,12 @@ pub fn build(ctx: BuildCtx) -> Build:
     issue61_regression = issue61_regression.dep("build")
     out = out.add_target(issue61_regression)
 
+    var invariance_check = target_new(.Action, "invariance-check", "").output("out/test-graph/invariance-check")
+    invariance_check.action = invariance_check_action
+    invariance_check = invariance_check.input(release_compiler_bin("with"))
+    invariance_check = invariance_check.dep("build")
+    out = out.add_target(invariance_check)
+
     var embedded_runtime_regression = target_new(.Action, "embedded-runtime-regression", "").output("out/test-graph/embedded-runtime-regression")
     embedded_runtime_regression.action = run_embedded_runtime_regression_action
     embedded_runtime_regression = embedded_runtime_regression.input(release_compiler_bin("with"))
@@ -1531,6 +1649,7 @@ pub fn build(ctx: BuildCtx) -> Build:
     tests = tests.dep("native-codegen-tests")
     tests = tests.dep("native-spec-tests")
     tests = tests.dep("native-phase-tests")
+    tests = tests.dep("comptime-diff-tests")
     tests = tests.dep("internals-tests")
     tests = tests.dep("lexer-tests")
     tests = tests.dep("parser-tests")
@@ -1545,6 +1664,7 @@ pub fn build(ctx: BuildCtx) -> Build:
     tests = tests.dep("cli-selfhost-parallel-tests")
     tests = tests.dep("c-migrator-tests")
     tests = tests.dep("issue61-regression")
+    tests = tests.dep("invariance-check")
     tests = tests.dep("embedded-runtime-regression")
     tests = tests.dep("emit-c-smoke")
     tests = tests.dep("requirements-informative-check")
