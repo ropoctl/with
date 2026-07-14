@@ -21,6 +21,12 @@ fn ast_pool_phase_bug(message: str):
 
 type NodeId = i32
 
+// Enforced-distinct file id: the pilot for migrating the compiler's id
+// spaces (NodeId/Symbol/TypeId) off transparent i32 aliases. A distinct id
+// cannot be mixed with another id space without an explicit cast, making
+// the #660 collision class unrepresentable where adopted.
+pub type AstFileId = distinct i32
+
 pub enum NodeKind: i32:
     // Declarations
     NK_FN_DECL = 1
@@ -448,6 +454,12 @@ type AstPoolState {
     literal_suffixes: Vec[i32],
     int_literal_digit_idxs: Vec[i32],
     int_literal_radices: Vec[i32],
+    // Tenth SoA column: the file each node was parsed from. Spans store
+    // (start,end) byte offsets only; without this, file identity is
+    // reconstructed positionally from decl tables (#661 class). Stamped
+    // from current_file_id, which each Parser sets for its file.
+    files: Vec[i32],
+    current_file_id: i32,
     extra: Vec[i32],
     decls: Vec[i32],
     local_decl_count: i32,
@@ -543,6 +555,8 @@ fn AstPool.new -> AstPool:
             literal_suffixes: Vec.new(),
             int_literal_digit_idxs: Vec.new(),
             int_literal_radices: Vec.new(),
+            files: Vec.new(),
+            current_file_id: 0,
             extra: Vec.new(),
             decls: Vec.new(),
             local_decl_count: -1,
@@ -621,6 +635,7 @@ fn AstPool.new -> AstPool:
     st.literal_suffixes.push(LiteralSuffix.None)
     st.int_literal_digit_idxs.push(-1)
     st.int_literal_radices.push(0)
+    st.files.push(0)
     AstPool { state: ptr }
 
 // Mark the pool as immutable. Any subsequent mutation will print an error.
@@ -642,6 +657,7 @@ impl AstPool:
         self.state.literal_suffixes.push(LiteralSuffix.None)
         self.state.int_literal_digit_idxs.push(-1)
         self.state.int_literal_radices.push(0)
+        self.state.files.push(self.state.current_file_id)
         idx as NodeId
 
     // Add extra data, returns the index in the extra array.
@@ -659,6 +675,21 @@ impl AstPool:
         let idx = self.state.strings.len() as i32
         self.state.strings.push(s)
         idx
+
+    // The file a node was parsed from (0 = root/unknown). See the `files`
+    // column note; synthesized nodes inherit the active parse's file.
+    // FileId is the compiler's first enforced-distinct id (D-candidate:
+    // "record at the producer; ids are distinct types") — mixing it with
+    // node/symbol/type ids is a compile error, which is the entire point
+    // (#660 was a symbol id read as a node id).
+    fn file(idx: NodeId) -> AstFileId:
+        let i = idx as i32
+        if i < 0 or i as i64 >= self.state.files.len():
+            return AstFileId(0)
+        AstFileId(self.state.files.get(i as i64))
+
+    mut fn set_current_file_id(file_id: AstFileId):
+        self.state.current_file_id = file_id as i32
 
     // Get node kind at index
     fn kind(idx: NodeId) -> i32:

@@ -98,6 +98,8 @@ fn Parser.init(tokens: TokenList, source: str, file_id: i32, intern: InternPool,
     Parser.init_with_pool(tokens, source, file_id, intern, diags, AstPool.new())
 
 fn Parser.init_with_pool(tokens: TokenList, source: str, file_id: i32, intern: InternPool, diags: DiagnosticList, pool: AstPool) -> Parser:
+    var file_pool = pool
+    file_pool.set_current_file_id(AstFileId(file_id))
     Parser {
         tokens,
         pos: 0,
