@@ -5789,7 +5789,7 @@ impl Sema:
         // Auto-referencing: T → &T
         if exp_k == TypeKind.TY_REF:
             if self.get_type_d1(exp_r) == 0:
-                if self.types_compatible(self.get_type_d0(exp_r), act_r):
+                if self.types_compatible(self.get_type_d0(exp_r), act_r) != 0:
                     return 1
         0
 
@@ -6032,7 +6032,7 @@ impl Sema:
                         return 1
         if exp_k == TypeKind.TY_REF:
             if self.get_type_d1(exp_r) == 0:
-                if self.types_compatible_frozen(self.get_type_d0(exp_r), act_r):
+                if self.types_compatible_frozen(self.get_type_d0(exp_r), act_r) != 0:
                     return 1
         0
 
@@ -6145,7 +6145,7 @@ impl Sema:
             return 1
         if tk == TypeKind.TY_STRUCT:
             let name = self.get_type_d0(resolved)
-            if self.has_drop_method(name):
+            if self.has_drop_method(name) != 0:
                 if sema_debug_move_enabled() != 0:
                     with_eprint("[noncopy] type=" ++ self.pool_resolve(name) ++ " reason=drop")
                 return 0

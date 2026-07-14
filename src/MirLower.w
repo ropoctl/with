@@ -7320,6 +7320,11 @@ impl MirBuilder:
             let tuple_subject_place = self.pattern_shape_place(scrutinee_place)
             let tuple_scrut_ty = self.place_local_type(tuple_subject_place)
             let tuple_scrut_resolved = self.sema.resolve_alias(tuple_scrut_ty)
+            // #631: the unit pattern () is irrefutable against a unit subject —
+            // always take the arm, no test needed.
+            if tup_count == 0:
+                self.terminate(TermKind.TK_GOTO, arm_bb, 0, 0, 0)
+                return
             if self.sema.get_type_kind(tuple_scrut_resolved) != TypeKind.TY_TUPLE:
                 with_eprint("error: tuple pattern reached MIR lowering with non-tuple subject")
                 self.mark_unsupported()
@@ -7545,6 +7550,9 @@ impl MirBuilder:
             let tuple_subject_place = self.pattern_shape_place(scrutinee_place)
             let tuple_bind_scrut_ty = self.place_local_type(tuple_subject_place)
             let tuple_bind_scrut_resolved = self.sema.resolve_alias(tuple_bind_scrut_ty)
+            // #631: the unit pattern () binds nothing.
+            if t_count == 0:
+                return out
             if self.sema.get_type_kind(tuple_bind_scrut_resolved) != TypeKind.TY_TUPLE:
                 with_eprint("error: tuple pattern reached MIR binding lowering with non-tuple subject")
                 self.mark_unsupported()

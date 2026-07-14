@@ -3519,7 +3519,7 @@ impl Codegen:
         let is_packed = type_decl_is_packed(packed_kind)
         let is_bitpacked = type_decl_is_bitpacked(packed_kind)
 
-        if is_bitpacked:
+        if is_bitpacked != 0:
             // Bitpacked struct: store as iN where N = sum of field bit widths.
             // Fields are packed MSB-first with no gaps.
             var total_bits: i32 = 0

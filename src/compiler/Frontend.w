@@ -1016,7 +1016,7 @@ fn c_import_macro_decl(line: str) -> str:
         return ""
     value = c_import_trim_outer_parens(value)
 
-    if c_import_is_int_literal(value):
+    if c_import_is_int_literal(value) != 0:
         return "let " ++ name ++ " = " ++ value ++ "\n"
 
     if value.len() >= 2 and value.byte_at(0) == 34 and value.byte_at(value.len() as i64 - 1) == 34:

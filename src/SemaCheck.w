@@ -5490,7 +5490,7 @@ impl Sema:
             let cond = self.ast.get_data0(node)
             let body = self.ast.get_data1(node)
             let label = self.ast.get_data2(node)
-            self.check_expr(cond)
+            self.check_bool_condition(cond, "while")
             self.loop_depth = self.loop_depth + 1
             self.push_label_frame(label, LabelFrameKind.LFK_WHILE, node)
             let while_frame_idx = self.label_syms.len() as i32 - 1
@@ -5541,7 +5541,7 @@ impl Sema:
             self.finalize_loop_move_state(&dw_entry_states, dw_frame_idx, dw_body_diverges, 1, node)
             self.pop_label_frame()
             self.loop_depth = self.loop_depth - 1
-            self.check_expr(cond)
+            self.check_bool_condition(cond, "do-while")
             return self.ty_void
 
         if kind == NodeKind.NK_LOOP:
@@ -8209,6 +8209,21 @@ impl Sema:
 
         self.ty_void as i32
 
+    // A control-flow condition (if/while/do-while) must be bool. check_expr
+    // computed the type but callers discarded it, so `if unit_call():` or
+    // `if some_i32:` checked green and branched on a non-bool at runtime (#654).
+    // A diverging (Never) or already-errored condition is accepted silently.
+    mut fn check_bool_condition(cond: i32, what: str) -> TypeId:
+        let t = self.check_expr(cond)
+        if t == 0:
+            return t
+        let resolved = self.resolve_alias(t as TypeId)
+        if self.get_type_kind(resolved) == TypeKind.TY_NEVER:
+            return t
+        if resolved != self.ty_bool:
+            self.emit_error(f"{what} condition must be bool", cond)
+        t
+
     mut fn check_if_expr(node: i32) -> i32:
         let cond = self.ast.get_data0(node)
         let then_body = self.ast.get_data1(node)
@@ -8218,7 +8233,7 @@ impl Sema:
         let saved_has_expected = self.has_expected_type
         self.expected_expr_type = 0 as TypeId
         self.has_expected_type = 0
-        self.check_expr(cond)
+        self.check_bool_condition(cond, "if")
         self.expected_expr_type = saved_expected
         self.has_expected_type = saved_has_expected
         let in_value_context = self.stmt_pos_depth == 0 and self.if_chain_contains_node(self.current_value_expr_root, node) != 0
@@ -8271,7 +8286,7 @@ impl Sema:
             else if else_is_never != 0 and then_type != 0:
                 result_type = then_type
             else if then_type != 0 and else_type != 0:
-                if self.types_compatible(then_type as i32, else_type as i32):
+                if self.types_compatible(then_type as i32, else_type as i32) != 0:
                     result_type = self.preferred_compatible_type(then_type, else_type)
                 else:
                     result_type = self.arithmetic_result_type(then_type, else_type)
@@ -11868,6 +11883,11 @@ impl Sema:
             let resolved = self.resolve_alias(subject_shape_type as TypeId)
             let resolved_kind = self.get_type_kind(resolved)
             if resolved_kind == TypeKind.TY_ERR:
+                return
+            // #631: the unit pattern `()` matches a unit subject. `()` is typed
+            // as ty_void rather than a zero-element tuple, so it never reached
+            // the TY_TUPLE arity path and was wrongly rejected.
+            if t_count == 0 and self.type_is_unit(resolved as i32) != 0:
                 return
             if resolved_kind != TypeKind.TY_TUPLE:
                 self.emit_error("tuple pattern requires tuple subject", node)
