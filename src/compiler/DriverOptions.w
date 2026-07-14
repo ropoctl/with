@@ -49,6 +49,10 @@ pub type BuildGraphCommandOptions {
     graph_only: bool,
     dry_run: bool,
     no_deps: bool,
+    // Keep-going for test/action targets: record failures, run every
+    // remaining target, report the full matrix at the end (exit nonzero if
+    // any failed). Kills the one-buried-failure-per-run "strata crawl".
+    survey: bool,
     explain_target: str,
 }
 
@@ -153,6 +157,7 @@ pub fn build_graph_command_options_default -> BuildGraphCommandOptions:
         graph_only: false,
         dry_run: false,
         no_deps: false,
+        survey: false,
         explain_target: "",
     }
 
@@ -431,5 +436,6 @@ pub fn parse_build_command_options(argc: i32) -> BuildCommandParseResult:
     graph.graph_only = driver_has_flag(argc, "--graph")
     graph.dry_run = driver_has_flag(argc, "--dry-run")
     graph.no_deps = driver_has_flag(argc, "--no-deps")
+    graph.survey = driver_has_flag(argc, "--survey")
     graph.explain_target = driver_explain_arg(argc)
     BuildCommandParseResult { ok: true, error_msg: "", build, graph }

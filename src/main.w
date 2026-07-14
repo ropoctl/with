@@ -1539,10 +1539,14 @@ fn build_options_for_graph_target(root: str, base: &BuildCommandOptions, target:
         options.output_kind = BuildOutputKind.Binary
     options
 
-unsafe fn run_build_graph(root: str, cfg: ProjectConfig, graph: &BuildGraph, action_sema: *mut Sema, options: &BuildCommandOptions) -> i32:
+unsafe fn run_build_graph(root: str, cfg: ProjectConfig, graph: &BuildGraph, action_sema: *mut Sema, options: &BuildCommandOptions, survey: bool) -> i32:
     if graph.targets.len() == 0:
         with_eprint("error: build.w did not declare any targets")
         return 1
+    // --survey: keep going past test/action target failures, report the
+    // full matrix at the end. Evidence recorders (test-green/last-green)
+    // are skipped once anything has failed.
+    var survey_failed: Vec[str] = Vec.new()
     let force_action_worker_target = build_action_force_env_enabled()
     let output_rc = build_graph_validate_outputs(root, graph, options.output_path)
     if output_rc != 0:
@@ -1600,8 +1604,14 @@ unsafe fn run_build_graph(root: str, cfg: ProjectConfig, graph: &BuildGraph, act
             completed_targets.push(target.name)
             continue
         if target.kind == 23:
+            if survey and survey_failed.len() > 0 and (target.name == "test-green" or target.name == "last-green"):
+                with_eprint("survey: skipping evidence target '" ++ target.name ++ "' (earlier failures)")
+                continue
             let action_result = run_build_action_from_build_w(root, cfg, target, action_sema, options)
             if action_result.rc != 0:
+                if survey:
+                    survey_failed.push(target.name)
+                    continue
                 return action_result.rc
             if not action_result.cache_recorded:
                 build_cache_record(root, target, Vec.new(), action_result.effects)
@@ -1618,25 +1628,38 @@ unsafe fn run_build_graph(root: str, cfg: ProjectConfig, graph: &BuildGraph, act
                 with_eprint("error: build.w test target matched no files: " ++ target.entry)
                 return 1
             let test_compiler = build_graph_test_compiler(root, target)
+            var survey_target_failed = false
             if test_compiler.len() > 0:
                 let test_rc = build_graph_run_external_test_files(root, target, test_compiler, test_files)
                 if test_rc != 0:
                     with_eprint("error: build.w test target failed: " ++ target.name)
-                    return test_rc
+                    if not survey:
+                        return test_rc
+                    survey_target_failed = true
             else:
                 if not build_test_worker_env_enabled():
                     let test_worker_rc = run_build_test_worker_process(&target, options)
                     if test_worker_rc != 0:
-                        return test_worker_rc
+                        if not survey:
+                            return test_worker_rc
+                        survey_failed.push(target.name)
+                        continue
                     completed_targets.push(target.name)
                     continue
                 build_test_clear_worker_env_for_children()
                 for fi in 0..test_files.len() as i32:
+                    if survey_target_failed:
+                        break
                     let test_path = test_files.get(fi as i64)
                     let test_rc = run_test_file_with_build_settings(test_path, target_options.opt_level, target_options.no_std, target_options.alloc_mode, target_options.runtime_available, target_options.prelude_mode, target_options.debug_info, false, false, "", target_options.include_paths, target_options.defines, target_options.link_libs)
                     if test_rc != 0:
                         with_eprint("error: build.w test target failed: " ++ target.name)
-                        return test_rc
+                        if not survey:
+                            return test_rc
+                        survey_target_failed = true
+            if survey_target_failed:
+                survey_failed.push(target.name)
+                continue
             if build_graph_path_has_glob(target.entry):
                 with_write(f"ok: {test_files.len()} files passed in build.w test target {target.name}\n")
             build_cache_record_test_success(root, target, test_files, test_compiler)
@@ -1703,6 +1726,13 @@ unsafe fn run_build_graph(root: str, cfg: ProjectConfig, graph: &BuildGraph, act
         comp.print_warnings()
         build_cache_record(root, target, comp.tracked_input_paths(), Vec.new())
         completed_targets.push(target.name)
+    if survey and survey_failed.len() as i32 > 0:
+        with_eprint(f"survey: {survey_failed.len() as i32} target(s) failed:")
+        for sfi in 0..survey_failed.len() as i32:
+            with_eprint("  failed: " ++ survey_failed.get(sfi as i64))
+        return 1
+    if survey:
+        with_write("survey: all targets green\n")
     0
 
 fn explain_kind_name(kind: i32) -> str:
@@ -1924,7 +1954,7 @@ fn run_build_command(options: BuildCommandOptions, graph_options: BuildGraphComm
                 return 0
             if not repo_lock_acquire(selected_target_name):
                 return 1
-            let build_rc = unsafe { run_build_graph(root, cfg, selected_graph, &raw mut load_result.sema as *mut Sema, actual_options) }
+            let build_rc = unsafe { run_build_graph(root, cfg, selected_graph, &raw mut load_result.sema as *mut Sema, actual_options, graph_options.survey) }
             repo_lock_release()
             link_stage_cleanup_current_process_temp_archives()
             return build_rc
@@ -2024,7 +2054,7 @@ fn run_run_project_command(selected_target_hint: str, opt_level: i32, no_std: bo
         return 1
     if not repo_lock_acquire(selected_target_name):
         return 1
-    let build_rc = unsafe { run_build_graph(root, cfg, selected_graph, &raw mut load_result.sema as *mut Sema, options) }
+    let build_rc = unsafe { run_build_graph(root, cfg, selected_graph, &raw mut load_result.sema as *mut Sema, options, false) }
     repo_lock_release()
     if build_rc != 0:
         return build_rc
