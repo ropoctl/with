@@ -1505,8 +1505,14 @@ impl Zcu:
         self.diagnostics = artifacts.diags
         self.set_resolve_snapshot(artifacts.result, name)
         self.capture_last_link_lib_names(self.pool, self.last_resolved)
-
         if self.diagnostics.has_errors():
+            // #661: resolve-phase parse errors carry resolve-generation file
+            // ids the render lookup can't resolve, so rendering used to fall
+            // back to the ROOT text (phantom carets at root EOF). Register the
+            // resolved texts for this render only. Registering them on the
+            // success path is forbidden: those ids collide with the merge
+            // generation's ids and poison every span-derived fact (#667).
+            self.register_resolved_source_texts()
             self.render_all_diagnostics_frontend()
             self.set_typed_snapshot("", AstPool.new())
             return AstPool.new()
@@ -1638,6 +1644,26 @@ impl Zcu:
             return AstPool.new()
 
         pool
+
+    // Make every resolved module's source text findable by file id for
+    // diagnostic rendering, regardless of whether its parse produced any
+    // decls or the merge loop ever ran (#661).
+    mut fn register_resolved_source_texts():
+        for mi in 0..self.last_resolved.modules.len() as i32:
+            let mod = self.last_resolved.modules.get(mi as i64)
+            if mod.module_id == 0 or mod.path.len() == 0:
+                continue
+            var already = false
+            for si in 0..self.source_text_file_ids.len() as i32:
+                if self.source_text_file_ids.get(si as i64) == mod.file_id:
+                    already = true
+                    break
+            if already:
+                continue
+            let embedded_rel = embedded_std_rel_path(mod.path)
+            let text = frontend_normalize_source_text(if embedded_rel.len() > 0: embedded_std_source(embedded_rel) else: runtime_read_file(mod.path))
+            if text.len() > 0:
+                self.add_source_text_mapping(mod.file_id, mod.path, text)
 
     mut fn merge_resolved_modules_frontend(root_pool: AstPool, root_path: str) -> AstPool:
         var merged_pool = root_pool

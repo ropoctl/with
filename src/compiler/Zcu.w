@@ -262,13 +262,17 @@ impl Zcu:
     fn source_for_file_id_frontend(file_id: i32) -> Source:
         if file_id == 0:
             return Source.from_string(self.current_source_path, self.current_source_text, 0)
+        // #661: consult the unconditional file registry FIRST. Gating it
+        // behind the per-decl tables meant a module whose parse produced
+        // zero decls was unfindable, and its errors rendered against the
+        // ROOT module's text — phantom carets at root EOF.
+        for si in 0..self.source_text_file_ids.len() as i32:
+            if self.source_text_file_ids.get(si as i64) == file_id:
+                return Source.from_string(self.source_text_names.get(si as i64), self.source_texts.get(si as i64), file_id)
         for i in 0..self.decl_source_file_ids.len() as i32:
             if self.decl_source_file_ids.get(i as i64) != file_id:
                 continue
             let path = self.decl_source_path_frontend(i)
-            for si in 0..self.source_text_file_ids.len() as i32:
-                if self.source_text_file_ids.get(si as i64) == file_id:
-                    return Source.from_string(self.source_text_names.get(si as i64), self.source_texts.get(si as i64), file_id)
             let embedded_rel = embedded_std_rel_path(path)
             let text = if embedded_rel.len() > 0: embedded_std_source(embedded_rel) else: runtime_read_file(path)
             return Source.from_string(path, text, file_id)
