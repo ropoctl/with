@@ -1507,10 +1507,16 @@ impl Sema:
             }
         sema_trait_impl_method_contract_missing()
 
-    mut fn check_trait_impl_method_signature_contract(node: i32, sig_idx: i32, contract: &SemaTraitImplMethodContract):
+    mut fn check_trait_impl_method_signature_contract(node: i32, sig_idx: i32, contract: &SemaTraitImplMethodContract, has_ret_annotation: bool):
         if contract.ok == 0 or sig_idx < 0:
             return
-        if contract.ret_type != 0:
+        // Only compare the impl method's return type against the trait when the
+        // impl method carries its own return annotation. Without one, the
+        // signature still holds the placeholder `ty_void` at contract-check
+        // time (inference runs later, during the body check), so comparing here
+        // spuriously rejected a valid unannotated method whose inferred return
+        // matches the trait (#652).
+        if contract.ret_type != 0 and has_ret_annotation:
             var expected_ret = contract.ret_type
             if (contract.method_flags / FnFlags.ASYNC) % 2 == 1:
                 let task_sym = self.pool_intern("Task")
@@ -1587,7 +1593,7 @@ impl Sema:
         let meta = self.ast.find_fn_meta(node)
         let has_ret_annotation = meta >= 0 and self.ast.fn_meta_ret(meta) != 0
         let trait_contract = self.trait_impl_method_contract(node, fn_name)
-        self.check_trait_impl_method_signature_contract(node, sig_idx, &trait_contract)
+        self.check_trait_impl_method_signature_contract(node, sig_idx, &trait_contract, has_ret_annotation)
         let saved_implicit_binding_len = self.implicit_binding_syms.len()
         if meta >= 0:
             let param_start = self.ast.fn_meta_param_start(meta)
@@ -8783,6 +8789,15 @@ impl Sema:
         let value = self.ast.get_data0(node)
         if value != 0:
             let val_type = if self.current_return_type != 0: self.check_expr_with_expected(value, self.current_return_type) else: self.check_expr(value)
+            // Record the return value's type at this single choke point so
+            // return-type inference (body_return_type_info) sees it regardless
+            // of the value's node kind. check_expr types bool literals and
+            // binary-operator results but does not self-record them; without
+            // this, an early `return <bool/comparison/arith>` read back as 0
+            // (unrecorded), was misclassified as a bare `return`, and the
+            // function silently finalized Unit (#653, #659).
+            if val_type != 0:
+                self.typed_expr_types.insert(value, val_type as i32)
             self.reject_returned_drop_field_move(value)
             // If returned value originates from a parameter, record effects:
             // - EFF_ESCAPE_VALUE: a non-Copy owned value escaping via return
