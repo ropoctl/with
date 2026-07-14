@@ -3808,12 +3808,24 @@ impl MirBuilder:
             if parts.len() as i32 > 2:
                 return self.lower_str_concat_chain(node, parts)
         let saved_expected = self.expected_type
+        // #634: for a comparison, lower each operand with the OTHER operand's
+        // type as the expected type. Otherwise the ambient expected type (bool
+        // for `if a == b:`) flowed into an operand and an enum-variant
+        // constructor operand (`r == Some(2)`) built its aggregate with the
+        // comparison's type instead of its own — "aggregate rvalue missing
+        // destination struct type". The bare-None-vs-pointer case keeps its
+        // existing special handling. (#586 established the per-operand rebind.)
+        let is_cmp = op == BinaryOp.OP_EQ or op == BinaryOp.OP_NEQ or op == BinaryOp.OP_LT or op == BinaryOp.OP_GT or op == BinaryOp.OP_LTE or op == BinaryOp.OP_GTE
         if self.is_bare_none(lhs_expr) and (rhs_tk == TypeKind.TY_PTR or rhs_tk == TypeKind.TY_REF):
+            self.expected_type = rhs_ty
+        else if is_cmp and rhs_ty != 0:
             self.expected_type = rhs_ty
         else:
             self.expected_type = saved_expected
         let lhs = self.lower_expr(lhs_expr)
         if self.is_bare_none(rhs_expr) and (lhs_tk == TypeKind.TY_PTR or lhs_tk == TypeKind.TY_REF):
+            self.expected_type = lhs_ty
+        else if is_cmp and lhs_ty != 0:
             self.expected_type = lhs_ty
         else:
             self.expected_type = saved_expected
