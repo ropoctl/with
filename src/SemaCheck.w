@@ -8129,6 +8129,17 @@ impl Sema:
             self.scope_set_is_ephemeral_value(name, self.type_is_ephemeral_value(ann_type as i32))
             return self.ty_void as i32
 
+        // #622: an array literal is a temporary; a slice bound to it would
+        // dangle once the statement ends. check_array_literal reports the
+        // expected slice type for the literal, so the binding otherwise sees no
+        // mismatch and MIR bit-reinterprets the array as a slice header (len
+        // reads element[1]) — silent corruption plus an out-of-bounds read on
+        // index. Reject it loudly; the named-array form is already rejected as a
+        // plain "type mismatch in binding".
+        if ann_type != 0 and self.ast.kind(value) == NodeKind.NK_ARRAY_LIT:
+            if self.get_type_kind(self.resolve_alias(ann_type)) == TypeKind.TY_SLICE:
+                self.emit_error("cannot bind an array literal to a slice type; use an array binding `let xs = [...]` or an explicit array type `[T; N]`", node)
+
         // Let binding value is expression position — match inside must be exhaustive.
         let saved_match_stmt = self.match_in_stmt_pos
         self.match_in_stmt_pos = 0
