@@ -887,6 +887,79 @@ fn analysis_audit_effects(report: &AnalysisReport, sema: &Sema):
         if (caller & propagated) != propagated:
             report.fail(f"effect edge sig {caller_sig}:{caller_pi} -> {callee_sig}:{callee_pi} is not at fixpoint; missing={propagated & ~caller}")
 
+// audit:pool — structural integrity of the parser/pool tier: parallel SoA
+// columns, stride tables, map/vec mirrors, and the cross-module positional
+// seams (#660/#661/#664 class). The census found ~57 parallel families with
+// 3 guarded; this guards the highest-risk ones generically.
+fn analysis_audit_pool(report: &AnalysisReport, sema: &Sema):
+    let ast = sema.ast
+    let n = ast.node_count() as i64
+    if ast.state.starts.len() != n or ast.state.ends.len() != n or ast.state.data0.len() != n or ast.state.data1.len() != n or ast.state.data2.len() != n or ast.state.files.len() != n:
+        report.fail("pool: node SoA columns diverge from kinds length")
+    if ast.state.fn_meta.len() as i32 % 7 != 0:
+        report.fail("pool: fn_meta stride (7) broken")
+    if ast.state.for_meta.len() as i32 % 3 != 0:
+        report.fail("pool: for_meta stride (3) broken")
+    if ast.state.type_meta.len() as i32 % 3 != 0:
+        report.fail("pool: type_meta stride (3) broken")
+    if ast.state.block_meta.len() as i32 % 2 != 0:
+        report.fail("pool: block_meta stride (2) broken")
+    if ast.state.pattern_qualifiers.len() as i32 % 2 != 0:
+        report.fail("pool: pattern_qualifiers stride (2) broken")
+    if ast.state.where_meta.len() as i32 % 3 != 0:
+        report.fail("pool: where_meta stride (3) broken")
+    if ast.state.fn_param_pattern_meta.len() as i32 % 3 != 0:
+        report.fail("pool: fn_param_pattern_meta stride (3) broken")
+
+    var fmi = 0
+    while fmi < ast.state.for_meta.len() as i32:
+        let for_node = ast.state.for_meta.get(fmi as i64)
+        if for_node <= 0 or for_node >= ast.node_count() or ast.kind(for_node as NodeId) != NodeKind.NK_FOR:
+            report.fail(f"pool: for_meta[{fmi}] does not reference an NK_FOR node (node={for_node})")
+        fmi = fmi + 3
+
+    var fni = 0
+    while fni < ast.state.fn_meta.len() as i32:
+        let fn_node = ast.state.fn_meta.get(fni as i64)
+        if fn_node <= 0 or fn_node >= ast.node_count():
+            report.fail(f"pool: fn_meta[{fni}] node out of range (node={fn_node})")
+        else:
+            let mapped = ast.state.fn_meta_map.get(fn_node)
+            if mapped.is_some() and mapped.unwrap() != fni:
+                report.fail(f"pool: fn_meta_map[{fn_node}] points at {mapped.unwrap()}, record lives at {fni}")
+        fni = fni + 7
+
+    // Map/vec mirror integrity: a pool clone that copies one side but not
+    // the other silently breaks either the discriminator or fixpoint
+    // determinism (#660 clone-carry seam).
+    if ast.state.pattern_binding_pairs.len() != ast.state.pattern_binding_keys.len():
+        report.fail(f"pool: pattern_binding mirror diverged (vec={ast.state.pattern_binding_pairs.len() as i32} map={ast.state.pattern_binding_keys.len() as i32})")
+    for pbi in 0..ast.state.pattern_binding_pairs.len() as i32:
+        if not ast.state.pattern_binding_keys.contains(ast.state.pattern_binding_pairs.get(pbi as i64)):
+            report.fail(f"pool: pattern_binding pair[{pbi}] missing from key map")
+
+    // Sema scope-stack family: 9 members, all pushed by scope_insert_at.
+    // A partial save/swap/restore (the #664 bug) diverges these lengths.
+    let binds = sema.bind_names.len()
+    if sema.bind_types.len() != binds or sema.bind_muts.len() != binds or sema.bind_states.len() != binds or sema.bind_is_task.len() != binds or sema.bind_task_used.len() != binds or sema.bind_is_scoped_task.len() != binds or sema.bind_is_view_bound.len() != binds or sema.bind_provenance.len() != binds:
+        report.fail("families: bind_* scope-stack lengths diverge (partial environment swap)")
+    if sema.generic_subst_param_syms.len() != sema.generic_subst_type_ids.len():
+        report.fail("families: generic substitution pair diverged")
+    if sema.autoderef_step_fns.len() != sema.autoderef_step_tys.len():
+        report.fail("families: autoderef step family diverged")
+    if sema.moved_field_base_syms.len() != sema.moved_field_path_starts.len() or sema.moved_field_path_starts.len() != sema.moved_field_path_counts.len():
+        report.fail("families: moved_field family diverged")
+    if sema.dyn_impl_flat_method_names.len() != sema.dyn_impl_flat_sigs.len() or sema.dyn_impl_flat_sigs.len() != sema.dyn_impl_flat_mono_syms.len():
+        report.fail("families: dyn_impl flat rows diverged")
+
+    // The #661 seam: decl-source attribution tables must mirror ast.decls.
+    if sema.decl_source_paths.len() > 0 and sema.decl_source_paths.len() as i32 != ast.decl_count():
+        report.fail(f"families: decl_source tables ({sema.decl_source_paths.len() as i32}) diverge from ast.decls ({ast.decl_count()})")
+    if sema.decl_source_paths.len() != sema.decl_source_file_ids.len():
+        report.fail("families: decl_source_paths/file_ids diverged")
+
+    report.note(f"pool-audit: nodes={ast.node_count()} fn_meta={ast.state.fn_meta.len() as i32 / 7} for_meta={ast.state.for_meta.len() as i32 / 3} pattern-bindings={ast.state.pattern_binding_pairs.len() as i32} decls={ast.decl_count()}")
+
 fn analysis_audit_storage(report: &AnalysisReport, sema: &Sema):
     let node_count = sema.ast.node_count()
     var resolved_calls = 0
@@ -1347,6 +1420,7 @@ fn compiler_analysis_render(report: &AnalysisReport, request: str) -> str:
     if request == "audit:calls": return report.render_verdict("call-contract-audit")
     if request == "audit:effects": return report.render_verdict("effect-audit")
     if request == "audit:storage": return report.render_verdict("storage-audit")
+    if request == "audit:pool": return report.render_verdict("pool-audit")
     if request == "audit:methods": return report.render_verdict("method-registration-audit")
     if request == "audit:phase": return report.render_verdict("phase-audit")
     if request == "audit:mir": return report.render_verdict("mir-audit")
@@ -1389,6 +1463,8 @@ fn compiler_analysis_run(sema: &Sema, mir_mod: &MirModule, pool: &InternPool, so
         analysis_audit_effects(&report, sema)
     else if request == "audit:storage":
         analysis_audit_storage(&report, sema)
+    else if request == "audit:pool":
+        analysis_audit_pool(&report, sema)
     else if request == "audit:methods":
         analysis_audit_method_registrations(&report, sema)
     else if request == "audit:phase":
@@ -1411,6 +1487,7 @@ fn compiler_analysis_run(sema: &Sema, mir_mod: &MirModule, pool: &InternPool, so
         analysis_audit_call_contracts(&report, sema, mir_mod)
         analysis_audit_effects(&report, sema)
         analysis_audit_storage(&report, sema)
+        analysis_audit_pool(&report, sema)
         analysis_audit_method_registrations(&report, sema)
         analysis_audit_mir(&report, mir_mod)
         analysis_audit_return_consistency(&report, sema, mir_mod)
