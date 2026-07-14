@@ -11733,6 +11733,15 @@ impl Sema:
         if kind == NodeKind.NK_PAT_TYPED_BIND:
             let bind_sym = self.ast.get_data0(node)
             let type_sym = self.ast.get_data1(node)
+            // A type-annotated binding pattern `name: Type` is a dynamic
+            // downcast — only meaningful when the subject is a trait object.
+            // On a concrete subject (e.g. an i32 variant payload) it has no
+            // runtime meaning and used to reach the dyn-vtable-compare lowering
+            // with a null trait, crashing at runtime (#663). Reject it loudly.
+            let tb_subject_resolved = self.resolve_alias(subject_type as TypeId)
+            if subject_type != 0 and self.get_type_kind(tb_subject_resolved) != TypeKind.TY_TRAIT_OBJ:
+                self.emit_error("type-annotated binding pattern `name: Type` is only valid to downcast a trait object; bind the value with `name` instead", node)
+                return
             var concrete_type = 0
             concrete_type = self.lookup_named_type_visible(type_sym)
             if concrete_type != 0:

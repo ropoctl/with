@@ -896,18 +896,28 @@ impl ResolveState:
             self.bind_pattern(pool, module_id, parent_def, current_scope, pool.get_data1(pat))
             return
 
+        if kind == NodeKind.NK_PAT_TYPED_BIND:
+            let name_sym = pool.get_data0(pat)
+            let d = self.add_def(module_id, parent_def, DefKind.DK_LOCAL, name_sym, pool.get_start(pat), pool.get_end(pat))
+            self.add_binding(current_scope, name_sym, d)
+            return
+
         if kind == NodeKind.NK_PAT_VARIANT or kind == NodeKind.NK_PAT_ENUM_SHORTHAND:
             let start = pool.get_data1(pat)
             let count = pool.get_data2(pat)
-            let pat_start = pool.get_start(pat)
-            let pat_end = pool.get_end(pat)
             for i in 0..count:
+                // #663: the variant payload slot is node-only (every producer
+                // stores a pattern NODE). The old numeric kind-range probe
+                // (100..113) wrongly excluded NK_PAT_TYPED_BIND (114) /
+                // NK_PAT_REGEX (121) / NK_PAT_REST (125) and included the
+                // non-pattern NK_MATCH_ARM (110), so `V(x: T)` fell to the
+                // else branch and registered a DK_LOCAL keyed on a node id
+                // (garbage) instead of binding x. Use the authoritative
+                // pattern-kind test and recurse; a non-pattern entry is
+                // malformed and is skipped rather than mis-bound.
                 let inner = resolve_extra_or_zero(pool, start + i)
-                if inner != pat and resolve_node_valid(pool, inner) and pool.kind(inner) >= NodeKind.NK_PAT_WILDCARD and pool.kind(inner) <= NodeKind.NK_PAT_SLICE and pool.get_start(inner) >= pat_start and pool.get_end(inner) <= pat_end:
+                if inner != pat and pool.is_pattern_node(inner):
                     self.bind_pattern(pool, module_id, parent_def, current_scope, inner)
-                else if inner > 0:
-                    let d = self.add_def(module_id, parent_def, DefKind.DK_LOCAL, inner, pool.get_start(pat), pool.get_end(pat))
-                    self.add_binding(current_scope, inner, d)
             return
 
         if kind == NodeKind.NK_PAT_TUPLE or kind == NodeKind.NK_PAT_OR:
