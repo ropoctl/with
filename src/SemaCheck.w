@@ -3114,6 +3114,16 @@ impl Sema:
         let saved_bind_is_task = self.bind_is_task
         let saved_bind_task_used = self.bind_task_used
         let saved_bind_is_scoped_task = self.bind_is_scoped_task
+        // #664: bind_is_view_bound is the 9th member of the scope-stack
+        // family (scope_insert_at pushes all 9) and the moved_field_* vecs
+        // are its satellites; skipping them here left the inner environment
+        // pushing view-bound flags into the OUTER vec — lengths diverged and
+        // inner bindings read the caller's flags at their aligned indices.
+        let saved_bind_is_view_bound = self.bind_is_view_bound
+        let saved_moved_field_base_syms = self.moved_field_base_syms
+        let saved_moved_field_path_starts = self.moved_field_path_starts
+        let saved_moved_field_path_counts = self.moved_field_path_counts
+        let saved_moved_field_path_syms = self.moved_field_path_syms
         let saved_bind_provenance = self.bind_provenance
         let saved_scope_starts = self.scope_starts
         let saved_scope_name_map = self.scope_name_map
@@ -3127,6 +3137,11 @@ impl Sema:
         self.bind_is_task = Vec.new()
         self.bind_task_used = Vec.new()
         self.bind_is_scoped_task = Vec.new()
+        self.bind_is_view_bound = Vec.new()
+        self.moved_field_base_syms = Vec.new()
+        self.moved_field_path_starts = Vec.new()
+        self.moved_field_path_counts = Vec.new()
+        self.moved_field_path_syms = Vec.new()
         self.bind_provenance = Vec.new()
         self.scope_starts = Vec.new()
         self.scope_starts.push(0)
@@ -3151,6 +3166,11 @@ impl Sema:
         self.bind_is_task = saved_bind_is_task
         self.bind_task_used = saved_bind_task_used
         self.bind_is_scoped_task = saved_bind_is_scoped_task
+        self.bind_is_view_bound = saved_bind_is_view_bound
+        self.moved_field_base_syms = saved_moved_field_base_syms
+        self.moved_field_path_starts = saved_moved_field_path_starts
+        self.moved_field_path_counts = saved_moved_field_path_counts
+        self.moved_field_path_syms = saved_moved_field_path_syms
         self.bind_provenance = saved_bind_provenance
         self.scope_starts = saved_scope_starts
         self.scope_name_map = saved_scope_name_map
