@@ -114,11 +114,12 @@ Implemented:
 - `with build :sdk-ninja`, `:sdk-cmake`, `:sdk-llvm`, and `:sdk` are the
   post-seed SDK rebuild path. They use previously fetched With-owned
   CMake/Ninja/Clang/lld tools instead of discovering host build tools.
-- `with build :requirements` and `:requirements-check` replace the old Python
-  requirements generator. `:test` includes the check target.
+- The old Python requirements generator and its temporary With replacement are
+  removed. `docs/requirements.md` is hand-maintained; `:test` retains only
+  `:requirements-informative-check` to enforce Section 30's informative status.
 - The repository `Makefile`, release package scripts, SDK package scripts, and
-  Python requirements generator have graph replacements and are removed by this
-  change.
+  Python requirements generator are removed. The requirements matrix's current
+  hand-maintained policy is documented in `docs/requirements.md`.
 - Release convenience installers are scripts and are intentionally retained
   outside the build graph:
   - `scripts/install.sh`
@@ -354,6 +355,10 @@ first-seed/new-platform boundary; no `post-seed blocker` paths should remain.
   tracked scripts are limited to retained installer and bootstrap-boundary
   files, CI does not invoke Make or repository scripts, and remaining
   PowerShell references are bootstrap-runbook examples or installer internals.
+- 2026-06-29: Retired the generated-matrix path too: deleted
+  `build/requirements.w` and the `:requirements` / `:requirements-check`
+  targets, made `docs/requirements.md` explicitly hand-maintained, and retained
+  only `:requirements-informative-check` in `:test`.
 
 ## Implementation Tasks
 

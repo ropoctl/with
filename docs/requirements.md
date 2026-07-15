@@ -1,16 +1,21 @@
 # With Language Requirements
 
-This document is a requirements traceability matrix derived from `docs/with-specification.md` (Specification v7.1).
+This document is a hand-maintained requirements traceability matrix for
+`docs/with-specification.md` (Specification v7.1). It was originally generated,
+but the generators were retired; update this file directly when the specification
+changes. The build never regenerates or rewrites it. The surviving
+`:requirements-informative-check` target only enforces that Section 30 remains
+informative rather than creating independent normative requirements.
 
 **Triage campaign (2026-06-10): COMPLETE.** Every requirement below
 was reviewed against the spec, the implementation, and the test suite
-before this regeneration. A checked box means *triaged*, not
+before the final generated snapshot. A checked box means *triaged*, not
 *implemented*: entries whose behavior is unimplemented or partial carry
 an `— impl: #N` issue link; entries with significant test-coverage gaps
 carry a `— tests: #N` link; entries with neither link are either
-implemented-and-tested or non-testable. Regeneration preserves existing
-checkboxes and issue-link suffixes by matching requirement text and by
-stable requirement ID when the ID still names the same text.
+implemented-and-tested or non-testable. When editing, preserve existing
+checkboxes and issue-link suffixes, and keep a stable requirement ID when it
+still names the same requirement.
 
 ## Traceability Model
 
@@ -22,7 +27,7 @@ stable requirement ID when the ID still names the same text.
 - Filler/meta sentences such as moved-document notices, appendix framing, and pure changelog prose are intentionally excluded. Examples and code blocks are usually represented through the surrounding normative prose, not as independent requirements.
 - Section 30 is explicitly informative. Its `30.x` entries, when present, are trace links only and are not independent normative requirements. Normative grammar requirements must cite the owning section that defines the construct.
 
-Generated coverage: 3114 normative requirements plus 52 informative Section 30 trace links from 275 numbered spec sections.
+Current inventory: 3114 normative requirements plus 52 informative Section 30 trace links from 275 numbered spec sections.
 
 ## 1. Design Goals
 
