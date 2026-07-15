@@ -1,227 +1,377 @@
 # Handoff: release-blocker campaign toward stable v0.16.0
 
-Rewritten 2026-07-14 as a self-contained takeover document. Read
-`AGENTS.md` first. This supersedes the spec-suite-debt handoff; git history
-retains that version at `b987f97c`.
+Rewritten 2026-07-15 as a self-contained takeover document. Read `AGENTS.md`
+first, then this. Supersedes the earlier release-blocker handoff; git history
+retains prior versions (`356e7750`, `ffe58231`, `b987f97c`).
+
+---
 
 ## 1. Executive status
 
-- Branch: `main`. HEAD: `c14a2e62` (pushed to origin).
-- Working tree clean except this file.
-- All gates green at HEAD and evidence recorded 2026-07-14:
-  full graph build, `:fixpoint` (twice), `:test` (RC=0, includes the new
-  invariance-check and comptime-diff targets), `:test-green`, `:last-green`,
-  drop-audit (25 cells, 0 fail), `analyze src/main.w audit:all`
-  (2,171,934 facts, 0 violations).
-- **Maintainer intent (Eric, 2026-07-14): get to a release, but only from a
-  stable place.** Stable = the compiler is never silently wrong. The release
-  is v0.16.0; the gate is the silent-wrongness blocker list in §3 (now 10
-  confirmed + #643 pending, after investigation removed #646/#630).
-  Product-surface gaps (std.net stubs #658, std.time #657, fetch #623,
-  c_import #582), Windows (#297/#298/#369), and emit-C (#668/#619) are
-  explicitly NOT release blockers — they ship as known limitations.
-- Iteration context: last release v0.15.1 (2026-06-08); ~500 commits since.
-  The maintainer wants short iterations again: after this blocker campaign,
-  one class-kill = one release.
+- Branch: `main`. HEAD: **`058f38c5`** (pushed to origin).
+- **8 of 10 silent-wrongness release blockers are FIXED, gated, and pushed.**
+  Each landed as its own two-generation-verified, fully-gated commit.
+- **One blocker (#643) has an UNCOMMITTED fix in the working tree** — build +
+  fixpoint verified, but audit:all / drop-audit / `:test` not yet confirmed
+  (the gate run was interrupted). See §5 for the exact state and how to finish.
+- Two blockers removed from the set with analysis: #549 (deferred — false-
+  positive risk), #644 (re-triaged — D7 already made it loud, not a blocker).
 
-## 2. What landed this session (b987f97c..c14a2e62)
+Working tree (uncommitted):
+```
+ M src/ComptimeEval.w                                  # #643 fix (narrowed)
+?? test/behavior/behav_global_read_into_local_tail.w   # #643 fixture
+```
 
-Six leverage tools + fixes, all gated and pushed:
+### Maintainer intent (Eric, 2026-07-14/15)
 
-1. `invariance-check` (build.w Action, dep of `tests`): five seeded
-   meaning-preserving perturbations of the tree must not change the
-   compiler's verdict.
-2. `analyze ... audit:pool` (Analysis.w, in `audit:all`): parallel-family
-   integrity — SoA columns, stride tables, map/vec mirrors, bind_* 9-vec
-   parity, decl_source seam.
-3. Per-node file-id column in AstPool + `AstFileId` distinct-type pilot
-   (campaign: #666).
-4. #661 fixed: resolve-phase parse errors render against their own module
-   (acceptance: injected parse error in SemaCheck.w renders
-   `--> src/SemaCheck.w:<line>`, not phantom `src/main.w:4495`).
-5. `test/comptime_diff/` corpus (6 files, comptime==runtime differential);
-   known divergences tracked in #665.
-6. `--survey` keep-going mode for graph test/action targets
-   (DriverOptions.w, main.w; inventoried as implementation-internal).
+Get to a release, but only from a **stable** place. "Stable" is defined
+operationally: **the compiler is never silently wrong** — no program that
+type-checks green then traps, mutates nothing, mis-parses, or returns a
+wrong value. That is the release gate, NOT feature-completeness. Product-
+surface gaps (std.net stubs #658, std.time #657, native fetch #623, c_import
+macros #582), Windows (#297/#298/#369), and emit-C (#668/#619) are explicitly
+**not** blockers; they ship as documented limitations.
 
-Also fixed: #664 (bind_* 9th-member environment swap). Closed with
-evidence: #655, #661, #664, #667.
+Iteration cadence: last release was **v0.15.1 on 2026-06-08**; ~500 commits
+since with no release. Eric wants short iterations again — the agreed model is
+**one class-kill = one release** after this campaign (see §9).
 
-### #667 — read this before touching file ids or the text registry
+---
 
-The flaky "missing MIR body for build_graph_resolve_project_path" was
-caused by an earlier draft of the #661 fix registering RESOLVE-generation
-file ids into the shared Zcu/Sema source-text registry, where they collide
-with MERGE-generation ids (two independent i32 id domains, first-match
-scan). Wrong text for a fid made `extract_decl_name_after` return
-"BTreeMap.new" for a plain fn; the dot-scan in `fn_node_is_generic_template`
-(Sema.w ~5341) classified it generic; `lower_module` silently skipped its
-body; codegen dispatch (a DIFFERENT genericity predicate) then failed.
-The fix confines registration to the resolve-error early-out
-(Frontend.w `register_resolved_source_texts`). Full narrative on #667.
-Standing hazards folded into #666/#651: text-probing genericity predicate;
-lower_module vs dispatch predicate divergence; multi-writer i32 registry.
-Never re-introduce unconditional resolve-id registration.
+## 2. Release-blocker scoreboard
 
-## 3. The release-blocker list — investigated 2026-07-14
+The 10-issue silent-wrongness set (from the 2026-07-14 investigation workflow),
+by cluster. All CLOSED issues are pushed with evidence comments.
 
-Two background workflows ran the investigation + backlog triage
-(§4 has provenance/caveats). Root causes below are single-agent findings
-with exact file:line; the adversarial verifier pass did NOT complete for
-most (usage limit) — treat each as a strong lead, and let the per-cluster
-gate + the fixer's own re-read be the verification. All reproduce on the
-current release compiler unless noted.
+| # | Title (abbrev) | Cluster | Status | Commit |
+|---|---|---|---|---|
+| 653 | early `return <value>` → Unit, undef branch trap | A return-inference | CLOSED | `e7ffc479` |
+| 659 | inferred-Unit fn, `return <value>` swallowed | A | CLOSED | `e7ffc479` |
+| 652 | trait-impl inferred return rejected vs trait | A | CLOSED | `e7ffc479` |
+| 654 | `if unit_call():` never type-checked → runtime trap | B cond/branch | CLOSED | `759667c6` |
+| 631 | unit pattern `()` rejected | B | CLOSED | `759667c6` |
+| 622 | array-literal→slice binding: silent corruption + segfault | C slice | CLOSED | `edd472de` |
+| 663 | variant payload misparse (garbage binding) | D match-payload | CLOSED | `a4419996` |
+| 634 | `Some(x)` as operator operand: no codegen dest type | E codegen | CLOSED | `058f38c5` |
+| 549 | incompatible `if` branches pass without diagnostic | — | **DEFERRED** | — |
+| 644 | `mut self` on primitive/str passes by value | F receiver | **NOT A BLOCKER** | — |
+| 643 | global read into local drops tail value | F globals | **FIX UNCOMMITTED** | — |
 
-### 3a. Removed from the blocker set
+Backlog: 660 filed lifetime / **~43 open** at HEAD. Of the open set only a
+handful are census-class correctness bugs; the rest are product surface, test
+tracks, Windows, infra. Full backlog triage (32 issues) from 2026-07-14 lives
+in the workflow journal (§8); headline: **zero issues found spec-obsolete**
+despite D5/D7/D8.
 
-- **#646 — CLOSE (already fixed).** Does NOT reproduce; dissolved by D7
-  (commit a27c9e3e; decisions.md D7 lists it). Only gap is coverage: add a
-  compile-error fixture `fn Type.name(self: ConcreteType)` and close.
-- **#630 — DOWNGRADE (not silent-wrong).** `vec.len() - 1` on empty Vec is
-  a CORRECT loud unsigned-underflow trap; the defect is only the panic
-  message lacking file:line (CodegenDispatch.w:2191 → emit_runtime_panic
-  hardcodes empty file/line). Diagnostic-quality, not a stability blocker.
-  Fix when convenient (thread `current_stmt_span` into emit_runtime_panic).
+---
 
-### 3b. True silent-wrongness blockers (10 + #643 pending)
+## 3. Fixes landed this session — with source + spec references
 
-Clustered by shared root / touched phase — one CLUSTER = one gated
-bootstrap cycle = one commit series:
+Every fix went through: minimal repro → exact-line root cause (dumps/lldb) →
+fix → two-generation build (no self-host flip) → `with build` + `:fixpoint`
+(stage2==stage3) + `analyze audit:all` (0 violations) + drop-audit (25 cells,
+0 fail) + full `:test`. Each carries behavior and/or compile-error fixtures.
 
-- **Cluster A — return-type inference (Sema).** #653 and #659 are the SAME
-  root: `merge_body_return_type_info` (SemaCheck.w:4881-4883) conflates
-  "type not recorded" (actual==0) with a bare `return`, because
-  `typed_expr_types` is never populated for bool-literals or binary-op
-  results — so an unannotated fn with `return <bool/comparison/arith>`
-  silently finalizes Unit, caller branches on undef, traps at -O1. Fix:
-  record `val_type` in `check_return` (SemaCheck.w:8785), one choke point;
-  add a loud "cannot infer return type" guard in the merge. #652 is the
-  same family, different site: trait-impl contract (SemaCheck.w:1523)
-  compares against the placeholder ty_void for unannotated methods — skip
-  the comparison when there's no return annotation.
-  **⚠ Self-host flip risk (#629): the fix changes the finalized signature
-  of any compiler/stdlib fn that currently mis-finalizes Unit; expect a
-  possible flag-day red build whose error list IS the work queue. Diff
-  `analyze` signature facts over compiler sources before/after.**
-- **Cluster B — condition/branch type-check gaps (Sema).** #654: `if`/
-  `while`/`do-while`/`match` never verify the condition is bool
-  (SemaCheck.w:8215 etc.) — `if unit_call():` checks ok, traps at runtime
-  (this is the companion trap to Cluster A). #549: incompatible `if`
-  branches (str vs i32) silently fall through `arithmetic_result_type`
-  with no error (SemaCheck.w:8271). #631: empty-tuple pattern `()` rejected
-  because `()` is typed ty_void not zero-elem TY_TUPLE (SemaCheck.w:11857).
-  All three live in the check_if_expr / check_pattern region; fixes are a
-  `check_bool_condition` helper + poison-convention error + `type_is_unit`
-  accept branches.
-- **Cluster C — slice annotation (Parser).** #622: `[T]` parses AST-
-  identical to `[]T` (Parser.w:7482), producing a silently corrupt slice
-  (wrong `.len()`). Fix: reject `[T]` at parse with a "write `[T; N]` or
-  `[]T`" diagnostic.
-- **Cluster D — match payload misparse (Resolve).** #663: `bind_pattern`
-  payload probe is a numeric kind-RANGE (Resolve.w:906) that excludes
-  NK_PAT_TYPED_BIND/REGEX/REST and includes non-pattern kinds — the exact
-  #660 untagged-union family. Fix: node-only slot + `is_pattern_node`,
-  delete the sym-guessing branch.
-- **Cluster E — codegen hole (MirLower).** #634: ambient `expected_type`
-  overrides Sema's recorded node type for a variant-constructor used as an
-  operator operand (MirLower.w:11605), so `Some(x)` as an operand gets the
-  wrong aggregate type. Fix: rebind expected_type per operand (the #586
-  pattern).
-- **Cluster F — receiver mode (Sema/ABI), design-adjacent.** #644: mut-self
-  on a primitive/str owner passes self BY VALUE, so in-place mutation never
-  reaches the caller (SemaDecl.w:1089-1094 early-outs before reading the
-  receiver mode). Fix per §9.5 / D5 is share-place for these receivers —
-  confirm the ABI direction against `--dump-abi` before touching
-  `fn_param_uses_value_ref_abi`.
-- **#643 — NOT YET INVESTIGATED** (agent hit the usage limit). Re-run its
-  investigation (resume the workflow, or by hand) before finalizing the
-  set. Filed as: reading a top-level global into a local drops the fn's
-  implicit tail-expression value (#640 family) — likely Cluster A/E-adjacent.
+### Cluster A — return-type inference (`e7ffc479`) — #653, #659, #652
 
-Repros for the investigated issues are under
-`scratchpad/blockers/issue-<N>/`. Full per-issue root cause + fix + fixture
-plan is in the workflow journal (§4).
+- **Root cause (#653/#659):** `Sema.check_return` (src/SemaCheck.w ~8785)
+  computes the return value's type, but `check_expr` types bool literals
+  (src/SemaCheck.w:5368 `NK_BOOL_LIT` returns `ty_bool` with no
+  `typed_expr_types.insert`) and binary-operator results without self-
+  recording them. Return-type inference (`body_return_type_info`,
+  src/SemaCheck.w:4912; fed by `recorded_expr_type_or_zero`, :4781) then read
+  the value back as `0` (unrecorded) and `merge_body_return_type_info`
+  (:4879-4883) misclassified the value-return as a **bare** `return`,
+  finalizing the signature as Unit (`infer_unannotated_function_return_type`,
+  :4971). Caller branched on `undef`, trapping at -O1.
+- **Fix:** record `val_type` at the single choke point in `check_return`
+  (`if val_type != 0: self.typed_expr_types.insert(value, val_type as i32)`).
+  Fixes every node kind at once and re-armed the mixed bare/value-return
+  diagnostic.
+- **#652:** `check_trait_impl_method_signature_contract` (src/SemaCheck.w:1510)
+  compared the impl method's return against the trait's **before inference
+  ran**, so an unannotated method saw the placeholder `ty_void`. Now guarded
+  on `has_ret_annotation` (computed at :1588, passed through).
+- **Spec:** §29.13 / §4.9–§4.10 (last expression is the function's value);
+  §15.2 conformance.
+- **Flip risk (#629):** signature-fact diff over compiler sources showed 0
+  changed inferred returns; build clean.
 
-## 4. Workflow results + provenance (2026-07-14)
+### Cluster B — condition & branch checks (`759667c6`) — #654, #631
 
-Both workflows COMPLETED (tail agents errored on the Fable 5 usage limit;
-the session then switched to Opus 4.8). Results are session-local; the
-journals persist on disk:
+- **#654:** if/while/do-while conditions had their type computed and
+  discarded. Added `Sema.check_bool_condition(cond, what)` (src/SemaCheck.w,
+  just before `check_if_expr`) — requires bool, accepts a diverging `Never`
+  or already-errored condition — and routed the three sites through it
+  (`check_if_expr` ~8221; while ~5493; do-while ~5544).
+- **Flip work-queue (the #629 red build IS the queue):** the check surfaced 6
+  compiler-internal sites branching directly on an i32-returning predicate
+  (`types_compatible`/`types_compatible_frozen`/`has_drop_method` in Sema.w;
+  a `types_compatible` in SemaCheck.w:8289; `is_bitpacked` in Codegen.w:3522;
+  `c_import_is_int_literal` in Frontend.w:1019). Each made explicit with
+  `!= 0` — the codebase's dominant idiom. **This is "fix the code to pass the
+  check," not weakening the check.**
+- **#631:** the unit pattern `()` is typed `ty_void`, not a zero-element
+  tuple, so it failed `check_pattern`'s `NK_PAT_TUPLE` arm (src/SemaCheck.w
+  ~11883). Accept it when `type_is_unit(resolved)`; **and in the two MIR
+  lowerings** (src/MirLower.w ~7317 match: irrefutable goto arm; ~7542
+  binding: no bindings). The behavior fixture caught that the Sema-only fix
+  was insufficient.
+- **Spec:** §13 control flow (bool conditions); §10 pattern matching.
 
-1. `release-blocker-investigation` — run `wf_23d064fb-a9b`. Journal:
-   `~/.claude/projects/-Users-eric-with/ef176777-c53d-45c1-b06c-b9dae2391f27/subagents/workflows/wf_23d064fb-a9b/journal.jsonl`
-   (one `{"type":"result"}` line per agent, full root_cause/proposed_fix/
-   fixtures/risk). 12/13 investigated (#643 missing); adversarial
-   verifiers mostly did NOT run → root causes are UNVERIFIED single-agent.
-   Script: `.../workflows/scripts/release-blocker-investigation-wf_23d064fb-a9b.js`
-2. `backlog-spec-relevance-triage` — run `wf_5a2e175e-abe`. Journal:
-   `.../subagents/workflows/wf_5a2e175e-abe/journal.jsonl`.
-   32/35 triaged (#297, #298, #489 hit the limit). **Headline: ZERO issues
-   found spec-obsolete** despite D5/D7/D8 — the backlog is real, not ghosts.
-   - STILL-VALID (18): #369 #490 #502 #570 #583 #591 #616 #618 #619 #623
-     #637 #638 #650 #651 #656 #657 #658 #662.
-   - STALE-NEEDS-UPDATE (12, rewrite premise/section refs, keep open):
-     #357 #491 #501 #507 #558 #561 #571 #582 #604 #615 #624 #649. Corrected
-     text is in each journal row's `recommended_action`.
-   - ALREADY-FIXED candidates (2, close pending — verifier never ran, so
-     UNVERIFIED): #578 (raylib c_import builds on current compiler; fixed
-     since v0.14.8) and #593 (requirements Python script deleted in
-     5cb48c36; matrix retired). Re-verify each, then close with the drafted
-     comment.
-   - NOT TRIAGED (3): #297 #298 #489 — resume before declaring the sweep
-     complete.
+### Cluster C — array-literal→slice binding (`edd472de`) — #622
 
-Next actions, in order: (a) verify + close #578, #593, #646 [+#655/#661/
-#664/#667 already closed]; (b) rewrite the 12 stale issues; (c) investigate
-#643 and finish triage of #297/#298/#489; (d) land blocker clusters A–F
-through gates (Cluster A first — it's the biggest self-host-flip risk and
-unblocks the runtime-trap family); (e) `docs/with-release-runbook.md` for
-v0.16.0 + reseed.
+- **The original report and the batch investigation were WRONG** (both
+  implicated the `[T]` surface syntax and proposed a parser rejection).
+  Disproven by running the compiler: the proper `[]i32` spelling corrupts
+  identically (`let a: []i32 = [1,2,3,4]` → `a.len() == 2`; `[10,20,30]` →
+  `len == 20`; **it reads element[1]** — the array literal is bit-
+  reinterpreted as a slice header `{ptr,len}`; indexing segfaults rc=139).
+  Rejecting `[T]` would also break the stdlib (lib/std/iter.w:50,54 use `[T]`
+  **parameters**, which work).
+- **Root cause:** `check_array_literal` (src/SemaCheck.w) returns the
+  *expected slice type* for an array literal when the expected type is a
+  slice, so the let-binding sees matching types (SemaCheck.w:8143) while MIR
+  lowers an array **value** — type and value disagree.
+- **Fix:** binding a slice to an array **literal** is fundamentally unsafe
+  (the temporary array is freed at end of statement → dangling slice; the
+  call-argument path rejects the same temporary at SemaCheck.w:422). The
+  named-array form is already rejected as a plain "type mismatch in binding";
+  this makes the literal form reject **loudly and consistently** (added just
+  before the `val_type` computation in the let-decl checker, SemaCheck.w
+  ~8132). Removes the silent corruption + OOB read.
+- **Spec:** §3.x sequence types — `[]T` slice (L2258), `[T; N]` array
+  (L1658); `[T]` is not valid type syntax.
+- **Follow-up (not a blocker):** proper array-literal→slice binding via
+  temporary lifetime extension (Rust-style rvalue promotion). Documented on
+  the closed issue.
 
-## 5. Build/gate mechanics (hard-won this session)
+### Cluster D — variant-payload misparse (`a4419996`) — #663
 
-- Current good binaries: `out/release/bin/with` == `/tmp/tools6e-g2`
-  (generation-2, fully gated, built from HEAD). `/tmp/tools6e-g1` is its
-  generation 1. `/tmp/with-impl-kind-bridge` remains the deviant bridge
-  seed: fine as a SEED, never trust generation-1 behavior — two-generation
-  discipline stands.
-- **Gate invocation needs BOTH env pieces** (this cost hours):
-  `WITH=/tmp/with-impl-kind-bridge WITH_MEMORY_LIMIT_BYTES=0
-  ./out/release/bin/with build :test`
-  — the current release binary must be the DRIVER (the installed seed's
-  comptime can't evaluate `str.split`, which `test-green` needs), and
-  WITH= must point at the bridge (seed-consuming bootstrap targets must
-  compile current sources).
-- **The installed seed `~/.local/bin/with` (v0.15.1) can no longer parse
-  HEAD sources** (chokes at src/main.w:56). Symptom if you use it: a wall
-  of phantom "expected declaration" errors rendered against
-  out/gen/main.w. Reseed (`:update-seed` + `:install-user`) after the next
-  green milestone — maintainer approval per AGENTS.md.
-- Never pipe gate commands (exit-code masking); redirect to a log file and
-  grep the harness's own verdict lines.
-- Full-compiler `--emit-c` is broken pre-existing (#668, plus OOM #619);
-  the in-gate emit-C smoke passes. Do not chase it as a regression.
+- **Root cause:** `ResolveState.bind_pattern` (src/Resolve.w:899-911)
+  probed the variant-payload slot with a numeric kind-RANGE (`>= NK_PAT_WILDCARD
+  (100) and <= NK_PAT_SLICE (113)`) that **excluded** NK_PAT_TYPED_BIND (114) /
+  REGEX (121) / REST (125) and **included** the non-pattern NK_MATCH_ARM (110).
+  So `V(x: T)` fell to the else branch and registered a `DK_LOCAL` keyed on a
+  pattern NODE id (garbage) — the surviving sibling of #660's untagged union.
+- **Fix (part 1):** replace the probe with the authoritative
+  `AstPool.is_pattern_node` (src/Ast.w:1616 → `ast_is_pattern_kind` :1597,
+  which explicitly enumerates all pattern kinds and excludes MATCH_ARM),
+  delete the dead sym-guessing branch (every producer stores nodes), and add
+  the missing `NK_PAT_TYPED_BIND` binder to `bind_pattern`.
+- **Fix (part 2):** fixing the resolver EXPOSED a latent segfault — a typed-
+  bind pattern `name: Type` is a **dynamic trait-object downcast** whose MIR
+  handler (src/MirLower.w:7360) emits `DYN_VTABLE_CMP`; on a concrete subject
+  (i32 payload) it ran with a null trait and crashed. Sema now rejects
+  typed-bind on a non-trait-object subject (src/SemaCheck.w ~11733, guard on
+  `get_type_kind(resolve_alias(subject_type)) != TypeKind.TY_TRAIT_OBJ`). The
+  dyn-downcast use (test/behavior/sealed_trait_match.w, `s: dyn Shape`) is
+  unaffected.
+- **Note:** #663 lists 5 readers of this slot; only Resolve.w was the live
+  misparse. The others (render.w, SemaCheck.w:11769, ComptimeEval.w:6107) are
+  dead-but-harmless (all producers store nodes) — sweep under #651 if desired.
 
-## 6. Debugging protocol reminders (from the #667 hunt)
+### Cluster E — enum-variant constructor as operand (`058f38c5`) — #634
 
-- lldb over instrument-rebuild loops. With-binary specifics: line tables
-  all map to main.w:4495 → use `br set -n 'Type.method'` and
-  symbol+offset address breakpoints from `disassemble -n`; str args are
-  (ptr,len) register pairs (`memory read -s1 -fc -c<len>`); `mov w0, wN`
-  before a `bl` is an argument move, not a return site; `finish` from a
-  breakpoint in an INLINED frame lies about the return value.
-- lldb disables ASLR by default — layout-dependent bugs can vanish under
-  it; `settings set target.env-vars X=1` to reproduce env-sensitive state.
-- Memory files: `feedback_lldb_over_instrumentation.md`,
-  `project_667_fileid_domain_collision.md`.
+- **Root cause:** `lower_bin_op` (src/MirLower.w:3763) lowered a comparison's
+  operand with the ambient `expected_type` (bool for `if a == b:`), and the
+  variant-constructor arm (src/MirLower.w:11605-11614,
+  `if self.expected_type != 0: vc_result_ty = self.expected_type`) used that
+  as the aggregate's type instead of Option[i32] → "aggregate rvalue missing
+  destination struct type".
+- **Fix:** for EQ/NEQ/LT/GT/LTE/GTE, lower each operand with the **other**
+  operand's type as `expected_type` (src/MirLower.w:3810-3821) — generalizing
+  the per-operand rebind #586 established for the bare-`None` case. Plain
+  scalar comparisons unaffected.
 
-## 7. After the blockers: the agreed path
+---
 
-1. v0.16.0 release (runbook) + reseed — headline: D7 receiver model,
-   audit/tooling suite, five weeks of fixes.
-2. Horizon "class-kill per release": #666 distinct ids (file ids first),
-   #651 cathedral sweep, missing-body audit invariant, #650 gate-cycle
-   speed. One class = one short iteration = one release.
-3. Then the product surface for the Sep 2026 flagships (Smallhold/Crux/
-   Weld): std.net, std.time, fetch, c_import — chosen by what the
-   flagships actually consume.
+## 4. Deferred / re-triaged (with analysis)
+
+### #549 — incompatible `if` branches pass without diagnostic (DEFERRED)
+
+Confirmed and root-caused (`check_if_expr`, src/SemaCheck.w ~8277: incompatible
+branches yield `result_type == 0`, the error type, silently absorbed). The
+naive fix (error when `arithmetic_result_type == 0 && in_value_context`)
+**false-positives** on the compiler's pervasive `BlockId`-vs-`i32` mixing:
+`BlockId = distinct i32` (src/Mir.w:10), but block ids are passed as raw `i32`
+(`fail_bb: i32`, `arm_bb: i32`) while `new_block()` returns `BlockId`, so
+`if c: new_block() else: 0` / `else: fail_bb` mix distinct-over-same-base. A
+correct check needs distinct-base-aware incompatibility (`numeric_operand_type`
+/ `is_numeric_type` at Sema.w:3393/3407 do NOT unwrap distinct; there is no
+`TY_DISTINCT` kind / base accessor). Entangled with #651. Full writeup posted
+on the issue. Not a blocker on its own (needs an incompatible-literal branch
+assigned to an annotated binding — narrower than #654, which is fixed).
+
+### #644 — `mut self` on primitive/str (NOT A BLOCKER)
+
+The silent bug (mutation lost) **no longer reproduces** — D7 receiver-mode
+enforcement (landed after the issue was filed) already makes every mutation
+form (`self =`, `self +=`, nested `mut fn`) a loud compile error ("cannot
+assign to immutable variable"). Zero `mut fn` methods on primitive/str owners
+exist in the codebase (no flip either way). The stability bar is met. The
+remaining A-vs-B ruling (A: lower primitive receivers by pointer / share-place
+per §9.5 — an ABI change to `fn_param_uses_value_ref_abi`, SemaDecl.w:1086,
+weigh vs docs/completed/mutability.md + decisions.md D5/D6/D7; B: keep
+rejecting but with a clearer message) is a post-release maintainer decision.
+Full writeup on the issue.
+
+---
+
+## 5. #643 — IN PROGRESS (finish this first)
+
+**Issue:** reading a plain top-level global (`var`/`let`, no `global` keyword)
+into an unannotated local drops the function's implicit tail value — returns
+the type default instead. Spec §29.13/§4.9-4.10.
+
+**Root cause (nailed, exact line):** the parser gives a **plain** top-level
+`let`/`var` `global_bits = 0` (src/Parser.w:2693-2695 — only the `global`
+keyword sets `LET_FLAG_GLOBAL`/`LET_FLAG_GLOBAL_VAR`). So `let_decl_is_global`
+(src/Ast.w:333, `(flags/4)%2`) is 0, and `check_top_level_let_values`
+(src/ComptimeEval.w:7031, called from `check_module` Sema.w:5494 **before**
+`check_bodies` :5496) **skipped** the decl (old line 7046). Its type was never
+inferred — it kept the `0` that `collect_let_decl` → `register_top_level_global_decl`
+(src/SemaDecl.w:1931 / Sema.w:3859) registered (bind_ty from annotation only,
+`0` when unannotated). Reading it into an unannotated local propagated the
+unresolved type (`bind mid: <error>`, MIR local `ty14`), and the tail failed
+the tail-as-return type check → `_0 = const ()`. Proof: MIR diff showed the
+tail computed into `_3` but `_0 = const ()`; `print_i32(mid)` showed the VALUE
+was correct (7) — only the declared TYPE was wrong. Annotating either the
+global or the local fixes it (both give a concrete type).
+
+**Fix (implemented, UNCOMMITTED, src/ComptimeEval.w:7046):** infer the type of
+a plain top-level let too — but **only while its scope type is still 0**:
+```
+if is_comptime_value == 0 and let_decl_is_global(flags) == 0 and self.scope_lookup(name) != 0:
+    continue
+```
+The `scope_lookup(name) != 0` guard is load-bearing: a first, broader version
+(process ALL plain top-level lets) **regressed migrated c_import codegen**
+(`lib/std/re/pcre2_substitute.w` etc. — "IR generation failed" on
+`__ci_expr_logic_*`). The narrowed guard leaves already-typed globals
+(annotated user decls + typed migrated globals) undisturbed and only fills in
+genuinely-unresolved plain lets. **Lesson: the `src/main.w`-only two-gen build
+did NOT catch this — only the full `with build` (which codegens lib/std/re/)
+did. Always run the full build before trusting a Sema change.**
+
+**Verified so far:** `/tmp/t643.w` (var), `t643b.w` (let), `t643c.w`
+(explicit return) all print 12; two-generation build clean; **full `with build`
++ `:fixpoint` GREEN**.
+
+**NOT yet confirmed (the gate run was interrupted):** `analyze src/main.w
+audit:all`, drop-audit, full `:test`. Fixture written:
+`test/behavior/behav_global_read_into_local_tail.w`.
+
+**To finish #643:**
+1. `WITH=/tmp/seed-conv ./out/release/bin/with analyze src/main.w audit:all`
+   (expect `violations=0`).
+2. `python3 .claude/skills/drop-audit/audit.py --with out/release/bin/with`
+   (expect `0 fail`).
+3. `WITH=/tmp/seed-conv WITH_MEMORY_LIMIT_BYTES=0 ./out/release/bin/with build :test`
+   (behavior count should be +1; expect `test rc=0`). Grep the harness's own
+   `ok:` / `error:` lines — never tail-truncate.
+4. Commit `src/ComptimeEval.w` + the fixture; push; `gh issue close 643` with
+   an evidence comment noting the migrated-code narrowing.
+5. Then record the evidence chain (§7) and re-triage whether #640 (same family
+   — labeled-statement tail drop) shares this mechanism.
+
+---
+
+## 6. Build / seed mechanics (READ — the seed situation changed)
+
+- **`/tmp/with-impl-kind-bridge` is GONE** (cleaned from /tmp). It was the
+  deviant bridge seed. Do not rely on it.
+- **`/tmp/seed-conv` = a copy of `out/release/bin/with`** at the time of
+  writing — the **fixpoint-converged** binary from the last green gate. It is
+  NOT deviant (stage2==stage3), so it is a trustworthy seed. If it is also
+  cleaned from /tmp, re-copy from `out/release/bin/with` (which is always the
+  latest built release binary). Set `WITH=/tmp/seed-conv` (or
+  `WITH=./out/release/bin/with`) for `with build`.
+- Because the seed is converged, a single-generation build is already
+  trustworthy for Sema-only changes — but keep the two-generation habit
+  (`seed → g1 → g2`, trust g2) for ABI/codegen/parser changes.
+- **Gate invocation still needs BOTH pieces:** the fresh **release binary as
+  the driver** (the installed `~/.local/bin/with` v0.15.1 seed can no longer
+  parse HEAD sources — it chokes at src/main.w:56, and its comptime cannot
+  evaluate `str.split` for `test-green`), and `WITH=<converged seed>` for the
+  seed-consuming bootstrap targets:
+  ```
+  WITH=/tmp/seed-conv WITH_MEMORY_LIMIT_BYTES=0 ./out/release/bin/with build :test
+  ```
+- **Never pipe gate commands** (exit-code masking). Redirect to a log, grep
+  the `ok:`/`error:` verdict lines.
+- The installed seed `~/.local/bin/with` (v0.15.1) is badly stale. **Reseed
+  (`with build :update-seed` + `:install-user`) is due** after the campaign
+  lands — do it from the CONVERGED build, with maintainer approval per
+  AGENTS.md bootstrap rules.
+- All `-O1`, never `-O0` (AGENTS.md invariant).
+
+---
+
+## 7. Evidence chain to record after #643 lands
+
+Per AGENTS.md bootstrap sequence, as ONE chain:
+```
+WITH=/tmp/seed-conv WITH_MEMORY_LIMIT_BYTES=0 ./out/release/bin/with build :test
+./out/release/bin/with build :test-green
+./out/release/bin/with build :last-green
+# then, with maintainer approval, the reseed:
+./out/release/bin/with build :update-seed
+./out/release/bin/with build :install-user
+```
+Confirm `GATES EXIT: 0` as its own step before chaining the close/commit.
+
+---
+
+## 8. Investigation artifacts (session-local — may be gone)
+
+Two background workflows ran the 2026-07-14 investigation. Journals persist on
+disk under the session subagents dir but are session-scoped:
+- `release-blocker-investigation` — run `wf_23d064fb-a9b`. Per-issue repro +
+  root cause + fix + fixtures + risk. NOTE: its proposed fixes for **#622 and
+  #644 were WRONG** (disproven by running the compiler — see §3/§4); trust the
+  landed commits, not the workflow's fix directions.
+- `backlog-spec-relevance-triage` — run `wf_5a2e175e-abe`. 32/35 open issues
+  re-validated vs current spec + decisions.md. STALE-NEEDS-UPDATE (12, rewrite
+  premise): #357 #491 #501 #507 #558 #561 #571 #582 #604 #615 #624 #649.
+  ALREADY-FIXED candidates (verify then close): #578 (raylib c_import builds on
+  current compiler), #593 (requirements Python script deleted 5cb48c36). NOT
+  TRIAGED (agent hit usage limit): #297 #298 #489.
+
+Repros live under `scratchpad/blockers/issue-<N>/` and `/tmp/t6*.w` (the /tmp
+ones may be cleaned).
+
+---
+
+## 9. Path forward (agreed with maintainer)
+
+1. **Finish #643** (§5), record evidence (§7).
+2. **Backlog cleanup** (task list #24): verify + close #578, #593, #646;
+   rewrite the 12 stale issues from the journal's `recommended_action`;
+   investigate #643's sibling #640; finish triage of #297/#298/#489.
+3. **v0.16.0 release** (docs/with-release-runbook.md) + reseed. Headline: the
+   D7 receiver model, the audit/tooling suite, the fingerprint-keyed test
+   cache, this session's 8+ correctness fixes.
+4. **"One class-kill = one release"** going forward: #666 distinct ids (file
+   ids first — would have made #667 a compile error), #651 cathedral sweep
+   (unify duplicated per-path logic; e.g. the BlockId/i32 inconsistency that
+   blocks #549; the 5-reader payload slot from #663), a "every non-generic
+   NK_FN_DECL has a MIR body" audit invariant, #650 gate-cycle speedup.
+5. **Then** the product surface for the Sep-2026 flagships (Smallhold/Crux/
+   Weld): std.net (#658), std.time (#657), fetch (#623), c_import macros
+   (#582) — chosen by what the flagships actually consume.
+
+### Discipline that worked this session (keep it)
+
+- **Fix the class, not the instance.** Cluster A recorded the return type at
+  one choke point, fixing all node kinds. Cluster B's condition check found 8
+  latent sites — fixed the code, never weakened the check.
+- **Run it, don't reason it.** #622 and #644's filed/investigated root causes
+  were both wrong; running the compiler settled the facts.
+- **The full build is the flip detector**, not `check src/main.w` — #643's
+  migrated-code regression only showed under `with build`.
+- **A fixture that fails is the fix incomplete** — #631 (MIR layer) and #663
+  (segfault) were both caught by their fixtures, not by reasoning.
+- Every fix: two-generation build + full gate + fixture, one commit, evidence
+  comment on the issue.
