@@ -12,3 +12,5 @@ fn bump:
 
 fn main:
     bump()
+    let t = worker()
+    let _ = t.await

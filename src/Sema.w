@@ -476,8 +476,16 @@ type Sema {
     task_param_consumed_memo: HashMap[i64, i32],
     task_param_consumed_visiting: HashMap[i64, i32],
     detached_task_stmt_nodes: HashMap[i32, i32],
-    // Generic function node indices by name
+    // Generic function node indices by name. The map preserves the first
+    // declaration for single-template metadata lookups; the candidate tables
+    // retain every same-name generic declaration for structural overload
+    // selection at call sites.
     generic_fn_nodes: HashMap[i32, i32],
+    generic_fn_candidate_counts: HashMap[i32, i32],
+    generic_fn_candidate_syms: Vec[i32],
+    generic_fn_candidate_nodes: Vec[i32],
+    // Call expression/pipeline node -> selected generic declaration node.
+    resolved_generic_call_nodes: HashMap[i32, i32],
 
     // Methods: hash(type_sym, method_sym) → sig index
     extension_method_owner_syms: Vec[i32],
@@ -1524,6 +1532,7 @@ fn sema_empty_state(pool: InternPool, diags: DiagnosticList, ast: AstPool) -> Se
     let fn_clause_group_lookup = sema_new_map_i32_i32()
     let fn_clause_body_dispatch = sema_new_map_i32_i32()
     let generic_fn_nodes = sema_new_map_i32_i32()
+    let generic_fn_candidate_counts = sema_new_map_i32_i32()
     let variant_lookup = sema_new_map_i32_i32()
     let variant_type_ids = sema_new_map_i32_i32()
     let imported_variant_owners = sema_new_map_i32_i32()
@@ -1654,6 +1663,10 @@ fn sema_empty_state(pool: InternPool, diags: DiagnosticList, ast: AstPool) -> Se
         task_param_consumed_visiting: sema_new_map_i64_i32(),
         detached_task_stmt_nodes: sema_new_map_i32_i32(),
         generic_fn_nodes,
+        generic_fn_candidate_counts,
+        generic_fn_candidate_syms: Vec.new(),
+        generic_fn_candidate_nodes: Vec.new(),
+        resolved_generic_call_nodes: sema_new_map_i32_i32(),
         extension_method_owner_syms,
         extension_method_syms,
         extension_method_fn_syms,
@@ -5358,6 +5371,35 @@ impl Sema:
                     if self.type_decl_tp_count(type_node) > 0:
                         return 1
                 return 0
+        0
+
+    mut fn register_generic_fn_node(sym: i32, node: i32):
+        for i in 0..self.generic_fn_candidate_syms.len() as i32:
+            if self.generic_fn_candidate_syms.get(i as i64) == sym and self.generic_fn_candidate_nodes.get(i as i64) == node:
+                return
+        if not self.generic_fn_nodes.contains(sym):
+            self.generic_fn_nodes.insert(sym, node)
+        let prior = self.generic_fn_candidate_counts.get(sym)
+        self.generic_fn_candidate_counts.insert(sym, if prior.is_some(): prior.unwrap() + 1 else: 1)
+        self.generic_fn_candidate_syms.push(sym)
+        self.generic_fn_candidate_nodes.push(node)
+
+    fn generic_fn_candidate_key(sym: i32) -> i32:
+        if self.generic_fn_candidate_counts.contains(sym):
+            return sym
+        let target = self.pool_resolve_symbol(sym)
+        if target.len() == 0:
+            return sym
+        let canonical = self.pool_lookup_symbol(target)
+        if canonical != 0 and self.generic_fn_candidate_counts.contains(canonical):
+            return canonical
+        sym
+
+    fn generic_fn_registration_contains(sym: i32, node: i32) -> i32:
+        let key = self.generic_fn_candidate_key(sym)
+        for i in 0..self.generic_fn_candidate_syms.len() as i32:
+            if self.generic_fn_candidate_syms.get(i as i64) == key and self.generic_fn_candidate_nodes.get(i as i64) == node:
+                return 1
         0
 
     fn generic_fn_node_for_symbol(sym: i32) -> i32:

@@ -15,4 +15,6 @@ fn read_shared() -> i32:
 
 fn main:
     write_shared()
+    let t = marker()
+    let _ = t.await
     let _ = read_shared()

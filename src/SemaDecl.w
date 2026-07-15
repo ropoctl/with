@@ -1349,7 +1349,7 @@ impl Sema:
             if bi_tp_meta >= 0:
                 let bi_tp_count = self.ast.state.impl_type_params.get((bi_tp_meta + 2) as i64)
                 if bi_tp_count > 0:
-                    self.generic_fn_nodes.insert(fn_name, node)
+                    self.register_generic_fn_node(fn_name, node)
                     self.fn_decl_source_paths.insert(fn_name, self.current_module_path)
                     let _ = self.register_extension_method_candidate(node, fn_name, parsed_fn_name, -1, decl_index)
                     for pi in 0..param_count:
@@ -1359,7 +1359,7 @@ impl Sema:
                         self.named_types.remove(self_sym)
                     return
             else if self.impl_target_has_bare_type_params(bi_impl) != 0:
-                self.generic_fn_nodes.insert(fn_name, node)
+                self.register_generic_fn_node(fn_name, node)
                 self.fn_decl_source_paths.insert(fn_name, self.current_module_path)
                 let _ = self.register_extension_method_candidate(node, fn_name, parsed_fn_name, -1, decl_index)
                 for pi2 in 0..param_count:
@@ -1387,7 +1387,7 @@ impl Sema:
                     if concrete_inst_impl_method == 0 and self.type_decl_nodes.contains(cf_owner_sym):
                         let cf_td = self.type_decl_nodes.get(cf_owner_sym).unwrap()
                         if self.type_decl_tp_count(cf_td) > 0:
-                            self.generic_fn_nodes.insert(fn_name, node)
+                            self.register_generic_fn_node(fn_name, node)
                             self.fn_decl_source_paths.insert(fn_name, self.current_module_path)
                             let _ = self.register_extension_method_candidate(node, fn_name, parsed_fn_name, -1, decl_index)
                             self.named_types.remove(self_sym)
@@ -1396,7 +1396,7 @@ impl Sema:
 
         // Generic functions: store for later monomorphization
         if tp_count > 0:
-            self.generic_fn_nodes.insert(fn_name, node)
+            self.register_generic_fn_node(fn_name, node)
             self.fn_decl_source_paths.insert(fn_name, self.current_module_path)
             let _ = self.register_extension_method_candidate(node, fn_name, parsed_fn_name, -1, decl_index)
             for pi in 0..param_count:

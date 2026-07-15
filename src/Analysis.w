@@ -172,10 +172,10 @@ fn analysis_collect_method_registrations(report: &AnalysisReport, sema: &Sema, s
 
         if extension:
             registry_index = analysis_extension_registration_index(sema, owner, method, effective, sig)
-            exact = registry_index >= 0 and (not generic or sema.generic_fn_nodes.get(effective).unwrap() == node)
+            exact = registry_index >= 0 and (not generic or sema.generic_fn_registration_contains(effective, node) != 0)
             registry = "extension"
         else if generic:
-            exact = sema.generic_fn_nodes.get(effective).is_some() and sema.generic_fn_nodes.get(effective).unwrap() == node
+            exact = sema.generic_fn_registration_contains(effective, node) != 0
             registry = "generic"
         else:
             let mapped_sig = sema.method_lookup.sig_lookup.get(key)

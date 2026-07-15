@@ -3335,6 +3335,15 @@ impl Parser:
 
     // ── Pratt precedence climbing ────────────────────────────────────
 
+    mut fn build_forward_pipeline(lhs: NodeId, rhs: NodeId) -> NodeId:
+        if self.pool.kind(rhs) == NodeKind.NK_UNARY and self.pool.get_data0(rhs) == UnaryOp.UOP_TRY:
+            let stage = self.pool.get_data1(rhs) as NodeId
+            let pipeline = self.build_forward_pipeline(lhs, stage)
+            self.pool.set_data1(rhs, pipeline as i32)
+            self.pool.set_start(rhs, self.pool.get_start(lhs))
+            return rhs
+        self.pool.add_node(NodeKind.NK_PIPELINE, self.pool.get_start(lhs), self.pool.get_end(rhs), lhs, rhs, 0)
+
     mut fn parse_precedence(min_prec: i32) -> NodeId:
         var lhs = self.parse_primary()
         if lhs == 0:
@@ -3386,7 +3395,7 @@ impl Parser:
             let rhs = self.parse_precedence(next_prec)
 
             if op_code == 500:  // pipeline
-                lhs = self.pool.add_node(NodeKind.NK_PIPELINE, self.pool.get_start(lhs), self.prev_end(), lhs, rhs, 0)
+                lhs = self.build_forward_pipeline(lhs, rhs)
             else if op_code == 506:  // =~
                 lhs = self.pool.add_node(NodeKind.NK_MATCH_OP, self.pool.get_start(lhs), self.prev_end(), lhs, rhs, 0)
             else if op_code == 507:  // !~

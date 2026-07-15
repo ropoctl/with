@@ -47,7 +47,7 @@ let FIBER_STATE_SUSPENDED: i32 = 2
 let FIBER_STATE_DONE: i32 = 3
 
 let FIBER_CTX_SIZE: i64 = 168
-let FIBER_SIZE: i64 = 280
+let FIBER_SIZE: i64 = 288
 let FIBER_OFF_STATE: i64 = 168
 let FIBER_OFF_STACK: i64 = 176
 let FIBER_OFF_STACK_SIZE: i64 = 184
@@ -65,6 +65,7 @@ let FIBER_OFF_HAS_PANIC: i64 = 256
 let FIBER_OFF_PANIC_MSG: i64 = 264
 let FIBER_OFF_PANIC_MSG_LEN: i64 = 272
 let FIBER_OFF_OWNER_WORKER: i64 = 276
+let FIBER_OFF_COMPLETION_SEQUENCE: i64 = 280
 
 let PROT_NONE: i32 = 0
 let PROT_READ_WRITE: i32 = 3
@@ -102,6 +103,7 @@ var fiber_steal_attempts: i64 = 0
 var fiber_steal_events: i64 = 0
 var scheduler_round: i64 = 0
 var cross_thread_cancel_count: i64 = 0
+var completion_sequence: i64 = 0
 var fibers_by_slot: [1024]i64 = [0 as i64; 1024]
 var fiber_slot_generations: [1024]u32 = [0 as u32; 1024]
 var free_fiber_slots: [1024]i32 = [0 as i32; 1024]
@@ -316,6 +318,12 @@ fn fiber_owner_worker(f: i64) -> i32:
 
 fn fiber_set_owner_worker(f: i64, value: i32):
     store_i32(f, FIBER_OFF_OWNER_WORKER, value)
+
+fn fiber_completion_sequence(f: i64) -> i64:
+    load_i64(f, FIBER_OFF_COMPLETION_SEQUENCE)
+
+fn fiber_set_completion_sequence(f: i64, value: i64):
+    store_i64(f, FIBER_OFF_COMPLETION_SEQUENCE, value)
 
 fn fiber_compose_id(slot: i32, generation: u32) -> i32:
     ((generation as i32) << (FIBER_SLOT_BITS as u32)) | slot
@@ -610,6 +618,8 @@ pub fn with_fiber_bootstrap_finish() -> Unit:
     if current == 0:
         abort()
     scheduler_lock()
+    completion_sequence = completion_sequence + 1
+    fiber_set_completion_sequence(current, completion_sequence)
     fiber_set_state(current, FIBER_STATE_DONE)
     scheduler_wake_all()
     scheduler_unlock()
@@ -699,6 +709,7 @@ pub fn with_runtime_core_init() -> Unit:
     fiber_steal_attempts = 0
     fiber_steal_events = 0
     cross_thread_cancel_count = 0
+    completion_sequence = 0
     scheduler_round = 0
     free_fiber_slot_count = MAX_FIBERS
     panicked_fiber_head = 0
@@ -784,6 +795,7 @@ pub fn with_fiber_spawn(entry_fn: *const u8, arg: *mut u8, result_buf: *mut u8, 
     fiber_set_panic_msg(f, 0 as *const u8)
     fiber_set_panic_msg_len(f, 0)
     fiber_set_owner_worker(f, current_worker_index())
+    fiber_set_completion_sequence(f, 0)
     fiber_set_next(f, 0)
     store_i64_index(fibers_by_slot_base(), slot, f)
     live_fiber_count = live_fiber_count + 1
@@ -921,6 +933,8 @@ pub fn with_fiber_panic_capture(msg: *const u8, msg_len: i32) -> Unit:
     fiber_set_has_panic(current, 1)
     fiber_set_panic_msg(current, buf as *const u8)
     fiber_set_panic_msg_len(current, msg_len)
+    completion_sequence = completion_sequence + 1
+    fiber_set_completion_sequence(current, completion_sequence)
     fiber_set_state(current, FIBER_STATE_DONE)
     enqueue_panicked_fiber(fiber_id(current))
     scheduler_wake_all()
@@ -981,6 +995,16 @@ pub fn with_runtime_fiber_is_completed(fiber_id: i32) -> i32:
     let done = fiber_state(f) == FIBER_STATE_DONE
     scheduler_unlock()
     if done: 1 else: 0
+
+pub fn with_runtime_fiber_completion_sequence(fiber_id: i32) -> i64:
+    scheduler_lock()
+    let f = fiber_lookup(fiber_id)
+    if f == 0 or fiber_state(f) != FIBER_STATE_DONE:
+        scheduler_unlock()
+        return 0
+    let sequence = fiber_completion_sequence(f)
+    scheduler_unlock()
+    sequence
 
 pub fn with_runtime_fiber_is_live(fiber_id: i32) -> i32:
     scheduler_lock()

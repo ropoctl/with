@@ -1549,8 +1549,9 @@ impl Sema:
             self.update_decl_source_context(fn_di)
         else:
             self.update_fn_source_context(fn_name, node)
-        if (flags / FnFlags.ASYNC) % 2 == 1:
-            self.record_global_concurrency_evidence(node, "async function")
+        // §9.1: concurrency evidence for async fns is recorded at call sites
+        // (fiber creation), not declarations — an uncalled async decl (e.g. one
+        // merged from the std prelude) cannot make the program concurrent.
         if self.fn_decl_has_c_export(node) != 0:
             self.record_global_concurrency_evidence(node, "@[c_export]")
             self.validate_c_export_signature(node, sig_idx, fn_name)
@@ -2679,8 +2680,11 @@ impl Sema:
         if self.reachable_decl_indices.contains(fn_node):
             self.update_decl_source_context(self.reachable_decl_indices.get(fn_node).unwrap())
 
-    mut fn check_reachable_call_target(fn_sym: i32):
+    mut fn check_reachable_call_target(fn_sym: i32, call_node: i32):
         if fn_sym == 0:
+            return
+        if self.resolved_generic_call_nodes.contains(call_node):
+            self.check_fn_reachable_comptime_errors(self.resolved_generic_call_nodes.get(call_node).unwrap())
             return
         if self.fn_decl_nodes.contains(fn_sym):
             let callee = self.fn_decl_nodes.get(fn_sym).unwrap()
@@ -2728,7 +2732,7 @@ impl Sema:
         let saved_file_id = self.local_file_id
         let saved_module_path = self.current_module_path
         let saved_module_has_ci = self.current_module_has_ci
-        self.check_reachable_call_target(fn_sym)
+        self.check_reachable_call_target(fn_sym, node)
         self.local_file_id = saved_file_id
         self.current_module_path = saved_module_path
         self.current_module_has_ci = saved_module_has_ci
@@ -6250,6 +6254,10 @@ impl Sema:
         let sig_idx = self.get_visible_sig(sym)
         if sig_idx >= 0 and self.is_ci_visible(sym) != 0 and self.symbol_visible_from_current(sym) != 0:
             let fn_tid = self.sig_type_ids.get(sig_idx as i64)
+            // An async fn referenced as a value can be called through the value
+            // later; the call site no longer knows it spawns — record here.
+            if self.task_fns.contains(sym):
+                self.record_global_concurrency_evidence(node, "async function reference")
             let fn_is_unsafe = self.fn_symbol_is_unsafe(sym)
             if self.has_expected_type != 0 and self.expected_expr_type != 0:
                 let expected = self.resolve_alias(self.expected_expr_type)
@@ -12303,8 +12311,8 @@ impl Sema:
         if callee == 0 or self.ast.kind(callee) != NodeKind.NK_IDENT:
             return -1
         let fn_sym = self.ast.get_data0(callee)
-        let fn_node = self.generic_fn_node_for_symbol(fn_sym)
-        if fn_node == 0:
+        let generic_fn_node = self.generic_fn_node_for_symbol(fn_sym)
+        if generic_fn_node == 0:
             return -1
         if self.require_std_tier_for_symbol(fn_sym, callee) == 0:
             return 0
@@ -12319,6 +12327,10 @@ impl Sema:
             let arg_node = self.ast.get_extra(args_start + ai)
             arg_nodes.push(arg_node)
             arg_types.push(self.check_expr(arg_node) as i32)
+        let fn_node = self.select_generic_fn_node(fn_sym, arg_types, args_count + 1, node)
+        if fn_node == 0:
+            return 0
+        self.resolved_generic_call_nodes.insert(node, fn_node)
         self.emit_no_await_guard_may_suspend_call(node, fn_sym)
         self.note_allocating_callee(node, fn_sym)
         let ret = self.check_generic_call(fn_sym, fn_node, arg_types, arg_nodes, args_count + 1, node)
@@ -13635,6 +13647,7 @@ impl Sema:
             self.emit_no_await_guard_may_suspend_call(node, fn_sym)
             if self.task_fns.contains(fn_sym):
                 self.note_allocation_site(node, AllocConstructKind.ASYNC_FIBER, 0, 0)
+                self.record_global_concurrency_evidence(node, "async function call")
             if self.fn_symbol_is_explicit_alloc_api(fn_sym) != 0:
                 self.note_allocation_site(node, AllocConstructKind.EXPLICIT_API, 0, 0)
             self.note_allocating_callee(node, fn_sym)
@@ -13772,7 +13785,10 @@ impl Sema:
         // Generic function
         let generic_fn_node = self.generic_fn_node_for_symbol(fn_sym)
         if generic_fn_node != 0:
-            let fn_node = generic_fn_node
+            let fn_node = self.select_generic_fn_node(fn_sym, arg_types, resolved_arg_count, node)
+            if fn_node == 0:
+                return 0
+            self.resolved_generic_call_nodes.insert(node, fn_node)
             self.emit_no_await_guard_may_suspend_call(node, fn_sym)
             self.note_allocating_callee(node, fn_sym)
             let ret = self.check_generic_call(fn_sym, fn_node, arg_types, checked_arg_nodes, resolved_arg_count, node)
@@ -14236,12 +14252,187 @@ impl Sema:
             self.obligation_type_syms.push(concrete_sym)
             self.obligation_nodes.push(self.ast.get_extra(call_extra_start + ai))
 
+    fn generic_type_pattern_specificity(type_node: i32, tp_start: i32, tp_count: i32) -> i32:
+        if type_node == 0:
+            return 0
+        let kind = self.ast.kind(type_node)
+        if kind == NodeKind.NK_TYPE_NAMED:
+            return if self.type_param_exists(tp_start, tp_count, self.ast.get_data0(type_node)) != 0: 0 else: 1
+        if kind == NodeKind.NK_TYPE_REF or kind == NodeKind.NK_TYPE_PTR or kind == NodeKind.NK_TYPE_ARRAY or kind == NodeKind.NK_TYPE_SLICE or kind == NodeKind.NK_TYPE_OPTIONAL:
+            return 1 + self.generic_type_pattern_specificity(self.ast.get_data0(type_node), tp_start, tp_count)
+        if kind == NodeKind.NK_TYPE_TUPLE:
+            var score = 1
+            let start = self.ast.get_data0(type_node)
+            for i in 0..self.ast.get_data1(type_node):
+                score = score + self.generic_type_pattern_specificity(self.ast.get_extra(start + i), tp_start, tp_count)
+            return score
+        if kind == NodeKind.NK_TYPE_GENERIC:
+            var score2 = 1
+            let start2 = self.ast.get_data1(type_node)
+            for i2 in 0..self.ast.get_data2(type_node):
+                score2 = score2 + self.generic_type_pattern_specificity(self.ast.get_extra(start2 + i2), tp_start, tp_count)
+            return score2
+        if kind == NodeKind.NK_TYPE_TRAIT_OBJ:
+            var score3 = 1
+            let args_idx = self.ast.find_impl_trait_type_args(type_node as NodeId)
+            if args_idx >= 0:
+                let start3 = self.ast.state.impl_trait_type_args.get((args_idx + 1) as i64)
+                let count3 = self.ast.state.impl_trait_type_args.get((args_idx + 2) as i64)
+                for i3 in 0..count3:
+                    score3 = score3 + self.generic_type_pattern_specificity(self.ast.get_extra(start3 + i3), tp_start, tp_count)
+            return score3
+        1
+
+    mut fn generic_trait_param_accepts(type_node: i32, arg_tid: i32, tp_start: i32, tp_count: i32) -> i32:
+        let trait_sym = self.ast.get_data0(type_node)
+        if self.type_implements_trait(arg_tid, trait_sym) == 0:
+            return 0
+        let trait_args_idx = self.ast.find_impl_trait_type_args(type_node as NodeId)
+        if trait_args_idx < 0:
+            return 1
+        let trait_arg_start = self.ast.state.impl_trait_type_args.get((trait_args_idx + 1) as i64)
+        let trait_arg_count = self.ast.state.impl_trait_type_args.get((trait_args_idx + 2) as i64)
+        for di in 0..self.ast.decl_count():
+            let decl = self.ast.get_decl(di)
+            if self.ast.kind(decl) != NodeKind.NK_IMPL_DECL or self.ast.get_data2(decl) != trait_sym:
+                continue
+            let target_match = self.impl_target_match(decl, arg_tid)
+            if target_match.ok == 0:
+                continue
+            let impl_args_idx = self.ast.find_impl_trait_type_args(decl as NodeId)
+            if impl_args_idx < 0:
+                continue
+            let impl_arg_start = self.ast.state.impl_trait_type_args.get((impl_args_idx + 1) as i64)
+            let impl_arg_count = self.ast.state.impl_trait_type_args.get((impl_args_idx + 2) as i64)
+            if impl_arg_count != trait_arg_count:
+                continue
+            var matches = 1
+            for ai in 0..trait_arg_count:
+                let expected = self.resolve_generic_return_type_node(self.ast.get_extra(trait_arg_start + ai), tp_start, tp_count)
+                let actual = self.resolve_impl_trait_arg_for_source(decl, arg_tid, self.ast.get_extra(impl_arg_start + ai), target_match.subst_names, target_match.subst_types)
+                if expected == 0 or actual == 0 or (self.types_compatible(expected, actual) == 0 and self.arithmetic_result_type(expected, actual) == 0):
+                    matches = 0
+                    break
+            if matches != 0:
+                return 1
+        0
+
+    mut fn generic_param_accepts(type_node: i32, arg_tid: i32, tp_start: i32, tp_count: i32) -> i32:
+        if type_node == 0 or arg_tid == 0:
+            return 0
+        if self.ast.kind(type_node) == NodeKind.NK_TYPE_TRAIT_OBJ:
+            return self.generic_trait_param_accepts(type_node, arg_tid, tp_start, tp_count)
+        let expected = self.resolve_generic_return_type_node(type_node, tp_start, tp_count)
+        if expected == 0:
+            return 0
+        if self.types_compatible(expected, arg_tid) != 0 or self.arithmetic_result_type(expected, arg_tid) != 0: 1 else: 0
+
+    mut fn generic_bound_set_accepts(tp_start: i32, tp_count: i32) -> i32:
+        var pos = tp_start
+        for _ in 0..tp_count:
+            let tp_name = self.ast.get_extra(pos)
+            let bound_count = self.ast.get_extra(pos + 1)
+            let concrete = self.lookup_generic_subst(tp_name)
+            if concrete == 0:
+                return 0
+            for bi in 0..bound_count:
+                let trait_sym = self.ast.get_extra(pos + 2 + bi)
+                if self.pool_resolve(trait_sym) != "type" and self.type_implements_trait(concrete, trait_sym) == 0:
+                    return 0
+            pos = pos + 2 + bound_count
+        1
+
+    mut fn generic_overload_match_score(fn_node: i32, arg_types: &Vec[i32], arg_count: i32, call_node: i32) -> i32:
+        let meta = self.ast.find_fn_meta(fn_node)
+        if meta < 0:
+            return -1
+        let param_start = self.ast.fn_meta_param_start(meta)
+        let param_count = self.ast.fn_meta_param_count(meta)
+        var trailing_defaults = 0
+        var default_i = param_count - 1
+        while default_i >= 0 and self.ast.get_fn_param_default(param_start, default_i) != 0:
+            trailing_defaults = trailing_defaults + 1
+            default_i = default_i - 1
+        if arg_count < param_count - trailing_defaults or arg_count > param_count:
+            return -1
+
+        let tp_start = self.ast.fn_meta_tp_start(meta)
+        let tp_count = self.ast.fn_meta_tp_count(meta)
+        let saved_syms = sema_clone_i32_vec(&self.generic_subst_param_syms)
+        let saved_types = sema_clone_i32_vec(&self.generic_subst_type_ids)
+        let saved_diag_count = self.diags.items.len() as i32
+        self.clear_generic_substitution()
+        for pi in 0..arg_count:
+            self.bind_type_params_from_type_expr(self.ast.fn_param_type(param_start, pi), arg_types.get(pi as i64), tp_start, tp_count, call_node)
+        self.ensure_generic_substitutions(tp_start, tp_count, param_start, param_count, call_node)
+
+        var matches = if self.diags.items.len() as i32 == saved_diag_count: 1 else: 0
+        var score = 0
+        if matches != 0:
+            for pi2 in 0..arg_count:
+                let param_type = self.ast.fn_param_type(param_start, pi2)
+                if self.generic_param_accepts(param_type, arg_types.get(pi2 as i64), tp_start, tp_count) == 0:
+                    matches = 0
+                    break
+                score = score + self.generic_type_pattern_specificity(param_type, tp_start, tp_count)
+        if matches != 0 and self.generic_bound_set_accepts(tp_start, tp_count) == 0:
+            matches = 0
+        if matches != 0:
+            let where_idx = self.ast.find_where_meta(fn_node)
+            if where_idx >= 0:
+                let where_start = self.ast.state.where_meta.get((where_idx + 1) as i64)
+                let where_count = self.ast.state.where_meta.get((where_idx + 2) as i64)
+                if self.generic_bound_set_accepts(where_start, where_count) == 0:
+                    matches = 0
+
+        while self.diags.items.len() as i32 > saved_diag_count:
+            self.diags.items.pop()
+        self.generic_subst_param_syms = saved_syms
+        self.generic_subst_type_ids = saved_types
+        if matches != 0: score else: -1
+
+    mut fn select_generic_fn_node(fn_sym: i32, arg_types: &Vec[i32], arg_count: i32, call_node: i32) -> i32:
+        let fallback = self.generic_fn_node_for_symbol(fn_sym)
+        if fallback == 0:
+            return 0
+        let key = self.generic_fn_candidate_key(fn_sym)
+        let candidate_count = self.generic_fn_candidate_counts.get(key)
+        if candidate_count.is_none() or candidate_count.unwrap() <= 1:
+            return fallback
+
+        var best_node = 0
+        var best_score = -1
+        var best_count = 0
+        for i in 0..self.generic_fn_candidate_syms.len() as i32:
+            if self.generic_fn_candidate_syms.get(i as i64) != key:
+                continue
+            let candidate = self.generic_fn_candidate_nodes.get(i as i64)
+            let score = self.generic_overload_match_score(candidate, arg_types, arg_count, call_node)
+            if score < 0:
+                continue
+            if score > best_score:
+                best_node = candidate
+                best_score = score
+                best_count = 1
+            else if score == best_score:
+                best_count = best_count + 1
+        let name = self.pool_resolve(fn_sym)
+        if best_node == 0:
+            self.emit_error(f"no matching generic overload for '{name}'", call_node)
+            return 0
+        if best_count > 1:
+            self.emit_error(f"generic call to '{name}' is ambiguous between {best_count} equally specific overloads", call_node)
+            return 0
+        best_node
+
     mut fn check_generic_call(fn_sym: i32, fn_node: i32, arg_types: &Vec[i32], arg_nodes: &Vec[i32], arg_count: i32, call_node: i32) -> i32:
         let meta = self.ast.find_fn_meta(fn_node)
         if meta < 0:
             if arg_count > 0:
                 return arg_types.get(0)
             return 0
+        if self.task_fns.contains(fn_sym):
+            self.record_global_concurrency_evidence(call_node, "async function call")
 
         let param_start = self.ast.fn_meta_param_start(meta)
         let param_count = self.ast.fn_meta_param_count(meta)
@@ -14297,7 +14488,7 @@ impl Sema:
             self.generic_subst_type_ids = saved_generic_call_subst_tys
             return 0
 
-        let spec_key = self.generic_specialization_key(fn_sym, tp_start, tp_count)
+        let spec_key = self.generic_specialization_key(fn_sym, fn_node, tp_start, tp_count)
         let mono_sym = self.pool_intern(f"{self.pool_resolve(fn_sym)}__sema__{spec_key}")
         if self.generic_specialization_cache.contains(spec_key):
             let cached = self.generic_specialization_cache.get(spec_key).unwrap()
@@ -14557,8 +14748,8 @@ impl Sema:
                     self.bind_type_params_from_type_expr(param_trait_arg, actual_trait_arg, tp_start, tp_count, err_node)
                 return
 
-    fn generic_specialization_key(fn_sym: i32, tp_start: i32, tp_count: i32) -> str:
-        var key = f"{fn_sym}"
+    fn generic_specialization_key(fn_sym: i32, fn_node: i32, tp_start: i32, tp_count: i32) -> str:
+        var key = f"{fn_sym}:{fn_node}"
         var pos = tp_start
         for ti in 0..tp_count:
             let tp_name = self.ast.get_extra(pos)
@@ -17209,6 +17400,8 @@ impl Sema:
             return 0
         if self.ensure_trait_object_safe(trait_sym, node) == 0:
             return 0
+        if (info.method_flags / FnFlags.ASYNC) % 2 == 1:
+            self.record_global_concurrency_evidence(node, "async function call")
         if info.param_count <= 0:
             self.emit_error("dyn trait method has no self parameter", node)
             return 0
@@ -18066,6 +18259,8 @@ impl Sema:
                 else:
                     self.note_allocating_callee(node, generic_method_fn)
                 self.comp_resolved.insert(node, generic_method_fn)
+                if self.task_fns.contains(generic_method_fn):
+                    self.record_global_concurrency_evidence(node, "async function call")
                 let generic_ret = self.check_generic_method_call(type_name_sym, recv_type as i32, generic_method_fn, is_static_receiver, expr, arg_types, extra_start, mc_resolved_arg_count, node)
                 let _btree_storage_ty = self.ensure_btree_storage_type(generic_ret)
                 return generic_ret
@@ -18089,6 +18284,8 @@ impl Sema:
                         if self.require_unsafe_operation("unsafe function call requires unsafe context", node) == 0:
                             return 0
                     self.comp_resolved.insert(node, method_fn_sym)
+                    if self.task_fns.contains(method_fn_sym):
+                        self.record_global_concurrency_evidence(node, "async function call")
                     self.emit_no_await_guard_may_suspend_call(node, method_fn_sym)
                     if self.no_alloc_allows_method_allocation(type_name_sym, field) != 0:
                         self.note_allocation_site(node, AllocConstructKind.EXPLICIT_API, 0, 1)

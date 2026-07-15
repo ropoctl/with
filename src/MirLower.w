@@ -11683,7 +11683,8 @@ impl MirBuilder:
                 let gc_fn_sym = self.sema_symbol_for_ast_symbol(gc_sym)
                 if self.sema.fn_symbol_is_std_builtins_drop(gc_sym) != 0:
                     return self.lower_std_drop_call(node)
-                let gc_fn_node = self.generic_fn_node_for_sym(gc_fn_sym)
+                let selected_gc_fn_node = self.sema.resolved_generic_call_nodes.get(node)
+                let gc_fn_node = if selected_gc_fn_node.is_some(): selected_gc_fn_node.unwrap() else: self.generic_fn_node_for_sym(gc_fn_sym)
                 if gc_fn_node != 0:
                     // User generic calls use Sema's concrete signature for both
                     // ownership lowering and the eventual ABI contract.

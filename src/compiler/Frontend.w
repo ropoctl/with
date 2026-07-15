@@ -1922,7 +1922,7 @@ impl Zcu:
                 continue
             if frontend_path_is_std_rc_module(prelude_path) and (frontend_vec_contains_i32(higher_type_names, self.pool.intern("Rc")) or frontend_vec_contains_i32(higher_type_names, self.pool.intern("Arc"))):
                 continue
-            if (ik == NodeKind.NK_FN_DECL or ik == NodeKind.NK_EXTERN_FN) and frontend_fn_shadowed_in_tier(prelude_ordered, merged_pool, self.pool, oi, higher_fn_names):
+            if (ik == NodeKind.NK_FN_DECL or ik == NodeKind.NK_EXTERN_FN) and frontend_fn_shadowed_in_tier(prelude_ordered, prelude_paths, merged_pool, self.pool, oi, higher_fn_names):
                 // Error when a prelude fn (with a body) is shadowed by an extern fn
                 // (no body). The extern silently replaces the real function with an
                 // unresolved C symbol, causing a cryptic linker error later.
@@ -1942,7 +1942,7 @@ impl Zcu:
         for oi in 0..user_import_ordered.len() as i32:
             let id = user_import_ordered.get(oi as i64)
             let ik = merged_pool.kind(id)
-            if (ik == NodeKind.NK_FN_DECL or ik == NodeKind.NK_EXTERN_FN) and frontend_fn_shadowed_in_tier(user_import_ordered, merged_pool, self.pool, oi, root_fn_names):
+            if (ik == NodeKind.NK_FN_DECL or ik == NodeKind.NK_EXTERN_FN) and frontend_fn_shadowed_in_tier(user_import_ordered, user_import_paths, merged_pool, self.pool, oi, root_fn_names):
                 continue
             if ik == NodeKind.NK_EXTERN_VAR:
                 if frontend_extern_var_shadowed_in_tier(user_import_ordered, merged_pool, self.pool, oi) or frontend_extern_var_shadowed_by_tier(root_ordered, merged_pool, self.pool, id):
@@ -1998,7 +1998,13 @@ fn frontend_fn_decl_is_method(pool: AstPool, intern: InternPool, decl: i32) -> b
         return false
     frontend_str_contains_byte(intern.resolve(pool.get_data0(decl)), 46)
 
-fn frontend_fn_shadowed_in_tier(tier: &Vec[i32], pool: AstPool, intern: InternPool, idx: i32, higher_names: &Vec[i32]) -> bool:
+fn frontend_fn_decl_is_generic(pool: AstPool, decl: i32) -> bool:
+    if pool.kind(decl) != NodeKind.NK_FN_DECL:
+        return false
+    let meta = pool.find_fn_meta(decl as NodeId)
+    meta >= 0 and pool.fn_meta_tp_count(meta) > 0
+
+fn frontend_fn_shadowed_in_tier(tier: &Vec[i32], paths: &Vec[str], pool: AstPool, intern: InternPool, idx: i32, higher_names: &Vec[i32]) -> bool:
     // Check if this fn is shadowed by a higher-priority tier.
     let current = tier.get(idx as i64)
     let current_kind = pool.kind(current)
@@ -2026,6 +2032,13 @@ fn frontend_fn_shadowed_in_tier(tier: &Vec[i32], pool: AstPool, intern: InternPo
         let jd = tier.get(j as i64)
         let jk = pool.kind(jd)
         if (jk == NodeKind.NK_FN_DECL or jk == NodeKind.NK_EXTERN_FN) and pool.get_data0(jd) == iname:
+            // Same-module generic declarations are structural overload
+            // candidates, not shadowing declarations. Keep each template for
+            // sema to select after argument types are known. A same-name fn
+            // from another module still follows normal later-wins import rules.
+            if frontend_fn_decl_is_generic(pool, current) and frontend_fn_decl_is_generic(pool, jd) and paths.get(idx as i64) == paths.get(j as i64):
+                j = j + 1
+                continue
             let other_rank = frontend_fn_decl_rank(jk)
             if other_rank >= current_rank:
                 return true

@@ -23,6 +23,13 @@ async fn await_all_parent -> i32:
     let _ = tasks |> await_all
     0
 
+async fn await_all_result_parent -> i32:
+    let tasks: Vec[Task[Result[i32, str]]] = Vec.new()
+    tasks.push(wait_forever_result(1))
+    tasks.push(wait_forever_result(2))
+    let _ = tasks |> await_all
+    0
+
 async fn await_first_parent -> i32:
     let tasks: Vec[Task[i32]] = Vec.new()
     tasks.push(wait_forever(1))
@@ -51,16 +58,21 @@ fn drive_until_live_at_least(target: i32):
         steps = steps + 1
     assert(unsafe { with_fiber_live_fibers() } >= target)
 
-fn cancel_parent_and_assert_joined(parent: Task[i32]):
-    let baseline = unsafe { with_fiber_live_fibers() }
+fn cancel_parent_and_assert_joined(baseline: i32, parent: Task[i32]):
     drive_until_live_at_least(baseline + 3)
     parent.cancel()
-    let _ = parent.await
+    parent.join_cleanup()
     assert(unsafe { with_fiber_live_fibers() } == baseline)
 
 fn main:
-    cancel_parent_and_assert_joined(await_all_parent())
-    cancel_parent_and_assert_joined(await_first_parent())
-    cancel_parent_and_assert_joined(await_any_parent())
-    cancel_parent_and_assert_joined(await_settled_parent())
+    var baseline = unsafe { with_fiber_live_fibers() }
+    cancel_parent_and_assert_joined(baseline, await_all_parent())
+    baseline = unsafe { with_fiber_live_fibers() }
+    cancel_parent_and_assert_joined(baseline, await_all_result_parent())
+    baseline = unsafe { with_fiber_live_fibers() }
+    cancel_parent_and_assert_joined(baseline, await_first_parent())
+    baseline = unsafe { with_fiber_live_fibers() }
+    cancel_parent_and_assert_joined(baseline, await_any_parent())
+    baseline = unsafe { with_fiber_live_fibers() }
+    cancel_parent_and_assert_joined(baseline, await_settled_parent())
     print("ok")
