@@ -7043,7 +7043,16 @@ impl Sema:
             let name = self.ast.get_data0(decl)
             let flags = self.ast.get_data2(decl)
             let is_comptime_value = if self.ast.kind(value) == NodeKind.NK_COMPTIME: 1 else: 0
-            if is_comptime_value == 0 and let_decl_is_global(flags) == 0:
+            // #643: a plain top-level `let`/`var` (no `global` keyword, so
+            // global_bits == 0) was skipped here, so its type was never
+            // inferred — it kept the 0 it was registered with in collect, and
+            // binding it into an unannotated local propagated that unresolved
+            // type, dropping the function's tail value as a type mismatch. Now
+            // also infer a plain top-level let, but ONLY while its type is
+            // still unresolved (scope type 0). Plain lets that already have a
+            // type — annotated user decls and typed migrated c_import globals —
+            // keep the old skip so their checking is left undisturbed.
+            if is_comptime_value == 0 and let_decl_is_global(flags) == 0 and self.scope_lookup(name) != 0:
                 continue
             let type_value = if is_comptime_value != 0 and self.ast.get_data0(value) != 0: self.ast.get_data0(value) else: value
             let ann_extra = self.top_level_let_type_ann_extra(flags)
