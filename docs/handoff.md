@@ -46,9 +46,9 @@ new combinators: no new leaks or double-frees; all reported leaks are the
 - #671: Sender.send(Variant(x)) still traps — different mechanism (send is
   not a MirLower intrinsic; check-time expected never lands); evidence in
   the issue; typed-intermediate workaround applies.
-- #670: cross-file diagnostic labels render against the primary file's line
-  table and omit the file name (made the E0921 root-cause hunt needlessly
-  hard).
+- #670 FIXED (da76b939): cross-file labels render against their own file
+  and print the path (`= label <path>@L:C ...`); same-file label format
+  unchanged; err_global_race_crossfile_label.w pins it.
 - Windows fiber core: structurally in parity and target-validated
   (--target x86_64-pc-windows-msvc --no-prelude --validate-all), but not yet
   built or executed on a Windows host.
