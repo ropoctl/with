@@ -266,6 +266,11 @@ impl Zcu:
         // code concurrently, but c_import expansion must remain serialized until
         // those globals move behind explicit session handles.
         frontend_cimport_lock()
+        // Emitted names deduplicate declarations only within this compilation.
+        // `with test` can compile several targets in one process, so carrying the
+        // bridge table across Zcu instances would make a later single-import cache
+        // entry omit the required C support prelude.
+        with_cimport_reset_names()
 
         // Materialize clang's builtin headers embedded in this binary before
         // libclang parses anything, so c_import is self-contained at runtime (#312).

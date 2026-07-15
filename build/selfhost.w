@@ -2841,6 +2841,35 @@ fn bs_check_c_import_header_cache_tracks_contents(ctx: &ActionCtx, compiler_path
     if second.rc != 0: return second.rc
     bs_assert_stdout_exact(ctx, second, "ok", "c_import_header_cache_second")
 
+fn bs_check_c_import_names_reset_between_compilations(ctx: &ActionCtx, compiler_path: str, case_dir: str) -> i32:
+    let root = ctx.project_info().project_root()
+    let first_src = bs_join(case_dir, "first.w")
+    let second_src = bs_join(case_dir, "second.w")
+    let first_text = "use c_import(\"typedef int SessionFirstA;\")\n" ++
+        "use c_import(\"typedef int SessionFirstB;\")\n\n" ++
+        "fn main:\n" ++
+        "    let a: SessionFirstA = 1\n" ++
+        "    let b: SessionFirstB = 2\n" ++
+        "    assert(a + b == 3)\n"
+    let second_text = "use c_import(\"typedef int SessionSecondA;\")\n" ++
+        "use c_import(\"typedef int SessionSecondB;\")\n\n" ++
+        "fn main:\n" ++
+        "    let a: SessionSecondA = 3\n" ++
+        "    let b: SessionSecondB = 4\n" ++
+        "    assert(a + b == 7)\n"
+    var rc = bs_write_fixture(ctx, first_src, first_text, "c_import first compiler session")
+    if rc != 0: return rc
+    rc = bs_write_fixture(ctx, second_src, second_text, "c_import second compiler session")
+    if rc != 0: return rc
+
+    var args: Vec[str] = Vec.new()
+    args |> push("test")
+    args |> push("--quiet")
+    args |> push(bs_abs(root, first_src))
+    args |> push(bs_abs(root, second_src))
+    let result = bs_edge_expect_success(ctx, compiler_path, case_dir, "c-import-session-name-reset", args)
+    result.rc
+
 fn bs_compile_emit_c_output(ctx: &ActionCtx, root: str, case_dir: str, c_path: str, bin: str, label: str) -> i32:
     let stdout_path = bs_capture_path(root, case_dir, label ++ "-compile", "stdout")
     let stderr_path = bs_capture_path(root, case_dir, label ++ "-compile", "stderr")
@@ -3271,6 +3300,8 @@ pub fn run_cli_selfhost_edge_action(ctx: ActionCtx) -> i32:
     rc = bs_check_imported_module_dependency_order(ctx, compiler_path, bs_join(output_dir, "imported_module_dependency_order_case"))
     if rc != 0: return rc
     rc = bs_check_c_import_header_cache_tracks_contents(ctx, compiler_path, bs_join(output_dir, "c_import_header_cache_case"))
+    if rc != 0: return rc
+    rc = bs_check_c_import_names_reset_between_compilations(ctx, compiler_path, bs_join(output_dir, "c_import_session_name_reset_case"))
     if rc != 0: return rc
     rc = bs_check_emit_c_receiver_abi(ctx, compiler_path, bs_join(output_dir, "emit_c_receiver_abi_case"))
     if rc != 0: return rc
