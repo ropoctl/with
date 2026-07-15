@@ -1,8 +1,8 @@
 //! expect-stdout: jump=[R|in] nojump=[R|after]
 // §23.3.1.7 / §7.7.1.5: `goto 'l` inside a `with` block targets a visible
 // label in the enclosing function; the guard is released before the labeled
-// continuation runs. (Uses an explicit `return` because a tail expression
-// after a labeled statement is currently dropped — see #640.)
+// continuation runs. The explicit `return` keeps this fixture focused on guard
+// cleanup; implicit labeled tails are covered by behav_labeled_tail_goto (#640).
 var LOG = ""
 type Guard {}
 impl Scoped[i32] for Guard:
