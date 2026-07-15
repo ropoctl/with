@@ -39,9 +39,13 @@ new combinators: no new leaks or double-frees; all reported leaks are the
 
 ## Open follow-ups
 
-- #669: contextual generic enum arg (slot.set(Some(x))) sema-types the
-  payload instead of Option[T] → codegen trap. task.w carries commented
-  typed-intermediate workarounds to remove with the fix.
+- #669 FIXED (6518916b): storing methods now publish their stored element
+  type, so contextual enum-constructor args (slot.set(Some(x)) family) type
+  correctly; task.w workarounds removed;
+  behav_contextual_enum_storing_args.w pins the matrix.
+- #671: Sender.send(Variant(x)) still traps — different mechanism (send is
+  not a MirLower intrinsic; check-time expected never lands); evidence in
+  the issue; typed-intermediate workaround applies.
 - #670: cross-file diagnostic labels render against the primary file's line
   table and omit the file name (made the E0921 root-cause hunt needlessly
   hard).
