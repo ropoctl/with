@@ -97,6 +97,14 @@ impl Diagnostic:
         self.helps.push(diagnostic_owned_text(message))
 
     fn render(source: Source):
+        let no_paths: Vec[str] = Vec.new()
+        let no_texts: Vec[str] = Vec.new()
+        self.render_with_label_sources(source, &no_paths, &no_texts)
+
+    // #670: a label whose span lives in another file must resolve line/col
+    // against THAT file's text and say which file it is. label_paths/label_texts
+    // are parallel to labels; an empty path means "same file as the primary".
+    fn render_with_label_sources(source: Source, label_paths: &Vec[str], label_texts: &Vec[str]):
         let code: str = self.code
         let message: str = self.message
         with_eprint(render_diag_header(self.severity, code, message))
@@ -111,9 +119,17 @@ impl Diagnostic:
 
         for i in 0..self.labels.len() as i32:
             let lab: DiagnosticLabel = self.labels.get(i as i64)
-            let lloc = source.offset_to_location(lab.span.start)
             let label_message: str = lab.message
-            with_eprint(render_diag_label_line(lloc.line, lloc.col, label_message))
+            var label_path = ""
+            if i < label_paths.len() as i32:
+                label_path = label_paths.get(i as i64)
+            if label_path.len() > 0 and label_path != source_path:
+                let label_source = Source.from_string(label_path, label_texts.get(i as i64), lab.span.file)
+                let lloc2 = label_source.offset_to_location(lab.span.start)
+                with_eprint(render_diag_label_line_in_file(label_path, lloc2.line, lloc2.col, label_message))
+            else:
+                let lloc = source.offset_to_location(lab.span.start)
+                with_eprint(render_diag_label_line(lloc.line, lloc.col, label_message))
 
         for i in 0..self.notes.len() as i32:
             let note: str = self.notes.get(i as i64)

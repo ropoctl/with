@@ -23,6 +23,9 @@ fn render_diag_marker_line(col: i32, n: i32) -> str:
 fn render_diag_label_line(line: i32, col: i32, message: str) -> str:
     f"  = label @{line + 1}:{col + 1} {message}"
 
+fn render_diag_label_line_in_file(path: str, line: i32, col: i32, message: str) -> str:
+    f"  = label {path}@{line + 1}:{col + 1} {message}"
+
 fn render_diag_note_line(message: str) -> str:
     "  = note: " ++ message
 

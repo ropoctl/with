@@ -257,7 +257,20 @@ impl Zcu:
             mapped.render(source)
             return
         let source = self.source_for_file_id_frontend(diag.primary.file)
-        diag.render(source)
+        // #670: labels can point into other files (e.g. E0921's concurrency
+        // evidence in the std prelude); resolve each one against its own file.
+        let label_paths: Vec[str] = Vec.new()
+        let label_texts: Vec[str] = Vec.new()
+        for li in 0..diag.labels.len() as i32:
+            let lab_file = diag.labels.get(li as i64).span.file
+            if lab_file != 0 and lab_file != diag.primary.file:
+                let lab_source = self.source_for_file_id_frontend(lab_file)
+                label_paths.push(lab_source.path)
+                label_texts.push(lab_source.text)
+            else:
+                label_paths.push("")
+                label_texts.push("")
+        diag.render_with_label_sources(source, &label_paths, &label_texts)
 
     fn source_for_file_id_frontend(file_id: i32) -> Source:
         if file_id == 0:
