@@ -5434,7 +5434,13 @@ impl Codegen:
             return self.invalid_concrete_mir_function()
         let body = self.mir_input.bodies.get(body_idx as i64)
         let param_count = self.sema.sig_get_param_count(sig_idx)
-        let ret_sema = self.sema.sig_return_type(sig_idx)
+        let signature_ret_sema = self.sema.sig_return_type(sig_idx)
+        let is_async = self.sema.task_fns.contains(sema_sym)
+        let ret_sema = if is_async: self.sema.unwrap_task_type(signature_ret_sema) as i32 else: signature_ret_sema
+        if is_async and ret_sema == signature_ret_sema:
+            with_eprint(f"error: async concrete specialization for {label} has no Task result contract")
+            self.had_error = 1
+            return self.invalid_concrete_mir_function()
         let ret_ty = if ret_sema != 0: self.sema_type_to_llvm(ret_sema) else: wl_void_type(self.context)
         var actual_ret_ty = ret_ty
         var has_sret = 0
@@ -5442,7 +5448,7 @@ impl Codegen:
         let byval_types: Vec[i64] = Vec.new()
         let direct_types: Vec[i64] = Vec.new()
         let actual_params: Vec[i64] = Vec.new()
-        if self.internal_abi_needs_sret(ret_ty):
+        if not is_async and self.internal_abi_needs_sret(ret_ty):
             has_sret = 1
             actual_ret_ty = wl_void_type(self.context)
             actual_params.push(wl_ptr_type(self.context))
@@ -5451,6 +5457,10 @@ impl Codegen:
             let param_ty = self.sema_type_to_llvm(param_sema)
             if self.sema.sig_param_uses_value_ref_abi(sig_idx, pi) != 0:
                 actual_params.push(wl_ptr_type(self.context))
+                byval_types.push(0)
+                direct_types.push(0)
+            else if is_async:
+                actual_params.push(param_ty)
                 byval_types.push(0)
                 direct_types.push(0)
             else if self.internal_abi_needs_indirect_param(param_ty):
@@ -5481,8 +5491,22 @@ impl Codegen:
                 self.apply_noalias_param_attrs_with_offset(function, self.pool.fn_meta_param_start(meta), param_count, if has_sret != 0: 1 else: 0)
         self.fn_values.insert(mono_sym, function)
         self.fn_fn_types.insert(mono_sym, fn_type)
+        if is_async:
+            self.async_fn_ret_types.insert(mono_sym, ret_ty)
         self.gen_function_mir_mono(mono_sym, 0, body)
         ConcreteMirFunction { sym: mono_sym, value: function, fn_type, sig: sig_idx }
+
+    mut fn call_concrete_mir_function(concrete: ConcreteMirFunction, args_start: i32, arg_node_base_index: i32, args: Vec[i64], arg_count: i32, call_context: str, call_node: i32) -> i64:
+        if self.sema.task_fns.contains(concrete.sym):
+            let task_sema = self.sema.sig_return_type(concrete.sig)
+            let task_ty = self.sema_type_to_llvm(task_sema)
+            if task_ty == 0:
+                with_eprint(f"error: cannot lower async result type for {call_context}")
+                self.had_error = 1
+                return wl_get_undef(wl_i32_type(self.context))
+            let coerced = self.coerce_call_args_for_fn_value(concrete.sym, concrete.value, args_start, arg_node_base_index, args, arg_count, call_context, call_node)
+            return self.emit_async_fn_spawn_task_value(concrete.sym, concrete.value, concrete.fn_type, &coerced, task_ty)
+        self.build_call_fn_value(concrete.sym, concrete.value, concrete.fn_type, args_start, arg_node_base_index, args, arg_count, call_context, call_node)
 
     mut fn monomorphize_struct_method_core(mono_type_sym: i32, method_name: str, _decl: i32, obj: i64, obj_ptr: i64, obj_node: i32, obj_ty: i64, args_start: i32, arg_count: i32, call_node: i32, concrete_sig: i32, concrete_sym: i32, pre_args: Vec[i64]) -> i64:
         let fallback = self.intern.intern(self.intern.resolve(mono_type_sym) ++ "." ++ method_name)
@@ -5496,14 +5520,14 @@ impl Codegen:
             args.push(obj)
         for ai in 0..arg_count:
             args.push(pre_args.get(ai as i64))
-        self.build_call_fn_value(concrete.sym, concrete.value, concrete.fn_type, args_start, 1, args, arg_count + 1, "method " ++ method_name, call_node)
+        self.call_concrete_mir_function(concrete, args_start, 1, args, arg_count + 1, "method " ++ method_name, call_node)
 
     mut fn monomorphize_struct_static_method_core(mono_type_sym: i32, method_name: str, _decl: i32, args_start: i32, arg_count: i32, call_node: i32, concrete_sig: i32, concrete_sym: i32, pre_args: Vec[i64]) -> i64:
         let fallback = self.intern.intern(self.intern.resolve(mono_type_sym) ++ "." ++ method_name)
         let concrete = self.ensure_concrete_mir_function(call_node, concrete_sig, concrete_sym, fallback, "static method " ++ method_name)
         if concrete.sym == 0:
             return wl_get_undef(wl_i32_type(self.context))
-        self.build_call_fn_value(concrete.sym, concrete.value, concrete.fn_type, args_start, 0, pre_args, arg_count, "method " ++ method_name, call_node)
+        self.call_concrete_mir_function(concrete, args_start, 0, pre_args, arg_count, "method " ++ method_name, call_node)
 
     // ── Build Option Some/None ────────────────────────────────────────
 
@@ -5742,7 +5766,9 @@ impl Codegen:
                     self.generic_fns.insert(name_sym, decl as i32)
                     if is_generic_struct_method:
                         self.generic_struct_methods.insert(name_sym, decl as i32)
-                else if is_sema_generic and not is_generic_struct_method:
+                else if is_generic_struct_method:
+                    self.declare_function_at(decl, i)
+                else if is_sema_generic:
                     continue
                 else if (flags / FnFlags.ASYNC) % 2 == 1:
                     self.declare_async_function(decl)

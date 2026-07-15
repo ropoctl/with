@@ -2983,6 +2983,7 @@ impl Sema:
     fn register_concrete_specialization(fn_node: i32, mono_sym: i32, sig_idx: i32, tp_syms: &Vec[i32], tp_sema_tys: &Vec[i32], param_concrete_tys: &Vec[i32]):
         if mono_sym == 0 or sig_idx < 0:
             return
+        self.record_fn_behavior_metadata(mono_sym, fn_node, self.ast.get_data2(fn_node))
         let found = self.concrete_specialization_by_sym.get(mono_sym)
         if found.is_some():
             self.concrete_specialization_sigs.set_i32(found.unwrap() as i64, sig_idx)
@@ -15617,9 +15618,11 @@ impl Sema:
                 else:
                     self.note_call_arg_coercion(expected_ty, actual_ty, gen_method_arg, node)
 
-        let ret_node = self.ast.fn_meta_ret(meta)
-        let ret_ty = self.resolve_type_node_with_current_subst(ret_node, concrete_owner)
         let concrete_sig = self.check_generic_method_body_concrete(fn_node, method_fn_sym, concrete_owner, owner_tp_start, owner_tp_count, fn_tp_start, fn_tp_count)
+        let ret_ty = if concrete_sig >= 0:
+            self.sig_return_type(concrete_sig)
+        else:
+            self.resolve_type_node_with_current_subst(self.ast.fn_meta_ret(meta), concrete_owner)
         if concrete_sig >= 0:
             let recv_param_offset = if is_static != 0: 0 else: 1
             let receiver = if is_static != 0: 0 else: recv_node

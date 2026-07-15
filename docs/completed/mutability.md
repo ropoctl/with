@@ -91,6 +91,20 @@ print(r)              // OK — caller's n unchanged; r still valid
 
 For non-Copy types, the same code would be a borrow conflict: `bump(buf)` where `buf: Buffer` would take a write borrow during the call, conflicting with `r = &buf`.
 
+### Async Calls Capture Their Arguments
+
+The default share-place alias is valid for the duration of a synchronous call.
+An `async fn` call instead starts a fiber and returns a `Task` immediately, so
+its ordinary by-value parameters escape the call expression into the fiber
+environment and are captured as owned values. Copy arguments are copied; an
+owned rvalue is captured directly; a named non-Copy value must use `move` or
+`copy` when ownership transfers.
+
+Explicit reference parameters and read/mut method receivers remain borrows. A
+fiber that captures one of those borrows produces an ephemeral `Task` whose
+lifetime is tied to the borrowed place (§14.22). This is the escaping-call
+boundary of the D5 model, not a change to synchronous share-place semantics.
+
 ### Call-Mode Satisfaction Table
 
 The following table summarizes which call modes satisfy which effects:

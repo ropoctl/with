@@ -14,8 +14,8 @@ async fn consumer(rx: Receiver[i32]) -> i32:
 
 async fn main:
     let (tx, rx) = chan[i32](2)
-    let p = producer(tx)
-    let c = consumer(rx)
+    let p = producer(move tx)
+    let c = consumer(move rx)
     let result = c.await
     let _ = p.await
     assert(result == 42)

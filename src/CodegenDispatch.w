@@ -12790,7 +12790,7 @@ impl Codegen:
                     return false
                 let concrete_arg_count = body.call_arg_counts.get(args_id as i64)
                 let concrete_args = self.mir_eval_call_arg_range(body, args_id, 0, concrete_arg_count, 0)
-                let concrete_result = self.build_call_fn_value(concrete.sym, concrete.value, concrete.fn_type, 0, 0, concrete_args, concrete_arg_count, "MIR generic user call", body.call_ast_node(args_id))
+                let concrete_result = self.call_concrete_mir_function(concrete, -1, 0, concrete_args, concrete_arg_count, "MIR generic user call", body.call_ast_node(args_id))
                 self.mir_finish_intrinsic_call(body, dest_place, next_bb, concrete_result)
                 return true
             let gc_node = body.call_ast_node(args_id)
@@ -15910,7 +15910,7 @@ impl Codegen:
         let concrete = self.ensure_concrete_mir_function(call_node, concrete_sig, concrete_sym, 0, "generic function call")
         if concrete.sym == 0:
             return wl_get_undef(wl_i32_type(self.context))
-        self.build_call_fn_value(concrete.sym, concrete.value, concrete.fn_type, args_start, 0, arg_vals, arg_count, "generic function call", call_node)
+        self.call_concrete_mir_function(concrete, args_start, 0, arg_vals, arg_count, "generic function call", call_node)
 
     // ── Call expression ────────────────────────────────────────────────
 

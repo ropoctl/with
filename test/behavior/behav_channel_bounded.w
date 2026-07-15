@@ -18,8 +18,8 @@ async fn main:
     let pair = chan[i32](2)
     let tx = pair.0
     let rx = pair.1
-    let p = producer(tx)
-    let c = consumer(rx)
+    let p = producer(move tx)
+    let c = consumer(move rx)
     let sum = c.await
     let _ = p.await
     assert(sum == 6)

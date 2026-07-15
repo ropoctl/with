@@ -1220,6 +1220,14 @@ impl Sema:
         let task_ty = self.ensure_generic_inst_type(self.pool_intern("Task"), task_args, 1)
         if task_ty != 0: task_ty else: declared_ret_type
 
+    fn record_fn_behavior_metadata(fn_name: i32, node: i32, flags: i32):
+        if (flags / FnFlags.MUST_USE) % 2 == 1:
+            self.must_use_fns.insert(fn_name, 1)
+        if (flags / FnFlags.ASYNC) % 2 == 1:
+            self.task_fns.insert(fn_name, 1)
+        if self.ast.state.fn_stack_sizes.contains(node):
+            self.fn_stack_sizes.insert(fn_name, self.ast.state.fn_stack_sizes.get(node).unwrap())
+
     mut fn collect_fn_decl(node: i32, is_local: i32, decl_index: i32):
         let parsed_fn_name = self.ast.get_data0(node)
         let method_owner_sym = self.method_decl_owner_symbol(node, parsed_fn_name)
@@ -1277,6 +1285,7 @@ impl Sema:
         let tp_count = self.ast.fn_meta_tp_count(meta)
         if (flags / FnFlags.ASYNC) % 2 == 1:
             self.require_async_runtime(node, "async fn")
+        self.record_fn_behavior_metadata(fn_name, node, flags)
 
         // Record receiver flags here. D7 enforcement runs after body checking and
         // effect fixed point so a missing mode can report the compiler-derived
@@ -1474,17 +1483,6 @@ impl Sema:
             if dispatch_sig >= 0 and clause_sig >= 0 and self.signatures_match(dispatch_sig, clause_sig) == 0:
                 self.emit_error("function clause signature mismatch for '" ++ self.pool_resolve(dispatch_fn_name) ++ "'", node)
         self.register_method_sig_alias(node, fn_name, parsed_fn_name, fn_sig_idx, decl_index)
-
-        // Track must_use
-        if (flags / FnFlags.MUST_USE) % 2 == 1:
-            self.must_use_fns.insert(fn_name, 1)
-        // Track async fns
-        if (flags / FnFlags.ASYNC) % 2 == 1:
-            self.task_fns.insert(fn_name, 1)
-        // Track @[stack_size(N)]
-        if self.ast.state.fn_stack_sizes.contains(node as i32):
-            let ss = self.ast.state.fn_stack_sizes.get(node as i32).unwrap()
-            self.fn_stack_sizes.insert(fn_name, ss)
 
         // Unbind Self
         if self_type_id != 0:

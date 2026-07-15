@@ -5177,14 +5177,25 @@ impl Sema:
     // mutates the caller's place and does not own it. Owned params (consume/
     // escape_value) keep the by-value/Indirect ABI and are dropped by the callee.
     // escape_view is share-place (satisfied by view-origin tracking), so it is NOT
-    // excluded here. Runs after fixpoint_effect_flow so the effect is final.
+    // excluded here. An async function is the exception: its ordinary by-value
+    // parameters escape the call expression into the spawned fiber environment and
+    // therefore must be owned. Explicit references and read/mut method receivers
+    // remain borrows and make the returned Task ephemeral. Runs after
+    // fixpoint_effect_flow so the effect is final.
     mut fn assign_share_place_abi_for_sig(si: i32):
+        let fn_sym = self.sig_names.get(si as i64)
+        let is_async = self.task_fns.contains(fn_sym)
+        let receiver_mode = self.sig_receiver_mode(si)
         let pc = self.sig_get_param_count(si)
         for pi in 0..pc:
-            if self.sig_param_uses_value_ref_abi(si, pi) != 0:
-                continue
             let pty = self.sig_param_type(si, pi)
             if pty <= 0:
+                continue
+            let is_receiver = pi == 0 and receiver_mode != ReceiverMode.None
+            if is_async and not is_receiver and self.param_type_is_by_value(pty) != 0:
+                self.set_sig_param_value_ref_abi(si, pi, 0)
+                continue
+            if self.sig_param_uses_value_ref_abi(si, pi) != 0:
                 continue
             if self.param_type_is_by_value(pty) == 0:
                 continue
