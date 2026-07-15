@@ -84,11 +84,8 @@ pub fn await_all[T, E](tasks: impl IntoIter[Task[Result[T, E]]]) -> Result[Vec[T
         completed = completed + 1
         let result = pending.get(ready).await
         if result.is_ok():
-            // #669: slot.set(Some(...)) directly mistypes the contextual variant
-            // as the payload T in generic bodies; typed intermediate until fixed.
-            let value: Option[T] = Some(result.unwrap())
             with values.slot(ready) as mut slot:
-                slot.set(value)
+                slot.set(Some(result.unwrap()))
         else:
             return Err(result.err().unwrap())
 
@@ -197,10 +194,8 @@ pub fn await_any[T, E](tasks: impl IntoIter[Task[Result[T, E]]]) -> Result[T, Ve
         let result = pending.get(ready).await
         if result.is_ok():
             return Ok(result.unwrap())
-        // #669: typed intermediate — see the matching note in await_all above.
-        let stored_error: Option[E] = Some(result.err().unwrap())
         with errors.slot(ready) as mut slot:
-            slot.set(stored_error)
+            slot.set(Some(result.err().unwrap()))
 
     let ordered: Vec[E] = Vec.new()
     i = 0

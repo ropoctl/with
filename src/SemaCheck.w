@@ -17098,6 +17098,21 @@ impl Sema:
                     let update_params: Vec[i32] = Vec.new()
                     update_params.push(update_value_ty)
                     return self.ensure_fn_type(update_params, 1, update_value_ty as TypeId) as i32
+        // #669: storing methods (mirror method_arg_stores_value) must publish the
+        // stored element type, or a contextual enum arg (`slot.set(Some(x))`)
+        // never learns its enum and codegen has no aggregate destination.
+        if owner_sym == self.syms.vecslot or owner_sym == self.syms.slotmapslot:
+            if method_name == "set" and arg_index == 0:
+                return self.get_generic_inst_arg(resolved as i32, 0)
+        if owner_sym == self.syms.vecrange:
+            if method_name == "set" and arg_index == 1:
+                return self.get_generic_inst_arg(resolved as i32, 0)
+        if owner_sym == self.syms.hashmapentry:
+            if method_name == "set" and arg_index == 0:
+                return self.get_generic_inst_arg(resolved as i32, 1)
+        if owner_sym == self.syms.slotmap:
+            if field == self.syms.insert and arg_index == 0:
+                return self.get_generic_inst_arg(resolved as i32, 0)
         if owner_sym == self.syms.fixed_string:
             if method_name == "push_byte" and arg_index == 0:
                 return self.ty_u8 as i32
