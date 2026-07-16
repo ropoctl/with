@@ -47,14 +47,17 @@ new combinators: no new leaks or double-frees; all reported leaks are the
   ambient expected type (statement void, enclosing return type) retype a
   constructor whose variant it does not carry;
   behav_channel_enum_payload.w pins the statement-position cases.
-- #672 CORRECTED + PARTIALLY FIXED (83b09fbd): channels are healthy —
-  recv() returns the element directly per §14.15; the original loss/segv
-  reports were probe artifacts of `.unwrap()` on non-Option values, which
-  sema's raw-optional catch-all wrongly accepted (now rejected for enum
-  receivers; err_unwrap_on_plain_enum.w). #672 is retitled to the real
-  remaining gap: CHAN_RECV codegen discards the -1 status, so recv() on a
-  closed drained channel returns an uninitialized value — needs a
-  maintainer ruling on the closed-recv contract.
+- #672 CLOSED via BDFL ruling D10 (a9cd93e9): recv() -> Option[T] — Some
+  delivers buffered messages first, None = closed AND drained (Rust
+  semantics, Swift spelling); CHAN_RECV codegen now consumes the runtime
+  status (branchless select on the tag, element written into the Option
+  payload field). `for msg in rx:` is the blessed worker loop (Receiver
+  is for-iterable; break/continue work; behav_channel_for_recv.w). All
+  recv call sites migrated; spec §14.15 updated. Residuals in D10:
+  try_recv three-state question (still unimplemented), select-arm
+  binding reconciliation when select-over-channels lands. Earlier from
+  the same investigation: 83b09fbd rejected unwrap on plain enums
+  (err_unwrap_on_plain_enum.w).
 - DEFERRED to milestone post-v0.16.0 (maintainer ruling 2026-07-16):
   the migration campaign #675 → #673/#674/#676 (manifest-driven build
   refactor with pcre2+zlib retrofit as its completion gate, then lexbor,
