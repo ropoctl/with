@@ -2188,7 +2188,16 @@ impl Codegen:
         let ok_bb = wl_append_bb(self.context, self.current_function, "arith.ok")
         wl_build_cond_br(self.builder, overflow, panic_bb, ok_bb)
         wl_position_at_end(self.builder, panic_bb)
-        self.emit_runtime_panic("integer overflow")
+        let ov_ty = (if is_unsigned: "u" else: "i") ++ f"{wl_get_int_type_width(wider_ty)}"
+        let ov_op = if op == BinaryOp.OP_ADD: "addition" else if op == BinaryOp.OP_SUB: "subtraction" else: "multiplication"
+        // Unsigned subtraction is the #630 trap (v.len() - 1 on empty): name
+        // the wrap direction so the panic explains itself.
+        let ov_msg =
+            if is_unsigned and op == BinaryOp.OP_SUB:
+                f"integer overflow: {ov_ty} subtraction wrapped below zero"
+            else:
+                f"integer overflow: {ov_ty} {ov_op} out of range"
+        self.emit_runtime_panic(ov_msg)
         wl_position_at_end(self.builder, ok_bb)
         result
 
@@ -2244,7 +2253,7 @@ impl Codegen:
         let ok_bb = wl_append_bb(self.context, self.current_function, "arith.divok")
         wl_build_cond_br(self.builder, div_overflow, panic_bb, ok_bb)
         wl_position_at_end(self.builder, panic_bb)
-        self.emit_runtime_panic("integer overflow")
+        self.emit_runtime_panic(f"integer overflow: i{width} minimum divided by -1")
         wl_position_at_end(self.builder, ok_bb)
         self.mir_build_raw_int_bin_op(op, l, r, false)
 
@@ -3355,7 +3364,7 @@ impl Codegen:
                 let ok_bb = wl_append_bb(self.context, self.current_function, "neg.ok")
                 wl_build_cond_br(self.builder, is_min, panic_bb, ok_bb)
                 wl_position_at_end(self.builder, panic_bb)
-                self.emit_runtime_panic("integer overflow")
+                self.emit_runtime_panic(f"integer overflow: negating i{width} minimum value")
                 wl_position_at_end(self.builder, ok_bb)
                 return wl_build_neg(self.builder, arg)
             if d0 == UnaryOp.UOP_BIT_NOT:
