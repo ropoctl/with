@@ -47,9 +47,17 @@ new combinators: no new leaks or double-frees; all reported leaks are the
   ambient expected type (statement void, enclosing return type) retype a
   constructor whose variant it does not carry;
   behav_channel_enum_payload.w pins the statement-position cases.
-- #672: channel runtime loses/corrupts enum element payloads (sent None
-  arrives as channel-empty; recv-then-match on a user enum segfaults) —
-  pre-existing, cell matrix and repros in the issue.
+- #672 CORRECTED + PARTIALLY FIXED (83b09fbd): channels are healthy —
+  recv() returns the element directly per §14.15; the original loss/segv
+  reports were probe artifacts of `.unwrap()` on non-Option values, which
+  sema's raw-optional catch-all wrongly accepted (now rejected for enum
+  receivers; err_unwrap_on_plain_enum.w). #672 is retitled to the real
+  remaining gap: CHAN_RECV codegen discards the -1 status, so recv() on a
+  closed drained channel returns an uninitialized value — needs a
+  maintainer ruling on the closed-recv contract.
+- #673: migrate lexbor v3.0.0 → std.html / std.encoding.html (engine +
+  functionality-named shim; compile-as-is, generic-migrator policy);
+  motivated by docs/impossible_oneliners.md HTML section.
 - #670 FIXED (da76b939): cross-file labels render against their own file
   and print the path (`= label <path>@L:C ...`); same-file label format
   unchanged; err_global_race_crossfile_label.w pins it.
