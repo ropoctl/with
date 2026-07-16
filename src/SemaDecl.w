@@ -1933,6 +1933,10 @@ impl Sema:
 
     mut fn collect_trait_decl(node: i32, is_local: i32):
         let name = self.ast.get_data0(node)
+        // First-wins, matching find_trait_decl_node's decl-order scan; decl
+        // node ids are stable within a Sema instance so the memo never stales.
+        if not self.trait_decl_node_cache.contains(name):
+            self.trait_decl_node_cache.insert(name, node)
         if is_local != 0:
             self.set_pretty_symbol(name, self.extract_decl_name_after(node, "trait"))
         let extra_start = self.ast.get_data1(node)
@@ -2330,6 +2334,11 @@ impl Sema:
         0
 
     fn find_trait_decl_node(trait_sym: i32) -> NodeId:
+        if self.trait_decl_node_cache.contains(trait_sym):
+            return self.trait_decl_node_cache.get(trait_sym).unwrap() as NodeId
+        // Fallback scan for callers that run before collection has seen the
+        // trait; post-collection callers (the hot check-time path) always hit
+        // the cache filled by collect_trait_decl.
         for di in 0..self.ast.decl_count():
             let decl = self.ast.get_decl(di)
             if self.ast.kind(decl) == NodeKind.NK_TRAIT_DECL and self.ast.get_data0(decl) == trait_sym:
