@@ -55,9 +55,12 @@ new combinators: no new leaks or double-frees; all reported leaks are the
   remaining gap: CHAN_RECV codegen discards the -1 status, so recv() on a
   closed drained channel returns an uninitialized value — needs a
   maintainer ruling on the closed-recv contract.
-- #673: migrate lexbor v3.0.0 → std.html / std.encoding.html (engine +
-  functionality-named shim; compile-as-is, generic-migrator policy);
-  motivated by docs/impossible_oneliners.md HTML section.
+- Migration campaign queue (in dependency order): #675 manifest-driven
+  migration build refactor (one generic pipeline engine + per-library
+  MigrationSpec records; converts pcre2/zlib first) → then #673 lexbor
+  (std.html / std.encoding.html; closes impossible_oneliners HTML section)
+  and #674 llhttp (http.parse_*; server chain link after #658). #673/#674
+  are explicitly blocked on #675.
 - #670 FIXED (da76b939): cross-file labels render against their own file
   and print the path (`= label <path>@L:C ...`); same-file label format
   unchanged; err_global_race_crossfile_label.w pins it.
