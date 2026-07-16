@@ -736,6 +736,12 @@ pub fn with_runtime_core_run_one_step() -> Unit:
 pub fn with_runtime_fiber_is_completed(fiber_id: i32) -> i32:
     let f = fiber_lookup(fiber_id)
     if f == 0:
+        // §14.7/#637: a well-formed handle that no longer resolves names a
+        // reaped (terminal) fiber — report done, not a silent false. Kept
+        // in lockstep with the Darwin core.
+        let stale_slot = fiber_slot_from_id(fiber_id)
+        if fiber_id > 0 and stale_slot >= 0 and stale_slot < MAX_FIBERS:
+            return 1
         return 0
     if fiber_state(f) == FIBER_STATE_DONE: 1 else: 0
 

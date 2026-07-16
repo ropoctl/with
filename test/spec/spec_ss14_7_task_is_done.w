@@ -12,4 +12,10 @@ fn main:
         unsafe { with_runtime_run_one_step() }
         steps = steps + 1
     assert(t.is_done())              // true after driven to completion
+
+    // #637: is_done stays true after .await — the reaped handle names a
+    // finished task; a silent false was the one wrong answer.
+    let t2 = compute(1)
+    assert(t2.await == 2)
+    assert(t2.is_done())
     print("ok")

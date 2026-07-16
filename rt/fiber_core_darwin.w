@@ -991,6 +991,14 @@ pub fn with_runtime_fiber_is_completed(fiber_id: i32) -> i32:
     let f = fiber_lookup(fiber_id)
     if f == 0:
         scheduler_unlock()
+        // §14.7/#637: handles are minted only by spawn, and a slot is
+        // released only after its fiber reached a terminal state and was
+        // reaped (await/join/panic-take). A well-formed handle that no
+        // longer resolves therefore names a finished task — report done,
+        // not a silent false.
+        let stale_slot = fiber_slot_from_id(fiber_id)
+        if fiber_id > 0 and stale_slot >= 0 and stale_slot < MAX_FIBERS:
+            return 1
         return 0
     let done = fiber_state(f) == FIBER_STATE_DONE
     scheduler_unlock()
