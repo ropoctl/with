@@ -28,6 +28,9 @@ use compiler.LlvmBridge.*
 use compiler.Runtime
 
 extern fn with_fs_remove_file(path: str) -> i32
+@[effect(fn_ptr: escape_value, ctx: escape_value)]
+extern fn with_thread_spawn(fn_ptr: *mut u8, ctx: *mut u8) -> i64
+extern fn with_thread_join(handle: i64) -> i32
 
 pub type CodegenUnitPlan {
     unit_count: i32,
@@ -126,48 +129,126 @@ fn codegen_units_strip(unit_module: i64, plan: &CodegenUnitPlan, k: i32):
 pub fn codegen_unit_object_path(obj_path: str, k: i32) -> str:
     if k == 0: obj_path else: f"{obj_path}.u{k}.o"
 
-// Serial milestone: write bitcode once, then parse/strip/optimize/emit each
-// unit in its own context. Returns 0 on success; emits loudly on failure.
+// One unit end-to-end: fresh context, reparse the shared bitcode, strip to
+// this unit's bodies, optimize, emit. Every touched resource is thread-local
+// (per-thread LLVMContext; the plan is read-only), so this runs identically
+// inline or on a worker thread.
+fn codegen_unit_emit_one(bc_path: str, obj_path: str, opt_level: i32, plan: &CodegenUnitPlan, k: i32, do_profile: bool) -> i32:
+    let t_unit = runtime_clock_nanos()
+    let ctx = wl_context_create()
+    let unit_module = wl_parse_bitcode_in_context(ctx, bc_path)
+    if unit_module == 0:
+        runtime_eprint(f"error: codegen-units bitcode parse failed for unit {k}")
+        wl_context_dispose(ctx)
+        return 1
+    codegen_units_strip(unit_module, plan, k)
+    let tm = wl_init_target_machine(unit_module, opt_level)
+    if tm == 0:
+        runtime_eprint(f"error: codegen-units target machine init failed for unit {k}")
+        wl_module_dispose(unit_module)
+        wl_context_dispose(ctx)
+        return 1
+    if opt_level > 0:
+        wl_optimize(unit_module, tm, opt_level)
+    let unit_obj = codegen_unit_object_path(obj_path, k)
+    if wl_emit_object(tm, unit_module, unit_obj) != 0:
+        runtime_eprint(f"error: codegen-units emit failed for unit {k}: {unit_obj}")
+        wl_dispose_target_machine(tm)
+        wl_module_dispose(unit_module)
+        wl_context_dispose(ctx)
+        return 1
+    wl_dispose_target_machine(tm)
+    wl_module_dispose(unit_module)
+    wl_context_dispose(ctx)
+    if do_profile:
+        let unit_ns = runtime_clock_nanos() - t_unit
+        runtime_eprint(f"[profile] llvm.unit{k}  {unit_ns / 1000000}.{(unit_ns % 1000000) / 1000} ms")
+    0
+
+type CodegenUnitJob {
+    bc_path: str,
+    obj_path: str,
+    opt_level: i32,
+    unit_index: i32,
+    do_profile: i32,
+    plan: CodegenUnitPlan,
+    rc: i32,
+}
+
+// Thread entry, following the comptime-parallel precedent
+// (ComptimeEval.comptime_workspace_thread_entry): the worker touches only
+// its job slot, bridge externs, and a read-only plan copy — no compiler
+// globals — which is what keeps raw runtime threading sound here.
+unsafe fn codegen_unit_thread_entry(arg: *mut u8) -> i32:
+    let job = arg as *mut CodegenUnitJob
+    (*job).rc = codegen_unit_emit_one((*job).bc_path, (*job).obj_path, (*job).opt_level, &(*job).plan, (*job).unit_index, (*job).do_profile != 0)
+    0
+
+// Write bitcode once, then run every unit's parse/strip/optimize/emit on its
+// own thread (per-thread LLVMContext is the LLVM threading contract). A
+// failed spawn degrades that unit to inline execution rather than failing
+// the build. Returns 0 on success; emits loudly on failure.
 pub fn codegen_units_emit(base_module: i64, obj_path: str, opt_level: i32, unit_count: i32, do_profile: bool) -> i32:
     let plan = codegen_units_plan(base_module, unit_count)
     let bc_path = obj_path ++ ".units.bc"
     if wl_write_bitcode(base_module, bc_path) != 0:
         runtime_eprint("error: codegen-units bitcode write failed")
         return 1
+    let jobs: Vec[CodegenUnitJob] = Vec.new()
+    var ji = 0
+    while ji < unit_count:
+        jobs.push(CodegenUnitJob {
+            bc_path,
+            obj_path,
+            opt_level,
+            unit_index: ji,
+            do_profile: if do_profile: 1 else: 0,
+            plan: codegen_units_plan_copy(&plan),
+            rc: 0,
+        })
+        ji = ji + 1
+    let handles: Vec[i64] = Vec.new()
+    let handle_units: Vec[i32] = Vec.new()
     var k = 0
     while k < unit_count:
-        let t_unit = runtime_clock_nanos()
-        let ctx = wl_context_create()
-        let unit_module = wl_parse_bitcode_in_context(ctx, bc_path)
-        if unit_module == 0:
-            runtime_eprint(f"error: codegen-units bitcode parse failed for unit {k}")
-            wl_context_dispose(ctx)
-            return 1
-        codegen_units_strip(unit_module, &plan, k)
-        let tm = wl_init_target_machine(unit_module, opt_level)
-        if tm == 0:
-            runtime_eprint(f"error: codegen-units target machine init failed for unit {k}")
-            wl_module_dispose(unit_module)
-            wl_context_dispose(ctx)
-            return 1
-        if opt_level > 0:
-            wl_optimize(unit_module, tm, opt_level)
-        let unit_obj = codegen_unit_object_path(obj_path, k)
-        if wl_emit_object(tm, unit_module, unit_obj) != 0:
-            runtime_eprint(f"error: codegen-units emit failed for unit {k}: {unit_obj}")
-            wl_dispose_target_machine(tm)
-            wl_module_dispose(unit_module)
-            wl_context_dispose(ctx)
-            return 1
-        wl_dispose_target_machine(tm)
-        wl_module_dispose(unit_module)
-        wl_context_dispose(ctx)
-        if do_profile:
-            let unit_ns = runtime_clock_nanos() - t_unit
-            runtime_eprint(f"[profile] llvm.unit{k}  {unit_ns / 1000000}.{(unit_ns % 1000000) / 1000} ms")
+        unsafe:
+            let job_ptr = (jobs.ptr as *mut CodegenUnitJob) + k as u64
+            let handle = with_thread_spawn(codegen_unit_thread_entry as *mut u8, job_ptr as *mut u8)
+            if handle < 0:
+                // Degrade to inline execution for this unit.
+                (*job_ptr).rc = codegen_unit_emit_one(bc_path, obj_path, opt_level, &plan, k, do_profile)
+            else:
+                handles.push(handle)
+                handle_units.push(k)
         k = k + 1
+    var join_rc = 0
+    var hi = 0
+    while hi < handles.len() as i32:
+        let rc = with_thread_join(handles.get(hi as i64))
+        if rc != 0 and join_rc == 0:
+            join_rc = rc
+        hi = hi + 1
+    if join_rc != 0:
+        runtime_eprint(f"error: codegen-units worker thread failed with exit code {join_rc}")
+        let _ = with_fs_remove_file(bc_path)
+        return 1
+    var unit_rc = 0
+    var ri = 0
+    while ri < unit_count:
+        if jobs.get(ri as i64).rc != 0 and unit_rc == 0:
+            unit_rc = jobs.get(ri as i64).rc
+        ri = ri + 1
     let _ = with_fs_remove_file(bc_path)
-    0
+    unit_rc
+
+fn codegen_units_plan_copy(plan: &CodegenUnitPlan) -> CodegenUnitPlan:
+    let fn_units: Vec[i32] = Vec.new()
+    let fn_renames: Vec[str] = Vec.new()
+    for i in 0..plan.fn_units.len() as i32:
+        fn_units.push(plan.fn_units.get(i as i64))
+    for i in 0..plan.fn_renames.len() as i32:
+        fn_renames.push(plan.fn_renames.get(i as i64))
+    CodegenUnitPlan { unit_count: plan.unit_count, fn_units, fn_renames }
 
 pub fn codegen_unit_extra_objects(obj_path: str, unit_count: i32) -> Vec[str]:
     let extras: Vec[str] = Vec.new()
