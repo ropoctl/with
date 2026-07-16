@@ -103,6 +103,11 @@ new combinators: no new leaks or double-frees; all reported leaks are the
 - Windows fiber core: structurally in parity and target-validated
   (--target x86_64-pc-windows-msvc --no-prelude --validate-all), but not yet
   built or executed on a Windows host.
-- Reseed and user install were performed 2026-07-15 with explicit
-  maintainer approval: src/main and ~/.local/bin/with are
-  v0.15.1-gf4c1c0047 (new stdlib + D9 + #669/#670 fixes), smoke-verified.
+- Reseed + install re-run 2026-07-16 (maintainer-approved): src/main and
+  ~/.local/bin/with are v0.15.1-g9eddd2c32 — the seed now carries codegen
+  units, so every seed-driven stage build is parallel. The install
+  initially produced a SIGKILL-on-exec binary (in-place overwrite left
+  arm64's per-vnode signature cache stale; bytes were identical to the
+  verified release; recovered via fresh-inode copy of those same bytes).
+  Root-fixed in 7ba518e2: install writes a temp sibling then renames.
+  Verify every future reseed with `~/.local/bin/with --version; echo $?`.
