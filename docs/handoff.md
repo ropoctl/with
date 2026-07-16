@@ -52,5 +52,6 @@ new combinators: no new leaks or double-frees; all reported leaks are the
 - Windows fiber core: structurally in parity and target-validated
   (--target x86_64-pc-windows-msvc --no-prelude --validate-all), but not yet
   built or executed on a Windows host.
-- No reseed or user install was performed. :update-seed and :install-user
-  remain maintainer-approval-only.
+- Reseed and user install were performed 2026-07-15 with explicit
+  maintainer approval: src/main and ~/.local/bin/with are
+  v0.15.1-gf4c1c0047 (new stdlib + D9 + #669/#670 fixes), smoke-verified.
