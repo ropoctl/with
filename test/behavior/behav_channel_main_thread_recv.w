@@ -9,6 +9,6 @@ async fn producer(tx: Sender[i32]) -> i32:
 fn main:
     let (tx, rx) = chan[i32](1)
     producer(move tx)
-    let value = rx.recv()
+    let value = rx.recv().unwrap()
     assert(value == 42)
     print("ok")

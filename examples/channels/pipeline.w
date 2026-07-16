@@ -42,7 +42,7 @@ async fn demo_simple_pipeline:
         // worker: process items
         s.track(async:
             for i in 0..item_count:
-                let item = work_rx.recv()
+                let item = work_rx.recv().unwrap()
                 result_tx.send(item * 10)
             print(f"  worker: processed {item_count} items")
         )
@@ -50,7 +50,7 @@ async fn demo_simple_pipeline:
         // collector: gather results
         var total = 0
         for i in 0..item_count:
-            let result = result_rx.recv()
+            let result = result_rx.recv().unwrap()
             print(f"  collected: {result}")
             total = total + result
 
@@ -76,13 +76,13 @@ async fn demo_fan_out:
         for worker_id in 0..3:
             s.track(async:
                 for j in 0..3:
-                    let item = work_rx.recv()
+                    let item = work_rx.recv().unwrap()
                     result_tx.send(item * 10 + worker_id)
             )
 
         // collector
         for i in 0..item_count:
-            let result = result_rx.recv()
+            let result = result_rx.recv().unwrap()
             print(f"  result: {result}")
 
 // --- Demo 3: Select with Multiple Sources ---
@@ -108,7 +108,7 @@ async fn demo_select:
 
         // multiplexed consumer
         for round in 0..5:
-            let val = fast_rx.recv()
+            let val = fast_rx.recv().unwrap()
             print(f"  received: {val}")
 
 // --- Main ---

@@ -10330,21 +10330,31 @@ impl Codegen:
             result = wl_build_insert_value(self.builder, empty_chan, chan_handle, 0)
 
         else if intrinsic == MirIntrinsic.CHAN_RECV:
-            // Receiver.recv(): extract handle, alloca for result, call with_channel_recv, load result
+            // D10: Receiver.recv() -> Option[T]. The runtime writes the element
+            // directly into the Option's payload field and reports closed+drained
+            // via its status return; the tag is a branchless select on the status.
             let recv_self = self.mir_intrinsic_arg(body, args_id, 0)
             // Extract handle from Receiver struct
             let recv_handle = wl_build_extract_value(self.builder, recv_self, 0)
-            // Determine element type from dest place
-            var recv_elem_ty = wl_i32_type(self.context)
+            // Dest is the Option[T] instantiation recorded by sema.
+            var recv_opt_ty = wl_i32_type(self.context)
+            var recv_opt_sema = 0
             if dest_place >= 0 and dest_place < body.place_locals.len() as i32:
                 let dst_local = body.place_locals.get(dest_place as i64)
                 let dst_sema_ty = body.local_type_ids.get(dst_local as i64)
                 let dst_ll = self.mir_sema_type_to_llvm(dst_sema_ty)
                 if dst_ll != 0:
-                    recv_elem_ty = dst_ll
-            // Alloca for the received value
-            let recv_slot = self.create_entry_alloca(recv_elem_ty)
-            // Call with_channel_recv(handle, &slot) → i32 status
+                    recv_opt_ty = dst_ll
+                    recv_opt_sema = dst_sema_ty
+            let recv_slot = self.create_entry_alloca(recv_opt_ty)
+            wl_build_store(self.builder, self.build_default_value(recv_opt_ty), recv_slot)
+            // Payload pointer: field 1 of the Option struct when a payload
+            // exists; a zero-sized element channel writes nowhere useful, so
+            // fall back to the slot itself (elem_size covers the copy length).
+            var recv_payload_ptr = recv_slot
+            if wl_get_type_kind(recv_opt_ty) == wl_struct_type_kind() and wl_count_struct_elem_types(recv_opt_ty) > 1:
+                recv_payload_ptr = wl_build_struct_gep(self.builder, recv_opt_ty, recv_slot, 1)
+            // Call with_channel_recv(handle, &payload) → i32 status (0 = got value)
             let cr_fn_name = "with_channel_recv"
             var cr_fn = wl_get_named_function(self.llmod, cr_fn_name)
             if cr_fn == 0:
@@ -10356,10 +10366,24 @@ impl Codegen:
             let crft2 = wl_global_get_value_type(cr_fn)
             let cra: Vec[i64] = Vec.new()
             cra.push(recv_handle)
-            cra.push(recv_slot)
-            wl_build_call(self.builder, crft2, cr_fn, vec_data_i64(&cra), 2)
-            // Load the received value
-            result = wl_build_load(self.builder, recv_elem_ty, recv_slot)
+            cra.push(recv_payload_ptr)
+            let recv_status = wl_build_call(self.builder, crft2, cr_fn, vec_data_i64(&cra), 2)
+            if wl_get_type_kind(recv_opt_ty) == wl_struct_type_kind():
+                var recv_some_disc: i64 = 0
+                var recv_none_disc: i64 = 1
+                if recv_opt_sema > 0:
+                    let sd = self.sema.enum_variant_discriminant_for_type(recv_opt_sema, self.sema.syms.some)
+                    let nd = self.sema.enum_variant_discriminant_for_type(recv_opt_sema, self.sema.syms.none)
+                    if sd >= 0:
+                        recv_some_disc = sd as i64
+                    if nd >= 0:
+                        recv_none_disc = nd as i64
+                let recv_tag_ty = wl_struct_get_type_at(recv_opt_ty, 0)
+                let recv_ok = wl_build_icmp(self.builder, wl_int_eq(), recv_status, wl_const_int(wl_i32_type(self.context), 0, 0))
+                let recv_tag = wl_build_select(self.builder, recv_ok, wl_const_int(recv_tag_ty, recv_some_disc, 0), wl_const_int(recv_tag_ty, recv_none_disc, 0))
+                let recv_tag_ptr = wl_build_struct_gep(self.builder, recv_opt_ty, recv_slot, 0)
+                wl_build_store(self.builder, recv_tag, recv_tag_ptr)
+            result = wl_build_load(self.builder, recv_opt_ty, recv_slot)
 
         else if intrinsic == MirIntrinsic.CHAN_CLOSE:
             // .close(): extract handle, call with_channel_close(handle)

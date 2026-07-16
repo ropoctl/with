@@ -8,12 +8,12 @@ type Message {
 fn main:
     let (str_tx, str_rx) = chan[str](2)
     str_tx.send("hello")
-    let s = str_rx.recv()
+    let s = str_rx.recv().unwrap()
     assert(s == "hello")
 
     let (msg_tx, msg_rx) = chan[Message](1)
     msg_tx.send(Message { id: 7, text: "seven" })
-    let msg = msg_rx.recv()
+    let msg = msg_rx.recv().unwrap()
     assert(msg.id == 7)
     assert(msg.text == "seven")
 
@@ -22,7 +22,7 @@ fn main:
     values.push(3)
     values.push(5)
     vec_tx.send(values)
-    let received = vec_rx.recv()
+    let received = vec_rx.recv().unwrap()
     assert(received.len() == 2)
     assert(received.get(0) == 3)
     assert(received.get(1) == 5)

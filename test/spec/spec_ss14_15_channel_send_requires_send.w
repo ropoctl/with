@@ -8,8 +8,8 @@ async fn producer(tx: Sender[i32]) -> i32:
     0
 
 async fn consumer(rx: Receiver[i32]) -> i32:
-    let a = rx.recv()
-    let b = rx.recv()
+    let a = rx.recv().unwrap()
+    let b = rx.recv().unwrap()
     a + b
 
 async fn main:

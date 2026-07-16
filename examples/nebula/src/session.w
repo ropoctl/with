@@ -98,7 +98,7 @@ async fn handle_session(id: i32, rx: Receiver[str]) -> Result[i32, SessionError]
     defer: print(f"[session {id}] cleanup")
 
     loop:
-        let msg = rx.recv()
+        let msg = rx.recv().unwrap()
         if msg.len() == 0:
             break
         session.packets_received = session.packets_received + 1
@@ -117,9 +117,9 @@ async fn handle_priority(
     secondary: Receiver[str],
 ) -> str:
     let primary_task = async:
-        primary.recv()
+        primary.recv().unwrap()
     let secondary_task = async:
-        secondary.recv()
+        secondary.recv().unwrap()
 
     select await:
         msg = primary_task =>

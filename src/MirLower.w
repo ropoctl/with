@@ -5688,6 +5688,8 @@ impl MirBuilder:
                         return self.lower_for_vec(for_node, pat_or_sym, iter_expr, body_expr)
                     if type_name == "HashMap":
                         return self.lower_for_hashmap(for_node, pat_or_sym, iter_expr, body_expr)
+                    if type_name == "Receiver":
+                        return self.lower_for_receiver(for_node, pat_or_sym, iter_expr, body_expr)
 
         // Handle for x in vec.iter() — redirect to lower_for_vec with the Vec receiver.
         // Handle for slot in vec.iter_place() — redirect to lower_for_iter_place.
@@ -6759,6 +6761,56 @@ impl MirBuilder:
         let one_op = self.int_const_operand(1, self.sema.ty_i64)
         let add_rv = self.body.new_rvalue(RvalueKind.RK_BIN_OP, BinaryOp.OP_ADD, cur_op2, one_op)
         self.body.push_stmt(self.cur_bb, StmtKind.Assign, counter_place, add_rv, self.ast.get_start(vec_expr))
+        self.terminate(TermKind.TK_GOTO, header_bb, 0, 0, 0)
+        self.pop_control_target()
+        self.switch_to(exit_bb)
+        self.forget_string_flow_facts()
+        self.unit_operand()
+
+    // D10 (decisions.md): `for msg in rx:` receives until the channel is
+    // closed and drained — the loop desugars through recv() -> Option[T]:
+    // loop { match rx.recv(): Some(msg) => body, None => break }.
+    mut fn lower_for_receiver(for_node: i32, pat_or_sym: i32, iter_expr: i32, body_expr: i32) -> i32:
+        let rx_op = self.lower_expr(iter_expr)
+        let rx_ty = self.expr_type(iter_expr)
+        let rx_place = self.materialize_operand(rx_op, rx_ty, self.ast.get_start(iter_expr))
+        let elem_ty = self.sema.infer_for_element_type_frozen(self.expr_type(self.ast.get_data1(for_node)))
+        let opt_ty = self.sema.find_generic_inst(self.sema.syms.option, elem_ty)
+        if opt_ty == 0:
+            with_eprint("error: for-over-Receiver missing Option[element] instantiation")
+            self.mark_unsupported()
+            return self.unit_operand()
+        let header_bb = self.new_block()
+        let bind_bb = self.new_block()
+        let exit_bb = self.new_block()
+        self.terminate(TermKind.TK_GOTO, header_bb, 0, 0, 0)
+        // continue = next receive (header); break = exit.
+        self.push_control_target(self.for_label(for_node), ControlTargetKind.CT_LOOP, header_bb, exit_bb, -1)
+        self.switch_to(header_bb)
+        let opt_local = self.new_temp(opt_ty)
+        let opt_place = self.place_for_local(opt_local)
+        let recv_args: Vec[i32] = Vec.new()
+        recv_args.push(self.body.new_operand(OperandKind.OK_COPY, rx_place))
+        let recv_args_id = self.body.new_call_args(recv_args)
+        self.body.set_call_intrinsic(recv_args_id, MirIntrinsic.CHAN_RECV)
+        let recv_after_bb = self.new_block()
+        let recv_unit = self.unit_operand()
+        self.terminate(TermKind.TK_CALL, recv_unit, recv_args_id, opt_place, recv_after_bb)
+        self.switch_to(recv_after_bb)
+        let disc = self.lower_enum_discriminant(opt_place)
+        let some_disc = self.enum_variant_discriminant_for_type(opt_ty, self.sema.syms.some)
+        let vals: Vec[i32] = Vec.new()
+        vals.push(some_disc)
+        let targets: Vec[i32] = Vec.new()
+        targets.push(bind_bb as i32)
+        let table = self.body.new_switch_table(vals, targets)
+        self.terminate(TermKind.TK_SWITCH_INT, disc, table, exit_bb, 0)
+        self.switch_to(bind_bb)
+        let some_index = self.enum_variant_index_for_type(opt_ty, self.sema.syms.some)
+        let downcast_place = self.body.new_downcast_place(opt_place, some_index, opt_ty)
+        let payload_place = self.body.new_field_place(downcast_place, 0, elem_ty)
+        self.bind_for_element_or_skip(for_node, pat_or_sym, payload_place, elem_ty, body_expr, header_bb)
+        let _ = self.lower_expr_discard(body_expr)
         self.terminate(TermKind.TK_GOTO, header_bb, 0, 0, 0)
         self.pop_control_target()
         self.switch_to(exit_bb)

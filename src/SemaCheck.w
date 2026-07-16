@@ -16965,8 +16965,17 @@ impl Sema:
                 return self.ty_void as i32
         if self.pool_resolve(owner_sym) == "Receiver":
             if method_name == "recv":
+                // D10 (decisions.md): recv() -> Option[T]; None means the
+                // channel is closed AND drained (buffered messages are
+                // delivered first). Swift's spelling of Rust's semantics.
                 if tk == TypeKind.TY_GENERIC_INST:
-                    return self.get_generic_inst_arg(resolved as i32, 0)
+                    let recv_elem = self.get_generic_inst_arg(resolved as i32, 0)
+                    let recv_existing = self.find_generic_inst(self.syms.option, recv_elem)
+                    if recv_existing != 0:
+                        return recv_existing
+                    let recv_args: Vec[i32] = Vec.new()
+                    recv_args.push(recv_elem)
+                    return self.ensure_generic_inst_type(self.syms.option, recv_args, 1) as i32
                 return self.ty_i32 as i32
             if method_name == "close":
                 return self.ty_void as i32
@@ -20778,6 +20787,16 @@ impl Sema:
                 elems.push(self.get_generic_inst_arg(resolved as i32, 0))
                 elems.push(self.get_generic_inst_arg(resolved as i32, 1))
                 return self.ensure_tuple_type(elems, 2) as i32
+            if base_name == "Receiver" and self.get_generic_inst_arg_count(resolved as i32) > 0:
+                // D10: `for msg in rx:` receives until the channel is closed
+                // and drained. The loop desugars through recv() -> Option[T];
+                // ensure the Option instantiation exists before types freeze.
+                let rx_elem = self.get_generic_inst_arg(resolved as i32, 0)
+                if self.find_generic_inst(self.syms.option, rx_elem) == 0:
+                    let rx_args: Vec[i32] = Vec.new()
+                    rx_args.push(rx_elem)
+                    let _ = self.ensure_generic_inst_type(self.syms.option, rx_args, 1)
+                return rx_elem
             if base_name == "VecIterRef" and self.get_generic_inst_arg_count(resolved as i32) > 0:
                 let iref_elem = self.get_generic_inst_arg(resolved as i32, 0)
                 return self.ensure_exact_type(TypeKind.TY_REF, iref_elem, 0, 0) as i32

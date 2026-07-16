@@ -61,7 +61,7 @@ async fn collect_bids(rx: Receiver[Bid], expected: i32) -> Bid:
     var best = Bid { bidder_id: -1, amount: 0 }
     var count: i32 = 0
     while count < expected:
-        let bid = rx.recv()
+        let bid = rx.recv().unwrap()
         if bid.amount > best.amount:
             best = bid
         count = count + 1

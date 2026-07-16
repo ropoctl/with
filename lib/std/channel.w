@@ -4,7 +4,7 @@
 //   use std.channel
 //   let (tx, rx) = chan[i32](8)   // bounded channel, capacity 8
 //   tx.send(42)
-//   let val = rx.recv()
+//   let val = rx.recv()          // Option[T]: None once closed and drained
 //
 // chan[T](capacity) is a compiler builtin that returns (Sender[T], Receiver[T]).
 // Sender and Receiver enforce directionality at compile time.

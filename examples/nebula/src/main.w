@@ -99,9 +99,9 @@ async fn main:
     shutdown_tx.send(1)
 
     let data_task = async:
-        data_rx.recv()
+        data_rx.recv().unwrap()
     let shutdown_task = async:
-        shutdown_rx.recv()
+        shutdown_rx.recv().unwrap()
 
     select await:
         _ = data_task =>

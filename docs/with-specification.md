@@ -7311,14 +7311,25 @@ scope s =>
 ```
 let (tx, rx) = chan[Message](buffer: 10)
 
-tx.send(msg).await          // suspends fiber if full
-let msg = rx.recv().await   // suspends fiber if empty
+tx.send(msg).await                // suspends fiber if full
+let msg = rx.recv().await         // Option[Message]: suspends fiber if
+                                  // empty; None once closed AND drained
+
+// The blessed worker loop — receives until the sender hangs up,
+// then falls out with zero ceremony:
+for msg in rx:
+    handle(msg)
 
 // Non-blocking:
 match rx.try_recv():
     Some(msg) => handle(msg)
     None      => ()
 ```
+
+`recv()` returns `Option[T]` (D10): buffered messages are always
+delivered first, and `None` means the channel is closed and drained —
+termination is in the type, never a sentinel value or a panic. In a
+fallible context the happy path stays bare: `rx.recv()?`.
 
 Channels transfer ownership: sending moves the value. **Channel
 element types must be `Send`, not merely `ScopedSend`.** This is

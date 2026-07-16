@@ -1,5 +1,8 @@
 //! expect-stdout: ok
 
+// D10 (decisions.md): recv() -> Option[T]. Buffered messages are delivered
+// first (Some), and only a closed AND drained channel yields None.
+
 use std.channel
 
 async fn producer(tx: Sender[i32]) -> i32:
@@ -9,8 +12,10 @@ async fn producer(tx: Sender[i32]) -> i32:
     0
 
 async fn consumer(rx: Receiver[i32]) -> i32:
-    let a = rx.recv()
-    let b = rx.recv()
+    let a = rx.recv().unwrap()
+    let b = rx.recv().unwrap()
+    assert(rx.recv().is_none())
+    assert(rx.recv().is_none())
     a + b
 
 async fn main:
