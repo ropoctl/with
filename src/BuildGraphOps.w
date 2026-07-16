@@ -579,15 +579,28 @@ pub fn build_graph_install_file(root: str, target: &BuildGraphTarget) -> i32:
     if build_graph_rt_mkdir_p(dest_dir) != 0:
         build_graph_rt_eprint("error: install target '" ++ target.name ++ "' could not create destination directory: " ++ dest_dir)
         return 1
+    // Install via temp-sibling + rename, never an in-place overwrite: on
+    // arm64 macOS, truncating a previously-executed signed binary's inode
+    // leaves the kernel's per-vnode code-signature cache stale, and the next
+    // exec dies with SIGKILL even though codesign reads the file as valid.
+    // Rename gives the destination path a fresh inode atomically.
+    let temp_path = dest_path ++ ".install-tmp"
+    let _remove_stale_temp = build_graph_rt_remove_file(temp_path)
     let contents = build_graph_rt_read_file(source_path)
-    if build_graph_rt_write_file(dest_path, contents) != 0:
-        build_graph_rt_eprint("error: install target '" ++ target.name ++ "' could not write destination: " ++ dest_path)
+    if build_graph_rt_write_file(temp_path, contents) != 0:
+        build_graph_rt_eprint("error: install target '" ++ target.name ++ "' could not write destination: " ++ temp_path)
         return 1
     let mode = if target.args.len() == 0: 0o644 else: build_graph_parse_octal_mode(target.args.get(0))
     if mode < 0:
+        let _remove_temp = build_graph_rt_remove_file(temp_path)
         build_graph_rt_eprint("error: install target '" ++ target.name ++ "' has invalid octal mode: " ++ target.args.get(0))
         return 1
-    if build_graph_rt_chmod(dest_path, mode) != 0:
-        build_graph_rt_eprint("error: install target '" ++ target.name ++ "' could not chmod destination: " ++ dest_path)
+    if build_graph_rt_chmod(temp_path, mode) != 0:
+        let _remove_temp = build_graph_rt_remove_file(temp_path)
+        build_graph_rt_eprint("error: install target '" ++ target.name ++ "' could not chmod destination: " ++ temp_path)
+        return 1
+    if build_graph_rt_rename_file(temp_path, dest_path) != 0:
+        let _remove_temp = build_graph_rt_remove_file(temp_path)
+        build_graph_rt_eprint("error: install target '" ++ target.name ++ "' could not move into place: " ++ dest_path)
         return 1
     0
