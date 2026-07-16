@@ -55,12 +55,11 @@ new combinators: no new leaks or double-frees; all reported leaks are the
   remaining gap: CHAN_RECV codegen discards the -1 status, so recv() on a
   closed drained channel returns an uninitialized value — needs a
   maintainer ruling on the closed-recv contract.
-- Migration campaign queue (in dependency order): #675 manifest-driven
-  migration build refactor (one generic pipeline engine + per-library
-  MigrationSpec records; converts pcre2/zlib first) → then #673 lexbor
-  (std.html / std.encoding.html; closes impossible_oneliners HTML section)
-  and #674 llhttp (http.parse_*; server chain link after #658). #673/#674
-  are explicitly blocked on #675.
+- DEFERRED to milestone post-v0.16.0 (maintainer ruling 2026-07-16):
+  the migration campaign #675 → #673/#674 (manifest-driven build refactor,
+  then lexbor and llhttp as manifest entries; #673/#674 blocked on #675),
+  plus all Windows work (#369 and the Windows fiber-core host run). None
+  of these start before v0.16.0 ships.
 - #670 FIXED (da76b939): cross-file labels render against their own file
   and print the path (`= label <path>@L:C ...`); same-file label format
   unchanged; err_global_race_crossfile_label.w pins it.
