@@ -9,6 +9,7 @@
 
 // ── Runtime helpers (from rt_core.w) ────────────────────────────
 extern fn rt_write(fd: i32, buf: *const u8, len: u64) -> i64
+extern fn with_str_from_bytes(s: *const u8, len: i64) -> str
 extern fn with_memcpy(dst: *mut u8, src: *const u8, len: i64) -> Unit
 extern fn with_nanosleep(ns: i64) -> i32
 extern fn pthread_self() -> i64
@@ -185,6 +186,17 @@ extern fn LLVMGetNamedGlobal(m: *mut u8, name: *const u8) -> *mut u8
 extern fn LLVMGetFirstFunction(m: *mut u8) -> *mut u8
 extern fn LLVMGetNextFunction(v: *mut u8) -> *mut u8
 extern fn LLVMIsDeclaration(v: *mut u8) -> i32
+extern fn LLVMWriteBitcodeToFile(m: *mut u8, path: *const u8) -> i32
+extern fn LLVMCountBasicBlocks(f: *mut u8) -> u32
+extern fn LLVMGetFirstBasicBlock(f: *mut u8) -> *mut u8
+extern fn LLVMGetNextBasicBlock(bb: *mut u8) -> *mut u8
+extern fn LLVMDeleteBasicBlock(bb: *mut u8)
+extern fn LLVMReplaceAllUsesWith(old_v: *mut u8, new_v: *mut u8)
+extern fn LLVMGetFirstGlobal(m: *mut u8) -> *mut u8
+extern fn LLVMGetNextGlobal(g: *mut u8) -> *mut u8
+extern fn LLVMGetInitializer(g: *mut u8) -> *mut u8
+extern fn LLVMGetLinkage(v: *mut u8) -> i32
+extern fn LLVMDeleteGlobal(g: *mut u8)
 extern fn LLVMGetEnumAttributeKindForName(name: *const u8, len: u64) -> u32
 extern fn LLVMCreateEnumAttribute(c: *mut u8, kind: u32, val: u64) -> *mut u8
 extern fn LLVMCreateTypeAttribute(c: *mut u8, kind: u32, ty: *mut u8) -> *mut u8
@@ -199,6 +211,7 @@ extern fn LLVMGetInsertBlock(b: *mut u8) -> *mut u8
 extern fn LLVMGetBasicBlockTerminator(bb: *mut u8) -> *mut u8
 extern fn LLVMGetEntryBasicBlock(fn_val: *mut u8) -> *mut u8
 extern fn LLVMGetFirstInstruction(bb: *mut u8) -> *mut u8
+extern fn LLVMGetNextInstruction(inst: *mut u8) -> *mut u8
 extern fn LLVMBasicBlockAsValue(bb: *mut u8) -> *mut u8
 
 // Builder: arithmetic (all take builder, lhs, rhs, name → value)
@@ -897,6 +910,89 @@ pub fn wl_cc_win64() -> i32: LLVM_Win64CallConv
 pub fn wl_cc_aarch64_vfabi() -> i32: 97
 pub fn wl_internal_linkage() -> i32: LLVM_InternalLinkage
 pub fn wl_private_linkage() -> i32: LLVM_PrivateLinkage
+pub fn wl_external_linkage() -> i32: LLVM_ExternalLinkage
+let LLVM_AppendingLinkage: i32 = 7
+
+// ── Codegen-unit splitting primitives (#650) ─────────────────────
+
+pub fn wl_write_bitcode(m: i64, path: str) -> i32:
+    unsafe { LLVMWriteBitcodeToFile(m as *mut u8, to_cstr(path)) }
+
+pub fn wl_parse_bitcode_in_context(ctx: i64, path: str) -> i64:
+    unsafe:
+        var mem_buf: *mut u8 = 0 as *mut u8
+        var err: *mut u8 = 0 as *mut u8
+        if LLVMCreateMemoryBufferWithContentsOfFile(to_cstr(path), &raw mut mem_buf, &raw mut err) != 0:
+            if err as i64 != 0:
+                let err_len = c_strlen(err as *const u8)
+                if err_len > 0:
+                    let _ = rt_write(2, err as *const u8, err_len as u64)
+                    let _ = rt_write(2, "\n" as *const u8, 1)
+                LLVMDisposeMessage(err)
+            return 0
+        var m: *mut u8 = 0 as *mut u8
+        var parse_err: *mut u8 = 0 as *mut u8
+        // LLVMParseIRInContext2 takes ownership of the buffer and accepts
+        // bitcode as well as textual IR.
+        if LLVMParseIRInContext2(ctx as *mut u8, mem_buf, &raw mut m, &raw mut parse_err) != 0:
+            if parse_err as i64 != 0:
+                let perr_len = c_strlen(parse_err as *const u8)
+                if perr_len > 0:
+                    let _ = rt_write(2, parse_err as *const u8, perr_len as u64)
+                    let _ = rt_write(2, "\n" as *const u8, 1)
+                LLVMDisposeMessage(parse_err)
+            return 0
+        m as i64
+
+pub fn wl_fn_is_declaration(f: i64) -> i32: unsafe { LLVMIsDeclaration(f as *mut u8) }
+pub fn wl_fn_block_count(f: i64) -> i32: unsafe { LLVMCountBasicBlocks(f as *mut u8) as i32 }
+
+// Mirror Function::deleteBody(): drop every reference held by the body
+// before erasing it. Instructions may be used across blocks (SSA dominance)
+// and terminators reference successor blocks, so blocks cannot simply be
+// deleted front-to-back — replace all instruction uses with undef first,
+// then erase instructions, then the emptied blocks.
+pub fn wl_delete_function_body(f: i64) -> Unit:
+    unsafe:
+        var bb = LLVMGetFirstBasicBlock(f as *mut u8)
+        while bb as i64 != 0:
+            var inst = LLVMGetFirstInstruction(bb)
+            while inst as i64 != 0:
+                let inst_ty = LLVMTypeOf(inst)
+                if LLVMGetTypeKind(inst_ty) != LLVM_VoidTypeKind:
+                    LLVMReplaceAllUsesWith(inst, LLVMGetUndef(inst_ty))
+                inst = LLVMGetNextInstruction(inst)
+            bb = LLVMGetNextBasicBlock(bb)
+        bb = LLVMGetFirstBasicBlock(f as *mut u8)
+        while bb as i64 != 0:
+            var kill = LLVMGetFirstInstruction(bb)
+            while kill as i64 != 0:
+                let next_kill = LLVMGetNextInstruction(kill)
+                LLVMInstructionEraseFromParent(kill)
+                kill = next_kill
+            bb = LLVMGetNextBasicBlock(bb)
+        bb = LLVMGetFirstBasicBlock(f as *mut u8)
+        while bb as i64 != 0:
+            LLVMDeleteBasicBlock(bb)
+            bb = LLVMGetFirstBasicBlock(f as *mut u8)
+
+pub fn wl_get_first_global(m: i64) -> i64: unsafe { LLVMGetFirstGlobal(m as *mut u8) as i64 }
+pub fn wl_get_next_global(g: i64) -> i64: unsafe { LLVMGetNextGlobal(g as *mut u8) as i64 }
+pub fn wl_global_has_initializer(g: i64) -> i32:
+    unsafe { if LLVMGetInitializer(g as *mut u8) as i64 != 0: 1 else: 0 }
+pub fn wl_get_linkage(v: i64) -> i32: unsafe { LLVMGetLinkage(v as *mut u8) }
+pub fn wl_appending_linkage() -> i32: LLVM_AppendingLinkage
+pub fn wl_delete_global(g: i64) -> Unit: unsafe { LLVMDeleteGlobal(g as *mut u8) }
+pub fn wl_clear_initializer(g: i64) -> Unit:
+    unsafe { LLVMSetInitializer(g as *mut u8, 0 as *mut u8) }
+
+pub fn wl_get_value_name(v: i64) -> str:
+    unsafe:
+        var len: u64 = 0
+        let p = LLVMGetValueName2(v as *mut u8, &raw mut len)
+        if p as i64 == 0 or len == 0:
+            return ""
+        with_str_from_bytes(p, len as i64)
 
 // ── Builder: control flow ───────────────────────────────────────
 

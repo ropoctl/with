@@ -77,6 +77,9 @@ type Zcu {
     last_mir_dump: str,
     last_async_mir_module: AsyncMirModule,
     last_async_mir_dump: str,
+    // #650: how many codegen-unit objects the last backend emit produced
+    // (1 = single canonical object; K > 1 adds <obj>.u1.o .. .u{K-1}.o).
+    last_codegen_unit_count: i32,
     last_link_lib_names: Vec[str],
     tracked_input_paths: Vec[str],
     project_config: ProjectConfig,
@@ -137,6 +140,7 @@ fn Zcu.init -> Zcu:
         last_mir_dump: "",
         last_async_mir_module: AsyncMirModule.init(),
         last_async_mir_dump: "",
+        last_codegen_unit_count: 1,
         last_link_lib_names: zcu_new_vec_str(),
         tracked_input_paths: zcu_new_vec_str(),
         project_config: project_config_default(),

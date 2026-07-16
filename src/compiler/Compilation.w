@@ -13,6 +13,7 @@ use CCodegen
 use render
 use compiler.Compilation.Config
 use compiler.Backend
+use compiler.CodegenUnits
 use compiler.Frontend
 use compiler.Link
 use compiler.ProjectConfig
@@ -754,9 +755,19 @@ impl Compilation:
             return false
         self.zcu.emit_ir_backend(self.active_pool(prepared_pool), self.config.opt_level)
 
+// #650 codegen units: sibling unit objects (<obj>.u1.o ..) follow the
+// canonical object's lifetime. The env cap bounds the sweep; removals are
+// best-effort so stale higher-K leftovers from earlier runs also clear.
+fn compilation_remove_unit_objects_best_effort(obj_path: str):
+    var k = 1
+    while k < 64:
+        compilation_remove_file_best_effort(f"{obj_path}.u{k}.o")
+        k = k + 1
+
 fn compilation_cleanup_build_products(obj_path: str, bin_path: str):
     if obj_path.len() > 0:
         compilation_remove_file_best_effort(obj_path)
+        compilation_remove_unit_objects_best_effort(obj_path)
     if bin_path.len() > 0:
         compilation_remove_file_best_effort(bin_path)
         compilation_remove_dsym_best_effort(bin_path)
@@ -900,7 +911,8 @@ impl Compilation:
         for dli in 0..self.zcu.project_config.dep_link_libs.len() as i32:
             all_link_libs.push(self.zcu.project_config.dep_link_libs.get(dli as i64))
         var _sp_dla = self.zcu.project_config.dep_link_args
-        let link_plan = link_stage_link_object_to_binary_plan(obj_path, bin_path, all_link_libs, self.zcu.project_config.link_search_paths, move _sp_dla, requires_async_runtime)
+        let unit_objects = codegen_unit_extra_objects(obj_path, self.zcu.last_codegen_unit_count)
+        let link_plan = link_stage_link_object_to_binary_plan_with_units(obj_path, unit_objects, bin_path, all_link_libs, self.zcu.project_config.link_search_paths, move _sp_dla, requires_async_runtime)
         if not link_plan.ok:
             compilation_cleanup_build_products(obj_path, bin_path)
             return compilation_binary_link_plan_fail()
@@ -940,6 +952,7 @@ fn compilation_execute_binary_link_plan(debug_info: bool, plan: CompilationBinar
         if profile_enabled():
             profile_emit("dsymutil", t_dsym, "")
     compilation_remove_file_best_effort(plan.obj_path)
+    compilation_remove_unit_objects_best_effort(plan.obj_path)
     link_result
 
 impl Compilation:

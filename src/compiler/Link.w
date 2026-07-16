@@ -949,13 +949,33 @@ fn link_stage_link_object_to_binary(obj_path: str, bin_path: str, link_libs: Vec
     link_stage_link_object_to_binary_result(obj_path, bin_path, link_libs, link_search_paths, move link_args, needs_async_runtime).ok
 
 fn link_stage_link_object_to_binary_result(obj_path: str, bin_path: str, link_libs: Vec[str], link_search_paths: Vec[str], link_args: Vec[str], needs_async_runtime: bool) -> LinkStageResult:
-    link_stage_result_for_plan(link_stage_link_object_to_binary_plan(obj_path, bin_path, link_libs, link_search_paths, move link_args, needs_async_runtime))
+    let no_extra_objects: Vec[str] = Vec.new()
+    link_stage_result_for_plan(link_stage_link_object_to_binary_plan_with_units(obj_path, no_extra_objects, bin_path, link_libs, link_search_paths, move link_args, needs_async_runtime))
 
 fn link_stage_link_object_to_binary_plan(obj_path: str, bin_path: str, link_libs: Vec[str], link_search_paths: Vec[str], link_args: Vec[str], needs_async_runtime: bool) -> LinkStagePlan:
+    let no_extra_objects: Vec[str] = Vec.new()
+    link_stage_link_object_to_binary_plan_with_units(obj_path, no_extra_objects, bin_path, link_libs, link_search_paths, move link_args, needs_async_runtime)
+
+fn link_stage_link_object_to_binary_plan_with_units(obj_path: str, extra_objects: Vec[str], bin_path: str, link_libs: Vec[str], link_search_paths: Vec[str], link_args: Vec[str], needs_async_runtime: bool) -> LinkStagePlan:
     let extras: Vec[str] = Vec.new()
+    // #650 codegen units: sibling .o files are full linker inputs like the
+    // primary object (objects always load wholly, so position is irrelevant).
+    for ui in 0..extra_objects.len() as i32:
+        extras.push(extra_objects.get(ui as i64))
     for i in 0..link_search_paths.len() as i32:
         extras.push("-L" ++ link_search_paths.get(i as i64))
-    let undef = link_stage_undefined_symbols_for_object(obj_path)
+    var undef = link_stage_undefined_symbols_for_object(obj_path)
+    // Runtime-need detection must see undefined symbols from every unit, not
+    // just the primary object. A failed probe stays the pure sentinel so the
+    // conservative "<probe-failed>" equality checks keep firing.
+    for uu in 0..extra_objects.len() as i32:
+        if undef == "<probe-failed>":
+            break
+        let unit_undef = link_stage_undefined_symbols_for_object(extra_objects.get(uu as i64))
+        if unit_undef == "<probe-failed>":
+            undef = "<probe-failed>"
+        else:
+            undef = undef ++ unit_undef
     let needs_fiber_runtime = if needs_async_runtime: 1 else: link_stage_undefined_symbols_need_fiber_runtime(undef)
     let needs_regex_runtime = link_stage_undefined_symbols_need_regex_runtime(undef)
     let needs_compat_runtime = link_stage_undefined_symbols_need_compat_runtime(undef)

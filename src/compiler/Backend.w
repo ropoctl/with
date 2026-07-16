@@ -5,6 +5,7 @@ use CodegenTraits
 use compiler.Zcu
 use compiler.Runtime
 use compiler.TrackedInputs
+use compiler.CodegenUnits
 use AnalysisTypes
 
 fn backend_debug_pool_flow_enabled() -> i32:
@@ -54,6 +55,20 @@ impl Zcu:
         if do_profile:
             let codegen_ns = runtime_clock_nanos() - t_codegen
             runtime_eprint(f"[profile] llvm.gen_module  {codegen_ns / 1000000}.{(codegen_ns % 1000000) / 1000} ms")
+        // #650 codegen units: optimize + emit per deterministic unit instead
+        // of one whole-module pipeline. Module-object mode keeps the single
+        // object (bootstrap/runtime objects are small and name-sensitive).
+        let unit_count = if module_object_mode: 1 else: codegen_units_env_count()
+        self.last_codegen_unit_count = 1
+        if unit_count > 1:
+            let units_rc = codegen_units_emit(cg.llmod, output_path, opt_level, unit_count, do_profile)
+            if units_rc != 0:
+                return 1
+            if runtime_file_exists(output_path) == 0:
+                runtime_eprint(f"error: codegen-units reported success but no object file exists at {output_path}")
+                return 1
+            self.last_codegen_unit_count = unit_count
+            return 0
         if opt_level > 0:
             let t_opt = runtime_clock_nanos()
             cg.optimize(opt_level)
