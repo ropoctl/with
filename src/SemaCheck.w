@@ -17000,11 +17000,22 @@ impl Sema:
 
         // HashMap.get and related C-backend intrinsics currently materialize an
         // encoded optional value with the payload's static type. Preserve the
-        // existing surface methods until those intrinsics return real Option[T].
-        if field == self.syms.is_some or field == self.syms.is_none:
-            return self.ty_bool as i32
-        if field == self.syms.unwrap:
-            return recv_type
+        // existing surface methods until those intrinsics return real Option[T]
+        // — but never on an enum value: Option/Result handled their own
+        // unwrap above, and treating any other enum as an encoded optional
+        // lets `.unwrap()` extract a phantom payload from it (the value is
+        // corrupt from that point on — segfault class, #672).
+        let oe_resolved = self.resolve_alias(recv_type as TypeId)
+        var oe_is_enum = self.get_type_kind(oe_resolved) == TypeKind.TY_ENUM
+        if self.get_type_kind(oe_resolved) == TypeKind.TY_GENERIC_INST:
+            let oe_base_tid = self.lookup_named_type_visible(self.get_generic_inst_base(oe_resolved as i32))
+            if oe_base_tid != 0 and self.get_type_kind(oe_base_tid as TypeId) == TypeKind.TY_ENUM:
+                oe_is_enum = true
+        if not oe_is_enum:
+            if field == self.syms.is_some or field == self.syms.is_none:
+                return self.ty_bool as i32
+            if field == self.syms.unwrap:
+                return recv_type
         0
 
     fn method_expected_arg_type(recv_type: i32, field: i32, arg_index: i32) -> i32:
