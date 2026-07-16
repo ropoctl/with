@@ -39,12 +39,43 @@ pub type CodegenUnitPlan {
     fn_renames: Vec[str],
 }
 
+// Explicit override; 0 means "unset — use the host-aware default".
 pub fn codegen_units_env_count() -> i32:
     let raw = runtime_getenv("WITH_CODEGEN_UNITS")
     if raw.len() == 0:
-        return 1
+        return 0
     let n = parse(raw)
     if n < 1: 1 else: if n > 64: 64 else: n
+
+type CodegenUnitsSysInfo {
+    cpu_cores: i32,
+    memory_total: i64,
+    page_size: i64,
+}
+extern fn with_sysinfo(out: *mut u8) -> i32
+
+// Default unit count for the build-to-binary path. Split only when the
+// module is large enough for the bitcode round-trip to pay for itself,
+// scale to cores (capped — returns diminish past the big units), and bound
+// concurrent pre-strip parses by host memory: compiler-sized modules peak
+// near ~3 GB per in-flight unit.
+pub fn codegen_units_default_count(mir_body_count: i32) -> i32:
+    if mir_body_count < 2000:
+        return 1
+    var info = CodegenUnitsSysInfo { cpu_cores: 1, memory_total: 0, page_size: 4096 }
+    let _ = with_sysinfo(&info as *mut u8)
+    var k = if info.cpu_cores > 0: info.cpu_cores else: 1
+    if k > 8:
+        k = 8
+    let mem_gb = if info.memory_total > 0: info.memory_total / (1024 * 1024 * 1024) else: 8
+    let mem_cap = ((mem_gb - 6) / 3) as i32
+    if mem_cap < 2:
+        return 1
+    if k > mem_cap:
+        k = mem_cap
+    if k < 1:
+        k = 1
+    k
 
 // Enumerate defined functions in module order and pack them into K bins,
 // balancing on basic-block count. Greedy least-loaded-bin assignment over a

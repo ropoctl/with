@@ -57,8 +57,13 @@ impl Zcu:
             runtime_eprint(f"[profile] llvm.gen_module  {codegen_ns / 1000000}.{(codegen_ns % 1000000) / 1000} ms")
         // #650 codegen units: optimize + emit per deterministic unit instead
         // of one whole-module pipeline. Module-object mode keeps the single
-        // object (bootstrap/runtime objects are small and name-sensitive).
-        let unit_count = if module_object_mode: 1 else: codegen_units_env_count()
+        // object (--emit-obj contracts a single file: fixpoint objects and
+        // bootstrap/runtime objects stay whole). WITH_CODEGEN_UNITS overrides;
+        // otherwise large modules split by the host-aware default.
+        var unit_count = 1
+        if not module_object_mode:
+            let env_units = codegen_units_env_count()
+            unit_count = if env_units > 0: env_units else: codegen_units_default_count(self.last_mir_module.body_count())
         self.last_codegen_unit_count = 1
         if unit_count > 1:
             let units_rc = codegen_units_emit(cg.llmod, output_path, opt_level, unit_count, do_profile)
