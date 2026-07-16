@@ -56,10 +56,16 @@ new combinators: no new leaks or double-frees; all reported leaks are the
   closed drained channel returns an uninitialized value — needs a
   maintainer ruling on the closed-recv contract.
 - DEFERRED to milestone post-v0.16.0 (maintainer ruling 2026-07-16):
-  the migration campaign #675 → #673/#674 (manifest-driven build refactor,
-  then lexbor and llhttp as manifest entries; #673/#674 blocked on #675),
-  plus all Windows work (#369 and the Windows fiber-core host run). None
-  of these start before v0.16.0 ships.
+  the migration campaign #675 → #673/#674/#676 (manifest-driven build
+  refactor with pcre2+zlib retrofit as its completion gate, then lexbor,
+  llhttp, and minicoro as manifest entries), plus all Windows work (#369,
+  blocked on #676's minicoro Windows backend, and the fiber-core host
+  run). None of these start before v0.16.0 ships.
+- #637 FIXED (1056ff50): is_done() on a reaped (post-await) task handle
+  reports done — stale generational handles name terminal fibers by
+  construction. Residual noted on the issue: was_cancelled() post-reap.
+- #650 escalated to high-priority by maintainer: root-cause build
+  slowness, land per-phase timing first; measurements posted on the issue.
 - #670 FIXED (da76b939): cross-file labels render against their own file
   and print the path (`= label <path>@L:C ...`); same-file label format
   unchanged; err_global_race_crossfile_label.w pins it.
