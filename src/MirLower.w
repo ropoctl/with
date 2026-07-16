@@ -3089,8 +3089,10 @@ impl MirBuilder:
         if self.sema.variant_lookup.contains(sym):
             let vl_sym = if node_id != 0 and self.sema.comp_resolved.contains(node_id): self.sema.comp_resolved.get(node_id).unwrap() else: sym
             let vl_decl_ty = if self.sema.variant_type_ids.contains(vl_sym): self.sema.variant_type_ids.get(vl_sym).unwrap() else: self.sema.variant_type_ids.get(sym).unwrap()
-            var vl_result_ty = if self.expected_type != 0: self.expected_type else: type_id
-            if vl_result_ty == 0:
+            // #671: same guard as the constructor-call path — an ambient
+            // expectation that does not carry this variant must not retype it.
+            var vl_result_ty = if self.expected_type != 0 and self.sema.enum_variant_discriminant_for_type(self.expected_type, vl_sym) >= 0: self.expected_type else: type_id
+            if vl_result_ty == 0 or vl_result_ty == self.sema.ty_void as i32:
                 vl_result_ty = vl_decl_ty
             var vl_variant_idx = self.enum_variant_discriminant_for_type(vl_result_ty, vl_sym)
             if vl_variant_idx < 0:
@@ -11622,9 +11624,16 @@ impl MirBuilder:
                     vc_sym = self.sema.comp_resolved.get(node).unwrap()
                 if self.sema.variant_lookup.contains(vc_sym):
                     var vc_result_ty = self.expr_type(node)
-                    if self.expected_type != 0:
+                    // #671: only an expected type that actually carries this
+                    // variant may override the constructor's own enum. An
+                    // ambient expectation from an outer construct (a statement's
+                    // void, an enclosing fn's return type) otherwise types the
+                    // aggregate as a non-enum and codegen has no destination.
+                    // The sema-level lookup is the strict one; the MirLower
+                    // wrapper falls back to a by-symbol index for ANY type.
+                    if self.expected_type != 0 and self.sema.enum_variant_discriminant_for_type(self.expected_type, vc_sym) >= 0:
                         vc_result_ty = self.expected_type
-                    if vc_result_ty == 0:
+                    if vc_result_ty == 0 or vc_result_ty == self.sema.ty_void as i32:
                         vc_result_ty = self.sema.variant_type_ids.get(vc_sym).unwrap()
                     var vc_variant_idx = self.enum_variant_discriminant_for_type(vc_result_ty, vc_sym)
                     if vc_variant_idx < 0:
@@ -12013,7 +12022,7 @@ impl MirBuilder:
             let vs_args_start = self.ast.get_data1(node)
             let vs_arg_count = self.ast.get_data2(node)
             var vs_result_ty = self.expr_type(node)
-            if (vs_result_ty == 0 or vs_result_ty == self.sema.ty_void as i32) and self.expected_type != 0:
+            if (vs_result_ty == 0 or vs_result_ty == self.sema.ty_void as i32) and self.expected_type != 0 and self.expected_type != self.sema.ty_void as i32:
                 vs_result_ty = self.expected_type
             vs_name_sym = self.resolve_comprehension_marker_variant(vs_name_sym, vs_result_ty)
             var vs_variant_idx = self.enum_variant_discriminant_for_type(vs_result_ty, vs_name_sym)
