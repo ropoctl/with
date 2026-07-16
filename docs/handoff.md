@@ -76,6 +76,16 @@ new combinators: no new leaks or double-frees; all reported leaks are the
   (content-hash × compiler-fingerprint), (3) single-sema + hot-accessor
   inlining. 913cb914 landed the find_trait_decl_node cache (hygiene;
   measured noise-level — sema's cost is diffuse runtime-call overhead).
+  2f706c21 landed codegen-units MILESTONE 1: deterministic serial split
+  (src/compiler/CodegenUnits.w; WITH_CODEGEN_UNITS env, default 1/off;
+  bitcode round-trip, safe deleteBody, __wcu$ externalization, unit-0
+  global ownership, multi-object link with undef-probe union, cleanup).
+  Verified: K=8 compiler self-build works; unit objects byte-identical
+  across rebuilds; serial unit max 50s = projected parallel LLVM wall.
+  MILESTONE 2 (next): thread the unit loop (per-thread contexts; loop
+  body touches only bridge externs + locals; follow the comptime-parallel
+  runtime fan-out precedent), oversubscribe units 2-3x threads for
+  balance, then flip the default on with gates covering K>1.
 - #670 FIXED (da76b939): cross-file labels render against their own file
   and print the path (`= label <path>@L:C ...`); same-file label format
   unchanged; err_global_race_crossfile_label.w pins it.
