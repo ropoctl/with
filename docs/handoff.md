@@ -64,8 +64,18 @@ new combinators: no new leaks or double-frees; all reported leaks are the
 - #637 FIXED (1056ff50): is_done() on a reaped (post-await) task handle
   reports done — stale generational handles name terminal fibers by
   construction. Residual noted on the issue: was_cancelled() post-reap.
-- #650 escalated to high-priority by maintainer: root-cause build
-  slowness, land per-phase timing first; measurements posted on the issue.
+- #650 (high-priority) MEASURED and PLANNED: WITH_PROFILE=1 already
+  instruments every phase. Whole-compiler compile = 280s: llvm.emit_object
+  156s (56%, single-threaded SelectionDAG — TM already at CodeGenLevelLess),
+  llvm.optimize 34s (InstCombine on insert/extractvalue aggregate traffic),
+  sema checked TWICE (frontend 23s + fresh Sema in run_mir_lower 35s),
+  frontend+link negligible. Reference-compiler survey (Go/Rust/Swift/Zig,
+  .reference/) posted on the issue — all four parallelize the backend.
+  Execution order on the issue: (1) codegen-units (deterministic MIR-body
+  partition, K threads/objects — attacks ~204s), (2) per-unit object cache
+  (content-hash × compiler-fingerprint), (3) single-sema + hot-accessor
+  inlining. 913cb914 landed the find_trait_decl_node cache (hygiene;
+  measured noise-level — sema's cost is diffuse runtime-call overhead).
 - #670 FIXED (da76b939): cross-file labels render against their own file
   and print the path (`= label <path>@L:C ...`); same-file label format
   unchanged; err_global_race_crossfile_label.w pins it.
