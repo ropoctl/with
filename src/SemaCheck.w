@@ -8310,6 +8310,23 @@ impl Sema:
                     result_type = self.preferred_compatible_type(then_type, else_type)
                 else:
                     result_type = self.arithmetic_result_type(then_type, else_type)
+                    if result_type == 0 and in_value_context:
+                        // #549: a value-position if must not silently poison to
+                        // <error>. Distinct types compare by base first, so
+                        // BlockId-vs-raw-i32 joins keep their historical silent
+                        // poison; only genuinely unrelated branch types diagnose.
+                        let then_base = self.unwrap_builtin_arg_distinct(then_type as i32)
+                        let else_base = self.unwrap_builtin_arg_distinct(else_type as i32)
+                        var bases_unify = 0
+                        if then_base != then_type as i32 or else_base != else_type as i32:
+                            if self.types_compatible(then_base as TypeId, else_base as TypeId) != 0:
+                                bases_unify = 1
+                            else if self.arithmetic_result_type(then_base as TypeId, else_base as TypeId) != 0:
+                                bases_unify = 1
+                        if bases_unify == 0:
+                            let then_name = self.type_name(then_type as i32)
+                            let else_name = self.type_name(else_type as i32)
+                            self.emit_error(f"if branches do not unify: `{then_name}` vs `{else_name}`", node)
             else if then_type != 0:
                 result_type = then_type
             else:
