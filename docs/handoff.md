@@ -43,9 +43,13 @@ new combinators: no new leaks or double-frees; all reported leaks are the
   type, so contextual enum-constructor args (slot.set(Some(x)) family) type
   correctly; task.w workarounds removed;
   behav_contextual_enum_storing_args.w pins the matrix.
-- #671: Sender.send(Variant(x)) still traps — different mechanism (send is
-  not a MirLower intrinsic; check-time expected never lands); evidence in
-  the issue; typed-intermediate workaround applies.
+- #671 FIXED (4664df67): MirLower's variant lowerings no longer let an
+  ambient expected type (statement void, enclosing return type) retype a
+  constructor whose variant it does not carry;
+  behav_channel_enum_payload.w pins the statement-position cases.
+- #672: channel runtime loses/corrupts enum element payloads (sent None
+  arrives as channel-empty; recv-then-match on a user enum segfaults) —
+  pre-existing, cell matrix and repros in the issue.
 - #670 FIXED (da76b939): cross-file labels render against their own file
   and print the path (`= label <path>@L:C ...`); same-file label format
   unchanged; err_global_race_crossfile_label.w pins it.
