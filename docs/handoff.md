@@ -82,10 +82,16 @@ new combinators: no new leaks or double-frees; all reported leaks are the
   global ownership, multi-object link with undef-probe union, cleanup).
   Verified: K=8 compiler self-build works; unit objects byte-identical
   across rebuilds; serial unit max 50s = projected parallel LLVM wall.
-  MILESTONE 2 (next): thread the unit loop (per-thread contexts; loop
-  body touches only bridge externs + locals; follow the comptime-parallel
-  runtime fan-out precedent), oversubscribe units 2-3x threads for
-  balance, then flip the default on with gates covering K>1.
+  5cfc1377 landed MILESTONE 2 (threaded units): whole-compiler K=8 build
+  measured 280s -> 148.5s wall; peak RSS 22.7GB; object-level determinism
+  proven under threading (binary double-build diffs are PRE-EXISTING link
+  nondeterminism — debug-map mtimes/UUID — present at K=1; fixpoint
+  compares objects). Still opt-in via WITH_CODEGEN_UNITS (default 1).
+  DEFAULT FLIP (next, designed on the issue): (1) :fixpoint must compare
+  unit sibling objects first, (2) host-aware K via with_sysinfo (cores +
+  memory guard; ~2.8GB/unit peak on compiler-sized modules) + small-module
+  bypass, (3) better unit balancing (max 53s vs mean 37s), (4) parked:
+  lazy bitcode materialization to cut the pre-strip memory peak.
 - #670 FIXED (da76b939): cross-file labels render against their own file
   and print the path (`= label <path>@L:C ...`); same-file label format
   unchanged; err_global_race_crossfile_label.w pins it.
