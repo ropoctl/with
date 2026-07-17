@@ -3660,6 +3660,45 @@ fn Counter.zero() -> Counter: Counter { n: 0 }   # top level: associated
 stdlib migrate to the keyword form; the parser desugars the keyword form to
 them. See `docs/eliminate-self.md` for the phased plan.
 
+**Any owner type may be extended, primitives and `str` included — the
+receiver mode decides share-place, not the owner's type (D12).** A `mut fn`
+mutates the caller's place for every owner, whether the owner is an
+aggregate, a scalar primitive, or `str`:
+
+```
+extend i32:
+    mut fn bump(): self += 1
+
+var x = 5
+x.bump()        # x == 6 — mutation reaches the caller
+let y = 5
+y.bump()        # error: cannot mutate immutable binding `y`
+```
+
+A scalar primitive is `Copy`, yet `mut fn` still borrows it in place: the
+receiver **mode** wins over the owner's Copy-ness, exactly as it does for a
+`Copy` struct. Passing the same value to a by-value parameter (`f(x)`)
+copies it; calling a `mut fn` on it (`x.bump()`) borrows the caller's place
+(share-place, D5). `move fn` on a primitive still consumes.
+
+The idiomatic use is a domain verb on a distinct/newtype, where the method
+names an operation the bare operator cannot:
+
+```
+distinct type Health = i32
+extend Health:
+    mut fn damage(n: i32): self = Health(self.value - n)
+    mut fn heal(n: i32):   self = Health(self.value + n)
+
+var hp = Health(100)
+hp.damage(30)   # reads as the domain verb, not `hp = Health(hp.value - 30)`
+```
+
+On a bare primitive with no domain meaning, prefer the operator (`x += 1`)
+over `x.bump()`. `mut fn` on a `str` owner reassigns the caller's slice
+(`self = self.slice(1, self.len())`), subject to the ephemeral/view-origin
+rules of §22.
+
 **Consuming `self` enables consuming method chains:**
 
 ```
