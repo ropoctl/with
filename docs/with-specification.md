@@ -2630,7 +2630,7 @@ type SlotMap[T]
 | `for_each` | `(self: &Self, fn(Handle[T], &T))` | |
 | `get_disjoint` | `with sm.get_disjoint(h1, h2) as mut (a, b):` | Panics if equal |
 | `contains` | `(&Self, Handle[T]) -> bool` | |
-| `len` | `(&Self) -> usize` | |
+| `len` | `(&Self) -> Int` | signed (D11) |
 
 ### 6.3 Performance Characteristics
 
@@ -3118,7 +3118,7 @@ let name = with db.read() as users:
 
 // If the value is Copy, no explicit clone needed:
 let count = with store.read() as data:
-    data.len()                      // usize is Copy, escapes freely
+    data.len()                      // Int is Copy, escapes freely
 ```
 
 This is by design — the clone marks the exact point where borrowed
@@ -10390,9 +10390,16 @@ Modules under `std.internal` (and compiler-support modules such as
 `std.str_abi`) are compiler/runtime implementation surface, not user
 API; they may change without notice.
 
-All collection types provide `.len()` returning `usize`, plus
-convenience narrowing methods (`.len32()`, `.len64()`, `.ulen32()`)
-that panic on overflow.
+All collection types provide `.len()` returning `Int` (i64) — signed, so
+`v.len() - 1` and countdown/index arithmetic just work; a held container
+always has a length, so length is never wrapped in `Option` (decisions.md
+D11). Convenience narrowing methods (`.len32()`, `.ulen32()`) panic on
+overflow; `.len64()` is an identity alias of `.len()`. The same signed
+convention applies to iterator `count()` and `position()` indices; `size`
+/ `align` type-layout constants stay `usize` (memory-layout / FFI, a
+distinct category). *Implementation note:* the compiler's sema surface
+still returns `usize` until #630 lands the flip — the spec leads here; do
+not revert this to `usize`.
 
 All collection types implement `Contains[T]` (§11.7), enabling the
 `in` operator for membership tests. See §9.9.
