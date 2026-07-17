@@ -3451,20 +3451,8 @@ pub fn with_codegen_loop_get_result(idx: i32) -> i64:
 // with_install_interrupt_handlers, with_raise_stack_limit,
 // with_interrupt_requested: provided by compat_runtime.w (need libc sigaction)
 
-// ── Network stubs ──────────────────────────────────────────────────
-
-pub fn with_net_tcp_listen(port: i32, backlog: i32) -> i32:
-    let _ = port
-    let _ = backlog
-    -1
-
-pub fn with_net_tcp_accept(sock: i32) -> i32:
-    let _ = sock
-    -1
-
-pub fn with_net_udp_bind(port: i32) -> i32:
-    let _ = port
-    -1
+// Network: with_net_* (connect, listen, accept, bind, send, recv, close,
+// sock_port) are implemented per-platform (darwin_aarch64.w, linux_x86_64.w).
 
 // Fiber stubs come from the small runtime stub object when async is absent.
 // Strong definitions come from fiber.c when the fiber runtime is linked.

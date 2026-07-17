@@ -9,12 +9,15 @@ extern fn with_net_send(fd: i32, data: str) -> i64
 extern fn with_net_recv(fd: i32, max_len: i64) -> str
 extern fn with_net_close(fd: i32) -> i32
 extern fn with_net_udp_bind(port: i32) -> i32
+extern fn with_net_udp_connect(host: str, port: i32) -> i32
+extern fn with_net_sock_port(fd: i32) -> i32
 
-/// Create a TCP listener on the given port. Returns fd >= 0 on success, -1 on failure.
+/// Create a TCP listener on the given port (0 picks an ephemeral port;
+/// discover it with sock_port). Returns fd >= 0 on success, -errno on failure.
 pub fn tcp_listen(port: i32) -> i32:
     with_net_tcp_listen(port, 128)
 
-/// Accept a connection on a listening socket. Returns client fd >= 0, or -1.
+/// Accept a connection on a listening socket. Returns client fd >= 0, or -errno.
 pub fn tcp_accept(listen_fd: i32) -> i32:
     with_net_tcp_accept(listen_fd)
 
@@ -34,6 +37,16 @@ pub fn recv(fd: i32, max_len: i64) -> str:
 pub fn socket_close(fd: i32) -> i32:
     with_net_close(fd)
 
-/// Create a UDP socket bound to the given port. Returns fd >= 0, or -1.
+/// Create a UDP socket bound to the given port (0 picks an ephemeral port;
+/// discover it with sock_port). Returns fd >= 0, or -errno.
 pub fn udp_bind(port: i32) -> i32:
     with_net_udp_bind(port)
+
+/// Create a UDP socket connected to a remote host, so send/recv work on it.
+/// Returns fd >= 0 on success, -1 on failure.
+pub fn udp_connect(host: str, port: i32) -> i32:
+    with_net_udp_connect(host, port)
+
+/// The local port a bound socket ended up on. Returns port, or -errno.
+pub fn sock_port(fd: i32) -> i32:
+    with_net_sock_port(fd)

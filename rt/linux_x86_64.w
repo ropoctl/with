@@ -607,6 +607,11 @@ pub fn rt_access(path: *const u8, mode: i32) -> i32:
 
 extern fn socket(domain: i32, ty: i32, protocol: i32) -> i32
 extern fn connect(fd: i32, addr: *const u8, addrlen: u32) -> i32
+extern fn bind(fd: i32, addr: *const u8, addrlen: u32) -> i32
+extern fn listen(fd: i32, backlog: i32) -> i32
+extern fn accept(fd: i32, addr: *mut u8, addrlen: *mut u32) -> i32
+extern fn setsockopt(fd: i32, level: i32, optname: i32, optval: *const u8, optlen: u32) -> i32
+extern fn getsockname(fd: i32, addr: *mut u8, addrlen: *mut u32) -> i32
 extern fn send(fd: i32, buf: *const u8, len: u64, flags: i32) -> i64
 extern fn recv(fd: i32, buf: *mut u8, len: u64, flags: i32) -> i64
 extern fn getaddrinfo(node: *const u8, service: *const u8, hints: *const LinuxAddrInfo, res: *mut *mut LinuxAddrInfo) -> i32
@@ -664,7 +669,7 @@ fn rt_net_write_port_to_c_buf(port: i32, out: *mut u8, cap: i64) -> i32:
 fn rt_net_empty_str() -> str:
     with_str_from_bytes("" as *const u8, 0)
 
-pub fn with_net_tcp_connect(host: str, port: i32) -> i32:
+fn rt_net_connect_any(host: str, port: i32, socktype: i32, protocol: i32) -> i32:
     var host_buf: [256]u8 = [0 as u8; 256]
     var port_buf: [16]u8 = [0 as u8; 16]
     if rt_net_copy_str_to_c_buf(host, &raw mut host_buf as *mut [256]u8 as *mut u8, 256) != 0:
@@ -674,8 +679,8 @@ pub fn with_net_tcp_connect(host: str, port: i32) -> i32:
     var hints = LinuxAddrInfo {
         ai_flags: 0,
         ai_family: 0,
-        ai_socktype: 1,
-        ai_protocol: 6,
+        ai_socktype: socktype,
+        ai_protocol: protocol,
         ai_addrlen: 0 as u32,
         ai_addr: 0 as *mut u8,
         ai_canonname: 0 as *mut u8,
@@ -697,6 +702,66 @@ pub fn with_net_tcp_connect(host: str, port: i32) -> i32:
         p = (unsafe *p).ai_next
     freeaddrinfo(res)
     -1
+
+pub fn with_net_tcp_connect(host: str, port: i32) -> i32:
+    rt_net_connect_any(host, port, 1, 6)
+
+pub fn with_net_udp_connect(host: str, port: i32) -> i32:
+    rt_net_connect_any(host, port, 2, 17)
+
+fn rt_net_bind_inaddr_any(fd: i32, port: i32) -> i32:
+    // Linux sockaddr_in: sin_family (u16 LE), sin_port (BE), sin_addr, pad.
+    var sa: [16]u8 = [0 as u8; 16]
+    sa[0] = 2 as u8
+    sa[2] = ((port >> 8) & 255) as u8
+    sa[3] = (port & 255) as u8
+    bind(fd, &sa as *const [16]u8 as *const u8, 16 as u32)
+
+pub fn with_net_tcp_listen(port: i32, backlog: i32) -> i32:
+    if port < 0 or port > 65535:
+        return -22
+    let fd = socket(2, 1, 6)
+    if fd < 0:
+        return -get_errno()
+    var one: i32 = 1
+    // SOL_SOCKET / SO_REUSEADDR (Linux values)
+    let _ = setsockopt(fd, 1, 2, &one as *const i32 as *const u8, 4 as u32)
+    if rt_net_bind_inaddr_any(fd, port) < 0:
+        let bind_err = get_errno()
+        let _ = rt_close(fd)
+        return -bind_err
+    if listen(fd, backlog) < 0:
+        let listen_err = get_errno()
+        let _ = rt_close(fd)
+        return -listen_err
+    fd
+
+pub fn with_net_tcp_accept(sock: i32) -> i32:
+    loop:
+        let fd = accept(sock, 0 as *mut u8, 0 as *mut u32)
+        if fd >= 0:
+            return fd
+        if get_errno() != 4:
+            return -get_errno()
+
+pub fn with_net_udp_bind(port: i32) -> i32:
+    if port < 0 or port > 65535:
+        return -22
+    let fd = socket(2, 2, 17)
+    if fd < 0:
+        return -get_errno()
+    if rt_net_bind_inaddr_any(fd, port) < 0:
+        let bind_err = get_errno()
+        let _ = rt_close(fd)
+        return -bind_err
+    fd
+
+pub fn with_net_sock_port(sock: i32) -> i32:
+    var sa: [16]u8 = [0 as u8; 16]
+    var sl: u32 = 16 as u32
+    if getsockname(sock, &raw mut sa as *mut [16]u8 as *mut u8, &raw mut sl) < 0:
+        return -get_errno()
+    ((sa[2] as i32) << 8) | (sa[3] as i32)
 
 pub fn with_net_send(sock: i32, data: str) -> i64:
     let ptr = rt_str_data(data)
