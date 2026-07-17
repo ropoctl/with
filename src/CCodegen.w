@@ -1482,6 +1482,14 @@ impl CCodegen:
                         continue
                     return 0
                 return 0
+            if pk == ProjKind.PK_TUPLE_INDEX:
+                if tk == TypeKind.TY_TUPLE:
+                    let tuple_ft = self.tuple_field_tid(resolved as i32, pd)
+                    if tuple_ft == 0:
+                        return 0
+                    tid = tuple_ft
+                    continue
+                return 0
             return 0
         tid
 
@@ -1559,6 +1567,14 @@ impl CCodegen:
                         continue
                     return 0
                 return 0
+            if pk == ProjKind.PK_TUPLE_INDEX:
+                if tk == TypeKind.TY_TUPLE:
+                    let tuple_ft = self.tuple_field_tid(resolved as i32, pd)
+                    if tuple_ft == 0:
+                        return 0
+                    tid = tuple_ft
+                    continue
+                return 0
             return 0
         tid
 
@@ -1629,6 +1645,14 @@ impl CCodegen:
                         tid = self.sema.type_reflection_variant_payload_type_frozen(tid, pd, 0)
                         continue
                     return 0
+                return 0
+            if pk == ProjKind.PK_TUPLE_INDEX:
+                if tk == TypeKind.TY_TUPLE:
+                    let tuple_ft = self.tuple_field_tid(resolved as i32, pd)
+                    if tuple_ft == 0:
+                        return 0
+                    tid = tuple_ft
+                    continue
                 return 0
             return 0
         tid
@@ -1923,11 +1947,29 @@ impl CCodegen:
         let resolved = self.sema.resolve_alias(tid)
         if self.sema.get_type_kind(resolved) != TypeKind.TY_GENERIC_INST:
             return 0
-        if self.generic_inst_base_name(resolved as i32) != "HashMap":
+        let base = self.generic_inst_base_name(resolved as i32)
+        if base == "HashSet":
+            if self.sema.get_generic_inst_arg_count(resolved as i32) < 1:
+                return 0
+            return self.sema.get_generic_inst_arg(resolved as i32, 0)
+        if base != "HashMap":
             return 0
         if self.sema.get_generic_inst_arg_count(resolved as i32) < 2:
             return 0
         self.sema.get_generic_inst_arg(resolved as i32, 0)
+
+    mut fn map_call_key_tid(body: &MirBody, args_id: i32, key_operand: i32) -> i32:
+        // The map's storage key size is fixed by the receiver's key type at
+        // with_hashmap_new time; a narrower key operand (i32 literal into a
+        // HashSet[i32] whose new-path sized keys as i64) would make insert
+        // and contains read different garbage bytes. Prefer the receiver's
+        // canonical key type, like the LLVM backend's key coercion.
+        var key_tid = self.hashmap_key_tid(self.operand_tid(body, self.call_arg_operand(body, args_id, 0)))
+        if key_tid == 0:
+            key_tid = self.operand_tid(body, key_operand)
+        if key_tid == 0 or self.is_void_tid(key_tid) != 0:
+            key_tid = self.sema.ty_i64 as i32
+        key_tid
 
     fn option_tid_for_payload(payload_tid: i32) -> i32:
         if payload_tid == 0 or self.is_void_tid(payload_tid) != 0:
@@ -2698,6 +2740,25 @@ impl CCodegen:
                     current_tid = 0
                     continue
                 out = f"{out}/*downcast{pd}*/"
+                current_tid = 0
+                continue
+            if pk == ProjKind.PK_TUPLE_INDEX:
+                if tk == TypeKind.TY_TUPLE:
+                    let elem_ft = self.tuple_field_tid(resolved as i32, pd)
+                    if elem_ft == 0:
+                        self.fail("unsupported tuple index access in C backend")
+                        current_tid = 0
+                        continue
+                    out = out ++ f".field{pd}"
+                    current_tid = elem_ft
+                    continue
+                if current_tid == 0:
+                    // Unknown base type: tuples are emitted as field{N}
+                    // structs, so render the member and let the C compiler
+                    // reject it loudly if the base was not a tuple.
+                    out = out ++ f".field{pd}"
+                    continue
+                self.fail("tuple index projection on non-tuple type in C backend")
                 current_tid = 0
                 continue
             self.fail(f"unsupported place projection kind {pk}")
@@ -5907,20 +5968,23 @@ impl CCodegen:
             return out
 
         if kind == CcBuiltin.MAP_INSERT:
-            if argc < 3:
-                self.fail("map.insert expects three arguments")
+            if argc < 2:
+                self.fail("map.insert expects a key argument")
                 return "    abort();"
             let recv = self.map_recv_text(body, args_id)
             let key_operand = self.call_arg_operand(body, args_id, 1)
-            let val_operand = self.call_arg_operand(body, args_id, 2)
             let key_text = self.operand_text(body, key_operand)
-            let val_text = self.operand_text(body, val_operand)
-            var key_tid = self.operand_tid(body, key_operand)
-            if key_tid == 0 or self.is_void_tid(key_tid) != 0:
-                key_tid = self.sema.ty_i64 as i32
-            var val_tid = self.operand_tid(body, val_operand)
-            if val_tid == 0 or self.is_void_tid(val_tid) != 0:
-                val_tid = self.sema.ty_i64 as i32
+            let key_tid = self.map_call_key_tid(body, args_id, key_operand)
+            // One-arg form is HashSet.insert(key): the value is a present
+            // marker, mirroring the LLVM backend's set branch.
+            var val_text = "1"
+            var val_tid = self.sema.ty_i64 as i32
+            if argc >= 3:
+                let val_operand = self.call_arg_operand(body, args_id, 2)
+                val_text = self.operand_text(body, val_operand)
+                val_tid = self.operand_tid(body, val_operand)
+                if val_tid == 0 or self.is_void_tid(val_tid) != 0:
+                    val_tid = self.sema.ty_i64 as i32
             let key_ty = self.c_type(key_tid, 0)
             let val_ty = self.c_type(val_tid, 0)
             let is_str_key = if self.sema.get_type_kind(self.sema.resolve_alias(key_tid as TypeId)) == TypeKind.TY_STR: "1" else: "0"
@@ -5937,9 +6001,7 @@ impl CCodegen:
             let recv = self.map_recv_text(body, args_id)
             let key_operand = self.call_arg_operand(body, args_id, 1)
             let key_text = self.operand_text(body, key_operand)
-            var key_tid = self.operand_tid(body, key_operand)
-            if key_tid == 0 or self.is_void_tid(key_tid) != 0:
-                key_tid = self.sema.ty_i64 as i32
+            let key_tid = self.map_call_key_tid(body, args_id, key_operand)
             let key_ty = self.c_type(key_tid, 0)
             let is_str_key = if self.sema.get_type_kind(self.sema.resolve_alias(key_tid as TypeId)) == TypeKind.TY_STR: "1" else: "0"
             var out = "    " ++ cc_lbrace() ++ " " ++ key_ty ++ " __with_k = " ++ key_text ++ "; "
@@ -5968,9 +6030,7 @@ impl CCodegen:
             let recv_is_hashmap = if cc_str_contains(owner, "HashMap") != 0: 1 else: 0
             let key_operand = self.call_arg_operand(body, args_id, 1)
             let key_text = self.operand_text(body, key_operand)
-            var key_tid = self.operand_tid(body, key_operand)
-            if key_tid == 0 or self.is_void_tid(key_tid) != 0:
-                key_tid = self.sema.ty_i64 as i32
+            let key_tid = self.map_call_key_tid(body, args_id, key_operand)
             let key_ty = self.c_type(key_tid, 0)
             let is_str_key = if self.sema.get_type_kind(self.sema.resolve_alias(key_tid as TypeId)) == TypeKind.TY_STR: "1" else: "0"
             var out = f"    {cc_lbrace()} {key_ty} __with_k = {key_text}; "
@@ -5995,9 +6055,7 @@ impl CCodegen:
             let recv = self.map_recv_text(body, args_id)
             let key_operand = self.call_arg_operand(body, args_id, 1)
             let key_text = self.operand_text(body, key_operand)
-            var key_tid = self.operand_tid(body, key_operand)
-            if key_tid == 0 or self.is_void_tid(key_tid) != 0:
-                key_tid = self.sema.ty_i64 as i32
+            let key_tid = self.map_call_key_tid(body, args_id, key_operand)
             let key_ty = self.c_type(key_tid, 0)
             let is_str_key = if self.sema.get_type_kind(self.sema.resolve_alias(key_tid as TypeId)) == TypeKind.TY_STR: "1" else: "0"
             let dst = self.place_text(body, dest_place)
@@ -6473,9 +6531,7 @@ impl CCodegen:
             let recv = self.map_recv_text(body, args_id)
             let key_operand = self.call_arg_operand(body, args_id, 1)
             let key_text = self.operand_text(body, key_operand)
-            var key_tid = self.operand_tid(body, key_operand)
-            if key_tid == 0 or self.is_void_tid(key_tid) != 0:
-                key_tid = self.sema.ty_i64 as i32
+            let key_tid = self.map_call_key_tid(body, args_id, key_operand)
             let key_ty = self.c_type(key_tid, 0)
             let is_str_key = if self.sema.get_type_kind(self.sema.resolve_alias(key_tid as TypeId)) == TypeKind.TY_STR: "1" else: "0"
             let fn_name = if kind == CcBuiltin.MAP_INCREMENT: "with_hashmap_increment" else: "with_hashmap_decrement"

@@ -2941,6 +2941,46 @@ fn bs_check_emit_c_receiver_abi(ctx: &ActionCtx, compiler_path: str, case_dir: s
     if run_result.rc != 0: return run_result.rc
     bs_edge_assert_exact(ctx, run_result.stdout, "ok", "emit_c_receiver_abi", "stdout")
 
+fn bs_check_emit_c_collections(ctx: &ActionCtx, compiler_path: str, case_dir: str) -> i32:
+    // #668: HashSet one-arg insert, receiver-canonical key sizes, and
+    // tuple index/destructure projections through emit -> cc -> run.
+    let root = ctx.project_info().project_root()
+    let src = bs_join(case_dir, "collections.w")
+    let c_path = bs_join(case_dir, "collections.c")
+    let bin = bs_join(case_dir, "collections")
+    let source = "fn pair() -> (i32, str): (42, \"x\")\n\n" ++
+        "fn main:\n" ++
+        "    var s: HashSet[i32] = HashSet.new()\n" ++
+        "    s.insert(7)\n" ++
+        "    s.insert(9)\n" ++
+        "    s.remove(9)\n" ++
+        "    var names: HashSet[str] = HashSet.new()\n" ++
+        "    names.insert(\"alpha\")\n" ++
+        "    var m: HashMap[i32, str] = HashMap.new()\n" ++
+        "    m.insert(5, \"five\")\n" ++
+        "    let t = pair()\n" ++
+        "    let (a, b) = t\n" ++
+        "    var good = s.contains(7) and not s.contains(9)\n" ++
+        "    good = good and names.contains(\"alpha\") and not names.contains(\"beta\")\n" ++
+        "    good = good and m.get(5).unwrap() == \"five\"\n" ++
+        "    good = good and t.0 == 42 and t.1 == \"x\" and a == 42 and b == \"x\"\n" ++
+        "    print(if good: \"ok\" else: \"bad\")\n"
+    var rc = bs_write_fixture(ctx, src, source, "emit-c collections source")
+    if rc != 0: return rc
+    var emit_args: Vec[str] = Vec.new()
+    emit_args |> push("build")
+    emit_args |> push(bs_abs(root, src))
+    emit_args |> push("--emit-c")
+    emit_args |> push("-o")
+    emit_args |> push(bs_abs(root, c_path))
+    let emit_result = bs_edge_expect_success(ctx, compiler_path, case_dir, "emit-c-collections", emit_args)
+    if emit_result.rc != 0: return emit_result.rc
+    rc = bs_compile_emit_c_output(ctx, root, case_dir, c_path, bin, "emit-c-collections")
+    if rc != 0: return rc
+    let run_result = bs_run_binary_capture(ctx, bin, "emit-c-collections-run", 120000)
+    if run_result.rc != 0: return run_result.rc
+    bs_edge_assert_exact(ctx, bs_trim_trailing_line_endings(run_result.stdout), "ok", "emit_c_collections", "stdout")
+
 fn bs_check_emit_c_hashmap_new_field(ctx: &ActionCtx, compiler_path: str, case_dir: str) -> i32:
     let root = ctx.project_info().project_root()
     let src = bs_join(case_dir, "hashmap_new_field.w")
@@ -3250,6 +3290,8 @@ pub fn run_emit_c_smoke_action(ctx: ActionCtx) -> i32:
     if rc != 0: return rc
 
     rc = bs_check_emit_c_hashmap_new_field(ctx, compiler_path, bs_join(output_dir, "emit_c_hashmap_new_field_case"))
+    if rc != 0: return rc
+    rc = bs_check_emit_c_collections(ctx, compiler_path, bs_join(output_dir, "emit_c_collections_case"))
     if rc != 0: return rc
     print("EMIT-C SMOKE OK")
     0
