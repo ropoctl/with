@@ -605,10 +605,21 @@ impl Lexer:
             // Lex string body with brace-depth tracking (same as normal strings)
             var f_brace_depth = 0
             var f_expr_in_string = false
+            var f_expr_in_raw_string = false
             var f_expr_in_char = false
             while self.pos < slen:
                 let fch = src.byte_at((self.pos) as i64)
                 if f_brace_depth > 0:
+                    if f_expr_in_raw_string:
+                        // Bare-quote nested string: verbatim bytes; \X is an
+                        // ordinary escape, a bare " closes it (#656).
+                        if fch == CharCode.Backslash and self.pos + 1 < slen:
+                            self.pos = self.pos + 2
+                            continue
+                        if fch == CharCode.Dquote:
+                            f_expr_in_raw_string = false
+                        self.pos = self.pos + 1
+                        continue
                     if f_expr_in_string:
                         if fch == CharCode.Backslash:
                             let bs_start = self.pos
@@ -644,6 +655,10 @@ impl Lexer:
                         continue
                     if fch == CharCode.Squote:
                         f_expr_in_char = true
+                        self.pos = self.pos + 1
+                        continue
+                    if fch == CharCode.Dquote:
+                        f_expr_in_raw_string = true
                         self.pos = self.pos + 1
                         continue
                 if fch == CharCode.Lbrace and f_brace_depth == 0:

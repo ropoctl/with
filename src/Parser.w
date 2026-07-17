@@ -3967,9 +3967,18 @@ impl Parser:
                 var j = expr_start_pos
                 var colon_pos = -1
                 var in_string = false
+                var in_raw_string = false
                 var in_char = false
                 while j < clen and depth > 0:
                     let jch = content.byte_at(j as i64)
+                    if in_raw_string:
+                        if jch == 92 and j + 1 < clen:
+                            j = j + 2
+                            continue
+                        if jch == 34:
+                            in_raw_string = false
+                        j = j + 1
+                        continue
                     if in_string:
                         if jch == 92:
                             let bs_start = j
@@ -4005,6 +4014,10 @@ impl Parser:
                         continue
                     if jch == 39:
                         in_char = true
+                        j = j + 1
+                        continue
+                    if jch == 34:
+                        in_raw_string = true
                         j = j + 1
                         continue
                     if jch == 123: depth = depth + 1
@@ -4080,20 +4093,92 @@ fn interp_quote_source_backslash_count(raw_backslashes: i32) -> i32:
 
 impl Parser:
     fn interp_normalize_expr_text(text: str) -> str:
-        // Re-lexed f-string hole expressions still contain the outer string's
-        // escape layer. Strip that layer so holes like {id(\"x\")} reparse as
-        // the user expression id("x"), and inner string escapes like \\ become
-        // the original source-level backslashes again.
+        // Holes carry raw source text, and two nested-string spellings
+        // coexist: a bare "..." keeps its bytes verbatim (its \t, \x41,
+        // \" are ordinary string escapes for the re-lex), while the outer
+        // escape layer \"...\" gets one layer stripped so {id(\"x\")}
+        // reparses as id("x"). Outside nested literals a backslash is
+        // consumed only as part of a quote run (that outer layer); any
+        // other backslash — a regex escape like \d — is preserved (#656).
         var out = ""
         let len = text.len() as i32
         var i = 0
+        var in_raw_string = false
+        var in_esc_string = false
+        var in_char = false
         while i < len:
-            if text.byte_at(i as i64) == 92:
-                if i + 1 < len:
-                    out = out ++ text.slice((i + 1) as i64, (i + 2) as i64)
+            let ch = text.byte_at(i as i64)
+            if in_char:
+                if ch == 92 and i + 1 < len:
+                    out = out ++ text.slice(i as i64, (i + 2) as i64)
                     i = i + 2
                     continue
-                out = out ++ interp_brace_char(92)
+                if ch == 39:
+                    in_char = false
+                out = out ++ text.slice(i as i64, (i + 1) as i64)
+                i = i + 1
+                continue
+            if in_raw_string:
+                if ch == 92 and i + 1 < len:
+                    out = out ++ text.slice(i as i64, (i + 2) as i64)
+                    i = i + 2
+                    continue
+                if ch == 34:
+                    in_raw_string = false
+                out = out ++ text.slice(i as i64, (i + 1) as i64)
+                i = i + 1
+                continue
+            if ch == 92:
+                let bs_start = i
+                while i < len and text.byte_at(i as i64) == 92:
+                    i = i + 1
+                let n = i - bs_start
+                if i < len and text.byte_at(i as i64) == 34:
+                    // Quote run: strip one escape layer, mirroring the
+                    // hole scanner's state machine (src_bs parity).
+                    let src_bs = interp_quote_source_backslash_count(n)
+                    var k = 0
+                    while k < src_bs:
+                        out = out ++ interp_brace_char(92)
+                        k = k + 1
+                    out = out ++ interp_brace_char(34)
+                    if in_esc_string:
+                        if src_bs % 2 == 0:
+                            in_esc_string = false
+                    else if src_bs == 0:
+                        in_esc_string = true
+                    i = i + 1
+                    continue
+                if in_esc_string:
+                    // Inside the escaped spelling the layer applies to
+                    // every pair: \\t is the source-level \t.
+                    var e = 0
+                    while e < n / 2:
+                        out = out ++ interp_brace_char(92)
+                        e = e + 1
+                    if n % 2 == 1 and i < len:
+                        out = out ++ text.slice(i as i64, (i + 1) as i64)
+                        i = i + 1
+                    continue
+                // Bare backslash run outside any nested literal: regex
+                // escapes and friends pass through untouched.
+                var b = 0
+                while b < n:
+                    out = out ++ interp_brace_char(92)
+                    b = b + 1
+                continue
+            if in_esc_string:
+                out = out ++ text.slice(i as i64, (i + 1) as i64)
+                i = i + 1
+                continue
+            if ch == 34:
+                in_raw_string = true
+                out = out ++ text.slice(i as i64, (i + 1) as i64)
+                i = i + 1
+                continue
+            if ch == 39:
+                in_char = true
+                out = out ++ text.slice(i as i64, (i + 1) as i64)
                 i = i + 1
                 continue
             out = out ++ text.slice(i as i64, (i + 1) as i64)
