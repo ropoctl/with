@@ -1,116 +1,197 @@
 # Handoff: current state
 
-Updated 2026-07-15. The #489 collection-await campaign this file previously
-tracked is complete: implementation, the E0921 unblock (decisions.md D9), and
-all gates are green on the commit that carries this file. There is no pending
-dirty-worktree takeover state.
+Updated 2026-07-17. HEAD = **bb31e86a** on `main`, pushed. The prior #489
+collection-await campaign is long closed. This handoff covers a session that
+drained most of the pre-v0.16.0 bug queue and, critically, **canonized two BDFL
+rulings (D11, D12) into the spec/decision-log that are NOT YET IMPLEMENTED** —
+those are the primary pending work.
 
-## What landed
+The single most important rule for the incoming agent:
 
-- §14.11.1 collection combinators in lib/std/task.w: completion-sequence
-  ordering (runtime assigns a monotone sequence at the scheduler's completion
-  linearization point, Darwin and Windows cores), fail-fast fallible
-  await_all, loser cancel/join for await_first/await_any, input-ordered
-  all-fail errors, await_settled, empty-input contracts, and lexical
-  cancellation via async fn task_cancel_point so combinator defers run on
-  parent cancellation.
-- Compiler prerequisites: postfix `?` reparenting over forward pipelines
-  (Parser.build_forward_pipeline), same-name imported generic overloads
-  (frontend tier-shadowing fix + Sema candidate registry + structural
-  selection + MIR consumption of the selected node).
-- E0921 (D9): async-fn concurrency evidence moved from declarations to
-  call/reference sites (direct, generic, method, dyn-trait, fn-value
-  coercion). An uncalled async decl — including the prelude's
-  task_cancel_point and std.time.sleep — no longer poisons a program's
-  mutable globals. Fixtures err_global_* now call their async fn.
-- Tests: spec_ss14_11_collection_await.w, expanded
-  spec_ss14_11_await_combinator_cancel_joins.w,
-  behav_await_first_empty_panics.w (exit 134 + exact stderr),
-  behav_pipeline.w postfix-? case, behav_generic_overload.w + lib.
+> **"Canonize to law" means write it to the spec + decision log + agent-guidance
+> (memory, and CLAUDE.md/AGENTS.md if warranted). It does NOT mean implement.**
+> Implementation is a separate, maintainer-greenlit cycle. Two rulings (D11,
+> D12) are canonized but unimplemented; the spec deliberately leads the
+> compiler. **Never revert the spec to match the compiler** — the compiler is
+> what changes. See `decisions.md` D11/D12 and the memory
+> `project_active_spec_ahead_deltas`.
 
-## Gate evidence (this commit)
+---
 
-build exit 0; :fixpoint FIXPOINT; analyze src/main.w audit:all
-violations=0; :test GATES EXIT 0 (866 behavior / 703 compile-error /
-210 spec / all other targets green, EMIT-C smoke ok);
-:test-green and :last-green recorded. Debug-allocator differential for the
-new combinators: no new leaks or double-frees; all reported leaks are the
-#608-pinned by-design POD-Vec backing state (see da_pod_vec.w).
+## Active work — the two canonized-but-unimplemented rulings
 
-## Open follow-ups
+### D11 — `len()` is signed `Int` (i64), never `usize`, never `Option`  →  issue #630
 
-- #669 FIXED (6518916b): storing methods now publish their stored element
-  type, so contextual enum-constructor args (slot.set(Some(x)) family) type
-  correctly; task.w workarounds removed;
-  behav_contextual_enum_storing_args.w pins the matrix.
-- #671 FIXED (4664df67): MirLower's variant lowerings no longer let an
-  ambient expected type (statement void, enclosing return type) retype a
-  constructor whose variant it does not carry;
-  behav_channel_enum_payload.w pins the statement-position cases.
-- #672 CLOSED via BDFL ruling D10 (a9cd93e9): recv() -> Option[T] — Some
-  delivers buffered messages first, None = closed AND drained (Rust
-  semantics, Swift spelling); CHAN_RECV codegen now consumes the runtime
-  status (branchless select on the tag, element written into the Option
-  payload field). `for msg in rx:` is the blessed worker loop (Receiver
-  is for-iterable; break/continue work; behav_channel_for_recv.w). All
-  recv call sites migrated; spec §14.15 updated. Residuals in D10:
-  try_recv three-state question (still unimplemented), select-arm
-  binding reconciliation when select-over-channels lands. Earlier from
-  the same investigation: 83b09fbd rejected unwrap on plain enums
-  (err_unwrap_on_plain_enum.w).
-- DEFERRED to milestone post-v0.16.0 (maintainer ruling 2026-07-16):
-  the migration campaign #675 → #673/#674/#676 (manifest-driven build
-  refactor with pcre2+zlib retrofit as its completion gate, then lexbor,
-  llhttp, and minicoro as manifest entries), plus all Windows work (#369,
-  blocked on #676's minicoro Windows backend, and the fiber-core host
-  run). None of these start before v0.16.0 ships.
-- #637 FIXED (1056ff50): is_done() on a reaped (post-await) task handle
-  reports done — stale generational handles name terminal fibers by
-  construction. Residual noted on the issue: was_cancelled() post-reap.
-- #650 (high-priority) MEASURED and PLANNED: WITH_PROFILE=1 already
-  instruments every phase. Whole-compiler compile = 280s: llvm.emit_object
-  156s (56%, single-threaded SelectionDAG — TM already at CodeGenLevelLess),
-  llvm.optimize 34s (InstCombine on insert/extractvalue aggregate traffic),
-  sema checked TWICE (frontend 23s + fresh Sema in run_mir_lower 35s),
-  frontend+link negligible. Reference-compiler survey (Go/Rust/Swift/Zig,
-  .reference/) posted on the issue — all four parallelize the backend.
-  Execution order on the issue: (1) codegen-units (deterministic MIR-body
-  partition, K threads/objects — attacks ~204s), (2) per-unit object cache
-  (content-hash × compiler-fingerprint), (3) single-sema + hot-accessor
-  inlining. 913cb914 landed the find_trait_decl_node cache (hygiene;
-  measured noise-level — sema's cost is diffuse runtime-call overhead).
-  2f706c21 landed codegen-units MILESTONE 1: deterministic serial split
-  (src/compiler/CodegenUnits.w; WITH_CODEGEN_UNITS env, default 1/off;
-  bitcode round-trip, safe deleteBody, __wcu$ externalization, unit-0
-  global ownership, multi-object link with undef-probe union, cleanup).
-  Verified: K=8 compiler self-build works; unit objects byte-identical
-  across rebuilds; serial unit max 50s = projected parallel LLVM wall.
-  5cfc1377 landed MILESTONE 2 (threaded units): whole-compiler K=8 build
-  measured 280s -> 148.5s wall; peak RSS 22.7GB; object-level determinism
-  proven under threading (binary double-build diffs are PRE-EXISTING link
-  nondeterminism — debug-map mtimes/UUID — present at K=1; fixpoint
-  compares objects). 9879ac66 FLIPPED THE DEFAULT ON: env is explicit
-  override; unset = host-aware K (<2000 MIR bodies stays single-unit;
-  else cores cap 8 with a ~3GB/unit memory guard). --emit-obj and
-  module-object builds stay single-object by contract, so fixpoint
-  objects are whole files while the stage2/3 compilers are BUILT through
-  units — the existing :fixpoint gate is a transitive unit-determinism
-  proof, and it held with the default live (full battery green).
-  Compiler self-build: 280s -> ~150s by default. Remaining on #650 in
-  value order: unit balancing (21-63s spread on the auto run),
-  single-sema (-23s), per-unit object cache (edit-loop win), lazy
-  bitcode materialization (25GB peak RSS).
-- #670 FIXED (da76b939): cross-file labels render against their own file
-  and print the path (`= label <path>@L:C ...`); same-file label format
-  unchanged; err_global_race_crossfile_label.w pins it.
-- Windows fiber core: structurally in parity and target-validated
-  (--target x86_64-pc-windows-msvc --no-prelude --validate-all), but not yet
-  built or executed on a Windows host.
-- Reseed + install re-run 2026-07-16 (maintainer-approved): src/main and
-  ~/.local/bin/with are v0.15.1-g9eddd2c32 — the seed now carries codegen
-  units, so every seed-driven stage build is parallel. The install
-  initially produced a SIGKILL-on-exec binary (in-place overwrite left
-  arm64's per-vnode signature cache stale; bytes were identical to the
-  verified release; recovered via fresh-inode copy of those same bytes).
-  Root-fixed in 7ba518e2: install writes a temp sibling then renames.
-  Verify every future reseed with `~/.local/bin/with --version; echo $?`.
+**Ruling (decisions.md D11, canonized in ad6912c3):** `.len()` on every
+collection returns `Int` (i64). Never wrapped in `Option` (a held container
+always has a length; ownership + init rules make null/uninitialized containers
+unrepresentable in safe code, so an Option wrapper would force `.unwrap()` for a
+case the compiler already proved impossible). C's `-1`/`size_t` conventions are
+translated at the modeled-C binding layer (the `with_net` `-errno` precedent),
+never inherited by core types.
+
+**Spec:** §18.6 (`docs/with-specification.md`, ~line 10355) already amended to
+`Int`, with an inline "do not revert to usize" note; the SlotMap method-table
+`len` row (~line 2633) and the escape-example comment (~line 3121) updated.
+
+**Implementation (NOT done — this is the work):**
+- `src/SemaCheck.w`: `collection_len_method_return_type` (~line 16649) returns
+  `self.ty_usize` for `len` → change to `ty_i64`. Grep `ty_usize` in
+  `src/SemaCheck.w`/`src/Sema.w` for the full site list. Same-class sites to
+  flip for a consistent surface: iterator `count` (~16875, ~18794) → i64;
+  `position` (~16869, ~18788) → `Option[i64]`; StringBuilder `capacity`
+  (~16918, ~18577) → i64.
+- **`size`/`align` type-layout methods STAY `usize`** (SemaCheck ~19347) —
+  memory-layout constants for FFI, a deliberately-excluded different category.
+- Field paths (`s.len` on str/slice/array, SemaCheck 9587/9607/9921) **already
+  return `ty_i64`** — the surface was half-signed already; the ruling unifies it.
+- `lib/std/collections.w`: BTreeMap/BTreeSet already declare `len() -> i64`
+  (was a §18.6 violation, now conformant — leave as-is).
+- The runtime already stores lengths as i64 (`with_vec.len`, `with_hashmap_len`).
+- **Self-host flip sweep (#629 protocol):** length typing threads through the
+  compiler's own sources. After the sema flip, instrument both decisions, diff
+  the tree, and **reseed** — the pre-fix seed miscompiles the fixed shape
+  (symptom: release works, stage1 breaks) until `with build :update-seed`. See
+  memory `project_629_selfhost_flips`.
+- **Fixtures:** new `behav_len_signed.w` pinning `v.len() - 1 == -1` on empty,
+  the countdown idiom, BTree/builtin agreement. Rework
+  `test/behavior/behav_unsigned_underflow_panic_message.w` — it currently pins
+  the overflow panic *via* `v.len() - 1`, which STOPS trapping once len is
+  signed; re-express it as a pure-`u64` underflow so the message stays pinned.
+  Update `test/spec/spec_ss18_6_collection_length_methods.w`.
+
+The panic-message fix (f0c627ca) already landed on #630 and named the trap
+(`integer overflow: u64 subtraction wrapped below zero`); D11 removes the trap
+itself.
+
+### D12 — `mut fn` mutates in place on EVERY owner type  →  umbrella #644, impl #677 (scalar) + #678 (str)
+
+**Ruling (decisions.md D12, canonized in 1a016f6a):** a `mut fn` receiver
+borrows and mutates the caller's place for every owner type — scalar primitives,
+`str`, distinct/newtypes over them, and aggregates alike.
+`extend i32: mut fn bump(): self += 1` must make `x.bump()` mutate `x`.
+
+**Governing principle:** the receiver **MODE** decides share-place, the owner's
+type does not. `i32` is `Copy`, but `mut fn` still borrows in place (mode wins
+over Copy-ness, exactly as for Copy structs). `f(x)` copies; `x.bump()` borrows.
+`move self` stays consuming/owned. No new mechanism — this is D5 share-place /
+`PassMode::IndirectPlace`, the same ABI aggregates use.
+
+**Idiom (what the spec examples teach):** domain verbs on distinct/newtypes —
+`distinct type Health = i32; extend Health: mut fn damage(n)` → `hp.damage(30)`.
+Bare `i32.bump()` is legal but prefer the operator when there's no domain
+meaning.
+
+**Spec:** §9.5 (`docs/with-specification.md`, ~line 3662, after the receiver-mode
+table) has the explicit primitive/str clause, the mode-over-type principle, and
+the Health example.
+
+**Implementation (NOT done — the single root-cause gate):**
+`src/SemaDecl.w:1086 fn_param_uses_value_ref_abi` — line ~1089 excludes `str`
+owners; line ~1093 restricts IndirectPlace to `TY_STRUCT`/`TY_GENERIC_INST`/
+`TY_ENUM`. Primitives and str fall through to by-value, so `self += 1` mutates a
+callee copy; after D7 enforcement this surfaces as the misleading
+`cannot assign to immutable variable`.
+- **#677 (scalar primitives, land first):** a non-`move` `self` on a scalar
+  primitive (or distinct-over-scalar) owner returns share-place. Extend via
+  `compute_fn_abi`/`PassMode` (D6) — ONE classifier read by both
+  `declare_function` prologue and `push_call_arg`; never a per-path decision.
+  Verify with `--dump-abi` (shows `SHARE-PLACE | OWNED | COPY` per param).
+- **#678 (str/fat-pointer, delicate follow-on):** `str` is `{ptr,len}`
+  (PassMode::Fat); IndirectPlace = `str*`, callee writes both fields. Distinct
+  ABI shape + its own ephemeral/view-origin cell (§22): a `mut fn` reassigning
+  `self` to a sub-slice must not outlive the source.
+- **Both gated on `/drop-audit`** (`.claude/skills/drop-audit/`) — value shape ×
+  control flow × ownership op × receiver mode. Run before AND after; one bad
+  cell means the region is untested. This is the most delicate subsystem.
+
+Both D11 and D12 were ruled **in scope for v0.16.0** ("do it right, now"),
+not deferred.
+
+---
+
+## #665 — comptime HashMap Option convergence (LANDED bb31e86a, battery finishing)
+
+Committed at maintainer instruction while the confirming full battery was still
+running (it had passed build + FIXPOINT; the new agent should confirm
+`GATES EXIT: 0` in `scratchpad/gates_665b.log` or re-run — if any target failed,
+fix-forward). The fix: comptime `HashMap.get`/`remove` now return `Option[V]`
+(was naked value — a per-phase type divergence); added `eval_option_method_call`
+in `src/ComptimeEval.w` for comptime Option receivers (unwrap/expect/is_some/
+is_none/unwrap_or). Closure-taking Option combinators (map/and_then/filter) and
+#665 items 2 (comptime annotated-let generic inference) & 3 (user impl-methods
+as comptime fns) remain — keep #665 open for those.
+
+---
+
+## This session's landed & closed work (context)
+
+- **#549** (a3ae4f62) — value-position `if` branches that don't unify now
+  diagnose; distinct-base unwrap keeps BlockId-vs-i32 joins accepted.
+- **#630 message** (f0c627ca) — overflow panics name type/operation/wrap
+  direction. (Issue stays open as the D11 impl vehicle.)
+- **#656** (6f123492) — f-string holes preserve source-level backslashes
+  (normalizer + lexer + hole-scanner all track nested-string context).
+- **#657** (67587e78) — `std.time.now()` returns Unix-epoch seconds
+  (`rt_wall_clock_sec` per platform); `now_ns()` stays monotonic.
+- **#658** (49453206) — `std.net` TCP listen/accept + UDP bind implemented on
+  Darwin/Linux (`-errno` surface, new `sock_port`/`udp_connect`). Windows has no
+  net backend (deferred).
+- **#668** (a7efb23a) + **#619** (33b064ea) — **emit-C cross-compilation loop
+  CLOSED**: `with build src/main.w --emit-c` emits the full compiler (1.84M
+  lines), a stock host `cc` builds it, and `with-from-c` re-emits itself
+  byte-identically (`:emit-c-fixpoint`). #619's OOM no longer reproduces.
+- **#638** (85870d3c) — `with fmt` inline `--prefer-brace`/`--prefer-colon`
+  conversions; new `cli-selfhost-fmt-tests` target.
+- Earlier: **#669/#670/#671/#637/#672** and **D10** (channel `recv()->Option`)
+  all landed pre-this-file.
+
+---
+
+## Gate battery (run before EVERY commit; confirm `GATES EXIT: 0` as its own step)
+
+```sh
+(with build && with build :fixpoint && \
+ ./out/stage/bin/with-stage2 analyze src/main.w audit:all && \
+ WITH_MEMORY_LIMIT_BYTES=0 with build :test && \
+ WITH_MEMORY_LIMIT_BYTES=0 with build :test-green && \
+ WITH_MEMORY_LIMIT_BYTES=0 with build :last-green; echo "GATES EXIT: $?")
+```
+
+- ~40 min wall. Run in background; do NOT tail-truncate — grep the harness's own
+  `ok:`/`error:` verdict lines and the final `GATES EXIT`.
+- `WITH_MEMORY_LIMIT_BYTES=0` is required for `:test`/`:test-green`/`:last-green`
+  on this high-RAM host (else `:last-green` alone can SIGKILL/125 at the memory
+  cap even when tests pass).
+- Never chain a commit/issue-close onto the tail of gate output — confirm the
+  exit as a separate step first (memory `feedback_gate_check_before_commit`).
+- Doc-only commits (spec/decisions/handoff) don't need the battery.
+- Commit with explicit paths to keep unrelated in-flight changes out.
+
+## Reseed (PENDING maintainer approval)
+
+Installed seed `~/.local/bin/with` = **v0.15.1-g9eddd2c32**; HEAD is bb31e86a,
+so the seed is ~10 commits behind (missing everything this session). D11's
+implementation will REQUIRE a reseed (self-host flip). One chain, no commits
+between: `:test → :test-green → :last-green → :update-seed → :install-user`.
+**Verify every reseed with `~/.local/bin/with --version; echo $?`** — an
+in-place overwrite of the running signed binary can leave a stale arm64 vnode
+signature cache → SIGKILL rc=137 (root-fixed in the installer 7ba518e2:
+temp-sibling + rename; but verify).
+
+## Release posture (v0.16.0)
+
+Queue-driven, not time-driven (maintainer: the queue IS the contract). Deferred
+to milestone **post-v0.16.0**: the migration campaign #675→#673/#674/#676, all
+Windows work (#369), and #650's remainder. In v0.16.0 scope: D11 (#630), D12
+(#677/#678), and the remaining pre-release bug/coverage queue. Two rulings await
+the maintainer's explicit go before implementation.
+
+## Authorship / discipline
+
+Eric Hartford is sole commit author — NEVER add AI co-author/trailer. Never
+`git stash`. One logical change per commit. `-O1` always, never `-O0`.
+Share-place (D5) / single-FnAbi (D6) / receiver-mode-keywords (D7) are load-
+bearing — re-read `docs/completed/mutability.md` before touching parameter
+passing. Vale (`.reference/Vale`) is the ownership reference; "safe as Rust" is
+a bar, not a compass. All tooling in With (no sed/awk/python) — `with -e/-n/-p`.
