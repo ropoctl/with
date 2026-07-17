@@ -1005,15 +1005,33 @@ pub fn build(ctx: BuildCtx) -> Build:
     let host_runtime = host_runtime_spec()
     let release_version = build_project_trim_line(ctx.fs().read_text("src/version"))
 
-    var compiler_sources = target_new(.Action, "compiler-sources", "").output("out/gen/.generated-stamp")
-    compiler_sources.action = run_generate_compiler_entrypoints_action
-    compiler_sources = compiler_sources.input("src/main.w")
-    compiler_sources = compiler_sources.input("src/bootstrap_main.w")
-    compiler_sources = compiler_sources.input("src/version")
-    compiler_sources = compiler_sources.extra_output("out/gen/main.w")
-    compiler_sources = compiler_sources.extra_output("out/gen/bootstrap_main.w")
-    compiler_sources = compiler_sources.extra_output("out/gen/version.txt")
-    compiler_sources = target_with_version_inputs(move compiler_sources, ctx)
+    // Keep the stage chain's generated main source independent of commit
+    // identity. If a HEAD-sensitive generator were its dependency, the cache's
+    // `dependency rebuilt` rule would force stage1 after every commit even when
+    // out/gen/main.w stayed byte-identical (#650).
+    var compiler_main_source = target_new(.Action, "compiler-main-source", "").output("out/gen/.main-generated-stamp")
+    compiler_main_source.action = run_generate_compiler_main_source_action
+    compiler_main_source = compiler_main_source.input("src/main.w")
+    compiler_main_source = compiler_main_source.extra_output("out/gen/main.w")
+    out = out.add_target(compiler_main_source)
+
+    // Emit-C/bootstrap/version artifacts retain their exact version
+    // substitution, but live behind a separate target so their HEAD dependency
+    // cannot invalidate the native compiler stage chain.
+    var compiler_version_sources = target_new(.Action, "compiler-version-sources", "").output("out/gen/.generated-stamp")
+    compiler_version_sources.action = run_generate_compiler_version_sources_action
+    compiler_version_sources = compiler_version_sources.input("src/main.w")
+    compiler_version_sources = compiler_version_sources.input("src/bootstrap_main.w")
+    compiler_version_sources = compiler_version_sources.input("src/version")
+    compiler_version_sources = compiler_version_sources.extra_output("out/gen/versioned_main.w")
+    compiler_version_sources = compiler_version_sources.extra_output("out/gen/bootstrap_main.w")
+    compiler_version_sources = compiler_version_sources.extra_output("out/gen/version.txt")
+    compiler_version_sources = target_with_version_inputs(move compiler_version_sources, ctx)
+    out = out.add_target(compiler_version_sources)
+
+    var compiler_sources = target_new(.Group, "compiler-sources", "")
+    compiler_sources = compiler_sources.dep("compiler-main-source")
+    compiler_sources = compiler_sources.dep("compiler-version-sources")
     out = out.add_target(compiler_sources)
 
     var print_version = target_new(.Action, "print-version", "").output("out/.build-state/print-version.txt")
@@ -1029,7 +1047,8 @@ pub fn build(ctx: BuildCtx) -> Build:
     bootstrap_c_emit_sources = bootstrap_c_emit_sources.write_scope("out/bootstrap-c/src")
     bootstrap_c_emit_sources = bootstrap_c_emit_sources.write_scope("out/gen")
     bootstrap_c_emit_sources = bootstrap_c_emit_sources.write_scope("out/command/bootstrap-c-emit-sources")
-    bootstrap_c_emit_sources = bootstrap_c_emit_sources.dep("compiler-sources")
+    bootstrap_c_emit_sources = bootstrap_c_emit_sources.input("out/gen/versioned_main.w")
+    bootstrap_c_emit_sources = bootstrap_c_emit_sources.dep("compiler-version-sources")
     out = out.add_target(bootstrap_c_emit_sources)
 
     var package_bootstrap_c = target_new(.Action, "package-bootstrap-c", "").output("out/release/with-bootstrap-c-" ++ release_version ++ ".tar.gz")
@@ -1252,7 +1271,7 @@ pub fn build(ctx: BuildCtx) -> Build:
     stage1 = stage1.input(host_bin("out/bin/with-sha256"))
     stage1 = stage1.write_scope("out/bootstrap/bin")
     stage1 = stage1.write_scope("out/.build-state")
-    stage1 = stage1.dep("compiler-sources")
+    stage1 = stage1.dep("compiler-main-source")
     stage1 = stage1.dep("compat-runtime-source")
     stage1 = stage1.dep("embedded-clang-resource-source")
     stage1 = stage1.dep("compiler-no-c-export")
@@ -1412,17 +1431,34 @@ pub fn build(ctx: BuildCtx) -> Build:
     runtime = runtime.dep("empty-second-opposite-runtime-blob")
     out = out.add_target(runtime)
 
-    var compiler = target_new(.Action, "build", "").output(release_compiler_bin("with"))
+    // The compiler links to an UNSTAMPED intermediate whose inputs (out/gen/main.w
+    // + src) are commit-independent, so it caches across commits (#650). A cheap
+    // downstream `build` Action patches the version into the final binary. When
+    // commit identity is the only change, this expensive compile stays cached.
+    var compiler = target_new(.Action, "link-compiler", "").output(release_compiler_bin("with") ++ ".unstamped")
     compiler.action = run_with_compiler_build_action
     compiler = compiler.compiler(stage_compiler_bin("with-stage2"))
     compiler = compiler.input("out/gen/main.w")
     compiler = target_with_compiler_source_inputs(move compiler, ctx)
     compiler = compiler.arg("-O1")
-    compiler = compiler.extra_output("out/command/build")
+    compiler = compiler.extra_output("out/command/link-compiler")
     compiler = compiler.write_scope("out/release/bin")
     compiler = compiler.dep("llvm-link-metadata")
     compiler = compiler.dep("embedded-objects-object")
     out = out.add_target(compiler)
+
+    // Post-link version stamp: keeps the name `build` and the output path so every
+    // .dep("build") edge and release_compiler_bin("with") consumer is unchanged.
+    // Tracks .git/HEAD (via target_with_version_inputs) so it re-runs only when the
+    // commit changes — a millisecond patch, never a recompile.
+    var stamp = target_new(.Action, "build", "").output(release_compiler_bin("with"))
+    stamp.action = run_patch_version_action
+    stamp = stamp.input(release_compiler_bin("with") ++ ".unstamped")
+    stamp = target_with_version_inputs(move stamp, ctx)
+    stamp = stamp.extra_output("out/command/build")
+    stamp = stamp.write_scope("out/release/bin")
+    stamp = stamp.dep("link-compiler")
+    out = out.add_target(stamp)
 
     var build_handoff = target_new(.CopyFile, "update-bin", release_compiler_bin("with")).output(host_bin("out/bin/with"))
     build_handoff = build_handoff.arg("0755")
@@ -1439,30 +1475,37 @@ pub fn build(ctx: BuildCtx) -> Build:
     var emit_c_test = target_new(.Action, "emit-c-test", "").output("out/gen/.emit-c-test-stamp")
     emit_c_test.action = run_emit_c_test_action
     emit_c_test = emit_c_test.input(release_compiler_bin("with"))
+    emit_c_test = emit_c_test.input("out/gen/versioned_main.w")
     emit_c_test = emit_c_test.extra_output("out/emit-c-test")
     emit_c_test = emit_c_test.extra_output("out/gen/wl_decls.h")
     emit_c_test = emit_c_test.extra_output("out/gen/wl_stubs.c")
     emit_c_test = emit_c_test.extra_output("out/command/emit-c-test")
     emit_c_test = emit_c_test.dep("build")
+    emit_c_test = emit_c_test.dep("compiler-version-sources")
     out = out.add_target(emit_c_test)
 
     var emit_c_fixpoint = target_new(.Action, "emit-c-fixpoint", "").output("out/gen/.emit-c-fixpoint-stamp")
     emit_c_fixpoint.action = run_emit_c_fixpoint_action
     emit_c_fixpoint = emit_c_fixpoint.input("out/emit-c-test/main.c")
     emit_c_fixpoint = emit_c_fixpoint.input(host_bin("out/emit-c-test/with-from-c"))
+    emit_c_fixpoint = emit_c_fixpoint.input("out/gen/versioned_main.w")
     emit_c_fixpoint = emit_c_fixpoint.extra_output("out/emit-c-test/main2.c")
     emit_c_fixpoint = emit_c_fixpoint.extra_output("out/command/emit-c-fixpoint")
     emit_c_fixpoint = emit_c_fixpoint.dep("emit-c-test")
+    emit_c_fixpoint = emit_c_fixpoint.dep("compiler-version-sources")
     out = out.add_target(emit_c_fixpoint)
 
     var emit_c_roundtrip = target_new(.Action, "emit-c-roundtrip", "").output("out/gen/.emit-c-roundtrip-stamp")
     emit_c_roundtrip.action = run_emit_c_roundtrip_action
     emit_c_roundtrip = emit_c_roundtrip.input(release_compiler_bin("with"))
+    emit_c_roundtrip = emit_c_roundtrip.input("out/gen/versioned_main.w")
+    emit_c_roundtrip = emit_c_roundtrip.input("out/gen/version.txt")
     emit_c_roundtrip = emit_c_roundtrip.extra_output("out/emit-c-roundtrip")
     emit_c_roundtrip = emit_c_roundtrip.extra_output("out/gen/wl_decls.h")
     emit_c_roundtrip = emit_c_roundtrip.extra_output("out/gen/wl_stubs.c")
     emit_c_roundtrip = emit_c_roundtrip.extra_output("out/command/emit-c-roundtrip")
     emit_c_roundtrip = emit_c_roundtrip.dep("build")
+    emit_c_roundtrip = emit_c_roundtrip.dep("compiler-version-sources")
     out = out.add_target(emit_c_roundtrip)
 
     var behavior_tests = target_new(.Test, "behavior-tests", "test/behavior/*.w")

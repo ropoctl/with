@@ -3,6 +3,7 @@ module build.emit_c
 use std.build
 use std.process
 use std.sysinfo
+use build.compiler
 
 type EmitCParam {
     name: str,
@@ -511,6 +512,37 @@ fn emitc_run_capture(ctx: &ActionCtx, label: str, argv: Vec[str], timeout_ms: i3
         ctx.diagnostics().error(result.stderr)
     emitc_fail(ctx, "step '" ++ label ++ f"' failed with exit code {result.rc}; stdout=" ++ stdout_rel ++ " stderr=" ++ stderr_rel)
 
+fn emitc_expect_same_version(ctx: &ActionCtx, expected_compiler: str, actual_compiler: str) -> i32:
+    let root = ctx.project_info().project_root()
+    let fs = ctx.fs()
+    let capture_dir = emitc_join("out/command", ctx.target_name())
+    if fs.mkdir_all(capture_dir) != 0:
+        return emitc_fail(ctx, "could not create capture directory: " ++ capture_dir)
+    let expected_stdout = emitc_capture_rel(ctx, "native-version", "stdout")
+    let expected_stderr = emitc_capture_rel(ctx, "native-version", "stderr")
+    var expected_args: Vec[str] = Vec.new()
+    expected_args.push(emitc_abs(root, expected_compiler))
+    expected_args.push("--version")
+    let expected = ctx.process_runner().run_capture(expected_args, emitc_abs(root, expected_stdout), emitc_abs(root, expected_stderr), 120000)
+    if expected.rc != 0:
+        return emitc_fail(ctx, f"native compiler version failed with exit code {expected.rc}; stderr=" ++ expected_stderr)
+
+    let actual_stdout = emitc_capture_rel(ctx, "with-from-c-version", "stdout")
+    let actual_stderr = emitc_capture_rel(ctx, "with-from-c-version", "stderr")
+    var actual_args: Vec[str] = Vec.new()
+    actual_args.push(emitc_abs(root, actual_compiler))
+    actual_args.push("--version")
+    let actual = ctx.process_runner().run_capture(actual_args, emitc_abs(root, actual_stdout), emitc_abs(root, actual_stderr), 120000)
+    if actual.rc != 0:
+        return emitc_fail(ctx, f"emitted compiler version failed with exit code {actual.rc}; stderr=" ++ actual_stderr)
+    if actual.stdout != expected.stdout:
+        return emitc_fail(ctx, "emitted compiler version mismatch: expected '" ++ expected.stdout ++ "' got '" ++ actual.stdout ++ "'")
+    fs.remove_file(expected_stdout)
+    fs.remove_file(expected_stderr)
+    fs.remove_file(actual_stdout)
+    fs.remove_file(actual_stderr)
+    0
+
 fn emitc_compile_runtime_args(root: str, argv: Vec[str], platform_obj: str) -> Vec[str]:
     argv |> push(emitc_abs(root, "out/lib/rt_core.o"))
     argv |> push(emitc_abs(root, "out/lib/" ++ platform_obj))
@@ -526,7 +558,7 @@ fn emitc_build_compiler_c(ctx: &ActionCtx, compiler_path: str, main_c: str) -> i
     var argv: Vec[str] = Vec.new()
     argv |> push(emitc_abs(root, compiler_path))
     argv |> push("build")
-    argv |> push(emitc_abs(root, "out/gen/main.w"))
+    argv |> push(emitc_abs(root, "out/gen/versioned_main.w"))
     argv |> push("--emit-c")
     argv |> push("-o")
     argv |> push(emitc_abs(root, main_c))
@@ -552,7 +584,7 @@ pub fn run_bootstrap_c_emit_sources_action(ctx: ActionCtx) -> i32:
     let out_dir = emitc_dirname(main_c)
     if fs.mkdir_all(out_dir) != 0:
         return emitc_fail(ctx, "could not create output directory: " ++ out_dir)
-    var rc = emitc_build_compiler_c_workspace(ctx, "out/gen/main.w", main_c)
+    var rc = emitc_build_compiler_c_workspace(ctx, "out/gen/versioned_main.w", main_c)
     if rc != 0: return rc
     emitc_generate_stub_files(ctx)
 
@@ -772,10 +804,7 @@ pub fn run_emit_c_test_action(ctx: ActionCtx) -> i32:
     if rc != 0: return rc
     rc = emitc_compile_c_compiler(ctx, main_c, with_from_c)
     if rc != 0: return rc
-    var version_argv: Vec[str] = Vec.new()
-    version_argv |> push(emitc_abs(ctx.project_info().project_root(), with_from_c))
-    version_argv |> push("--version")
-    rc = emitc_run_capture(ctx, "with-from-c-version", version_argv, 120000)
+    rc = emitc_expect_same_version(ctx, compiler_path, with_from_c)
     if rc != 0: return rc
     rc = emitc_build_hello_c(ctx, with_from_c, hello_c)
     if rc != 0: return rc
@@ -834,7 +863,7 @@ pub fn run_emit_c_roundtrip_action(ctx: ActionCtx) -> i32:
     let migrated_w = emitc_join(out_dir, "main_roundtrip.w")
     let with_roundtrip = emitc_join(out_dir, emitc_exe_name("with-roundtrip"))
     let with_rebuilt_by_roundtrip = emitc_join(out_dir, emitc_exe_name("with-rebuilt-by-roundtrip"))
-    var rc = emitc_build_compiler_c_workspace(ctx, "out/gen/main.w", main_c)
+    var rc = emitc_build_compiler_c_workspace(ctx, "out/gen/versioned_main.w", main_c)
     if rc != 0: return rc
     rc = emitc_generate_stub_files(ctx)
     if rc != 0: return rc
@@ -849,6 +878,11 @@ pub fn run_emit_c_roundtrip_action(ctx: ActionCtx) -> i32:
     rc = emitc_run_compiler_test_suite(ctx, with_roundtrip, "with-roundtrip")
     if rc != 0: return rc
     rc = emitc_build_with_compiler(ctx, with_roundtrip, "out/gen/main.w", with_rebuilt_by_roundtrip, "build-compiler-with-roundtrip")
+    if rc != 0: return rc
+    let version = emitc_trim(fs.read_text("out/gen/version.txt"))
+    if version.len() == 0:
+        return emitc_fail(ctx, "missing generated compiler version")
+    rc = comp_patch_version_binary(ctx, with_rebuilt_by_roundtrip, with_rebuilt_by_roundtrip, version)
     if rc != 0: return rc
     rc = emitc_compare_files(ctx, compiler_path, with_rebuilt_by_roundtrip)
     if rc != 0:

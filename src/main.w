@@ -44,6 +44,7 @@ extern fn with_fs_is_dir(path: str) -> i32
 extern fn with_fs_chmod(path: str, mode: i32) -> i32
 extern fn with_read_bytes_stdin(count: i32) -> str
 extern fn with_str_eq(a: str, b: str) -> i32
+extern fn with_str_from_cstr(s: *const u8) -> str
 extern fn with_str_len(s: str) -> i64
 extern fn with_str_byte_at(s: str, index: i64) -> i32
 extern fn with_str_starts_with(s: str, prefix: str) -> i32
@@ -893,7 +894,17 @@ fn run_cli(argc: i32) -> i32:
     if cli_command(argc) == "bench":
         return run_bench_command(argc, opt_level, no_std, alloc_mode, runtime_available, prelude_mode, debug_info)
     if cli_command(argc) == "version" or cli_command(argc) == "--version":
-        with_write("with WITH_VERSION_PLACEHOLDER\n")
+        // The version is stamped POST-LINK, not compiled in. The sentinel
+        // c-string below is a fixed-width slot the build's patch step
+        // (build/compiler.w run_patch_version_action) locates by byte-search
+        // and overwrites with `v<base>-g<commit>` + NUL. Keeping the commit
+        // out of the compiled source is what lets the compiler build cache
+        // across commits — every commit used to change out/gen/main.w and
+        // force a full recompile (see docs/decisions.md D13).
+        // Read null-terminated so trailing slot padding never reaches stdout.
+        with_write("with ")
+        with_write(with_str_from_cstr(c"WITHVERSIONSTAMPv1XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX".ptr))
+        with_write("\n")
         return 0
     if cli_command(argc) == "help" or cli_command(argc) == "--help" or cli_command(argc) == "-h":
         return run_help_command(argc)

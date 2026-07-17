@@ -194,3 +194,92 @@ Share-place (D5) / single-FnAbi (D6) / receiver-mode-keywords (D7) are load-
 bearing — re-read `docs/completed/mutability.md` before touching parameter
 passing. Vale (`.reference/Vale`) is the ownership reference; "safe as Rust" is
 a bar, not a compass. All tooling in With (no sed/awk/python) — `with -e/-n/-p`.
+
+---
+
+# LANDED (2026-07-17): build-cache fix — post-link version stamp (#650)
+
+**Status: full battery GREEN on this exact tree (`GATES EXIT: 0` — build,
+FIXPOINT, audit violations=0, 1876 test files across 9 targets, EMIT-C smoke,
+test-green/last-green recorded); committed on top of bb31e86a.** The change
+spans `src/main.w`, `build.w`, `build/compiler.w`, `build/emit_c.w`
+(emit-c paths consume `out/gen/versioned_main.w`, verify `--version` parity,
+patch the roundtrip binary before byte-compare), `docs/decisions.md` (D13),
+and this file.
+
+## Root causes (exact)
+
+1. `comp_write_versioned_source` substituted `v<base>-g<commit>` into compiled
+   `out/gen/main.w`, so every commit changed a hashed compiler input.
+2. The first post-link implementation left the combined `compiler-sources`
+   action HEAD-sensitive. `src/main.w:1597` marks a completed dependency as
+   rebuilt and `BuildGraphCache.w:466` makes its dependent stale, so stage1
+   would still rebuild after every commit even when `out/gen/main.w` was
+   byte-identical.
+3. Patching the linked Mach-O invalidated the linker-created ad-hoc signature;
+   arm64 AMFI killed the final binary with SIGKILL 9/rc 137.
+
+## Implemented shape
+
+- `src/main.w` embeds a 48-byte sentinel c-string and reads it NUL-terminated
+  for `--version`; no commit text enters the compiled source.
+- `compiler-main-source` owns stable `out/gen/main.w` and is the only generator
+  in stage1's dependency chain. HEAD-sensitive bootstrap/version generation is
+  isolated in `compiler-version-sources`; the public `compiler-sources` group
+  still produces both sets.
+- `link-compiler` produces untouched `out/release/bin/with.unstamped`.
+  Downstream `build` tracks HEAD/`WITH_VERSION`, patches a distinct final
+  output, and fails loudly for missing/truncated/oversized slots.
+- On macOS the patch action runs `/usr/bin/codesign --sign - --force` through
+  `ProcessRunner` after write/chmod. Failure is captured and returned nonzero.
+- D13 in `docs/decisions.md` protects the architecture.
+
+Comptime actions require the evaluator-supported methods: `data.find`, `"\0"`,
+`fs.read_text`/`write_text`, and `fs.chmod`; raw runtime externs and an
+interpreted byte loop over the ~100 MB binary are not viable here.
+
+## Evidence already collected
+
+- `with check build.w`: `ok`; `git diff --check`: clean.
+- Final cold build after the target split: exit 0 in 11m33s; release link wrote
+  `with.unstamped`, patch/sign completed.
+- Version-only invalidation probe:
+  `WITH_VERSION=v0.15.1-cache-probe with build` exited 0 in 13.9s with **no**
+  stage/link markers; `link-compiler` remained `fresh`; final signature was
+  valid and `--version` printed the probe exactly.
+- Restoring the normal stamp took 13.9s, signature validation passed, and
+  `--version` printed `with v0.15.1-g7dde992ff` (HEAD). `compiler-main-source`,
+  `link-compiler`, and `build` all reported `fresh` afterward.
+
+## Remaining queue
+
+1. DONE — full battery green (`GATES EXIT: 0` confirmed as its own step).
+2. DONE — committed. Post-commit `with build` is the real HEAD-change proof and
+   must rerun only the cheap patch, not a stage/link.
+3. Reseed/install: maintainer APPROVED this session ("reseed install"). One
+   chain, no commits between: `:test → :test-green → :last-green →
+   :update-seed → :install-user`; verify installed signature/version/exit code.
+
+## Build-speed findings discovered this session (follow-up work, not yet filed)
+
+The maintainer flagged the ~40-min battery as unacceptable. Verified facts:
+
+1. **No timing instrumentation anywhere** — not one clock read in `build.w`,
+   `build/*.w`, `src/BuildGraph*.w`. Fix: executor records per-target wall
+   time, prints it on completion lines, persists a sorted per-run summary
+   (never into hashed inputs or fixpoint-compared artifacts).
+2. **Test runner width defaults to 4** on a 16-core host —
+   `build_graph_test_jobs` (`src/BuildGraphTests.w:66`, env
+   `WITH_BUILD_TEST_JOBS`, cap 32) with batch-of-4 barrier scheduling
+   (spawn 4, wait all 4; `BuildGraphTests.w:156-181`). Free ~3-4x on the
+   longest phase; the width is not part of any verdict key.
+3. **Test verdict cache fingerprints the STAMPED binary** — test targets run
+   `out/release/bin/with` (`build.w:1512`) and the key hashes its bytes
+   (`BuildGraphCache.w:370-371`). The #650 stamp rewrites those bytes every
+   commit, so every commit invalidates all ~1900 verdicts even when the
+   compiler is semantically identical — defeating #650 for the test phase.
+   Fix: fingerprint the `.unstamped` sibling when present (D13's own logic:
+   the stamp is provenance, not semantics).
+4. A multi-agent study comparing `.reference/{go,rust,swift,Vale,zig}` build
+   architecture (units/parallelism/incrementality/stage policy/memory) against
+   With's was run this session — see its report in the session record.

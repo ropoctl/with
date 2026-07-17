@@ -7,6 +7,13 @@ use std.sysinfo
 const COMPILER_LLVM_VERSION: str = "22.1.6"
 const COMPILER_FALLBACK_LLVM_PREFIX: str = "/usr/local/llvm"
 
+// Unique fixed-width slot the compiler embeds (src/main.w --version handler);
+// the post-link patch below locates it by byte-search and overwrites the
+// leading bytes with `v<base>-g<commit>` + NUL. Keep in sync with src/main.w.
+const COMPILER_VERSION_SENTINEL: str = "WITHVERSIONSTAMPv1"
+const COMPILER_VERSION_SLOT_WIDTH: i32 = 48
+const COMPILER_VERSION_SOURCE_SLOT: str = "WITHVERSIONSTAMPv1XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+
 type StackBudgetReport {
     path: str,
     format: str,
@@ -1292,28 +1299,53 @@ fn comp_find_packed_ref(fs: &ToolFs, root: str, ref_path: str) -> str:
                 return line.slice(0, 9)
     ""
 
-fn comp_write_versioned_source(ctx: &ActionCtx, source: str, output: str, version: str) -> i32:
+fn comp_write_generated_source(ctx: &ActionCtx, output: str, text: str) -> i32:
     let fs = ctx.fs()
-    let text = fs.read_text(source)
-    if text.len() == 0:
-        return comp_fail(ctx, "could not read source: " ++ source)
     let output_dir = comp_dirname(output)
     if fs.mkdir_all(output_dir) != 0:
         return comp_fail(ctx, "could not create output directory: " ++ output_dir)
-    let placeholder = "WITH_VERSION" ++ "_PLACEHOLDER"
-    let replaced = comp_normalize_line_endings(comp_replace_all(text, placeholder, version))
-    if fs.write_text(output, replaced) != 0:
+    if fs.write_text(output, comp_normalize_line_endings(text)) != 0:
         return comp_fail(ctx, "could not write: " ++ output)
     0
 
-pub fn run_generate_compiler_entrypoints_action(ctx: ActionCtx) -> i32:
+fn comp_write_normalized_source(ctx: &ActionCtx, source: str, output: str) -> i32:
+    let text = ctx.fs().read_text(source)
+    if text.len() == 0:
+        return comp_fail(ctx, "could not read source: " ++ source)
+    comp_write_generated_source(ctx, output, text)
+
+fn comp_write_replaced_source(ctx: &ActionCtx, source: str, output: str, placeholder: str, replacement: str) -> i32:
+    let text = ctx.fs().read_text(source)
+    if text.len() == 0:
+        return comp_fail(ctx, "could not read source: " ++ source)
+    if not text.contains(placeholder):
+        return comp_fail(ctx, "version placeholder not found in source: " ++ source)
+    comp_write_generated_source(ctx, output, comp_replace_all(text, placeholder, replacement))
+
+fn comp_write_versioned_source(ctx: &ActionCtx, source: str, output: str, version: str) -> i32:
+    let placeholder = "WITH_VERSION" ++ "_PLACEHOLDER"
+    comp_write_replaced_source(ctx, source, output, placeholder, version)
+
+pub fn run_generate_compiler_main_source_action(ctx: ActionCtx) -> i32:
+    let stamp_path = ctx.output()
+    if stamp_path.len() == 0:
+        return comp_fail(ctx, "requires a stamp output")
+    let rc = comp_write_normalized_source(ctx, "src/main.w", "out/gen/main.w")
+    if rc != 0: return rc
+    if ctx.fs().write_text(stamp_path, "ok\n") != 0:
+        return comp_fail(ctx, "could not write stamp: " ++ stamp_path)
+    0
+
+pub fn run_generate_compiler_version_sources_action(ctx: ActionCtx) -> i32:
     let stamp_path = ctx.output()
     if stamp_path.len() == 0:
         return comp_fail(ctx, "requires a stamp output")
     let version = comp_resolve_compiler_version(ctx)
     if version.len() == 0:
         return comp_fail(ctx, "could not resolve compiler version from src/version")
-    var rc = comp_write_versioned_source(ctx, "src/main.w", "out/gen/main.w", version)
+    if COMPILER_VERSION_SOURCE_SLOT.len() as i32 != COMPILER_VERSION_SLOT_WIDTH:
+        return comp_fail(ctx, "compiler version source slot width does not match patch slot width")
+    var rc = comp_write_replaced_source(ctx, "src/main.w", "out/gen/versioned_main.w", COMPILER_VERSION_SOURCE_SLOT, version)
     if rc != 0: return rc
     rc = comp_write_versioned_source(ctx, "src/bootstrap_main.w", "out/gen/bootstrap_main.w", version)
     if rc != 0: return rc
@@ -1339,6 +1371,97 @@ pub fn run_print_version_action(ctx: ActionCtx) -> i32:
     if fs.write_text(stamp_path, version ++ "\n") != 0:
         return comp_fail(ctx, "could not write stamp: " ++ stamp_path)
     0
+
+pub fn comp_patch_version_binary(ctx: &ActionCtx, input_path: str, output_path: str, version: str) -> i32:
+    let fs = ctx.fs()
+    if input_path.len() == 0:
+        return comp_fail(ctx, "requires an input path")
+    if output_path.len() == 0:
+        return comp_fail(ctx, "requires an output path")
+    if not fs.exists(input_path):
+        return comp_fail(ctx, "missing input: " ++ input_path)
+    if version.len() == 0:
+        return comp_fail(ctx, "requires a compiler version")
+    if version.len() as i32 + 1 > COMPILER_VERSION_SLOT_WIDTH:
+        return comp_fail(ctx, "version too long for stamp slot: " ++ version)
+    // read_text/write_text are byte-exact (read by file size, write by str
+    // length — NUL-safe), so str slicing patches the binary losslessly.
+    var data = fs.read_text(input_path)
+    if data.len() == 0:
+        return comp_fail(ctx, "empty unstamped binary: " ++ input_path)
+    let sentinel = COMPILER_VERSION_SENTINEL
+    let vslot: i64 = COMPILER_VERSION_SLOT_WIDTH as i64
+    let nul = "\0"
+    var patched = 0
+    // `.find()` is served by the comptime evaluator's native handler
+    // (comptime_str_find) — one comptime step over the whole ~100MB binary.
+    // An interpreted With search blows the step budget; a raw runtime extern
+    // is not comptime-callable. After each patch the sentinel bytes are
+    // overwritten, so the next search finds the next occurrence (normally one).
+    loop:
+        let off = data.find(sentinel) as i64
+        if off < 0:
+            break
+        if off + vslot > data.len():
+            return comp_fail(ctx, "version slot truncated at end of binary")
+        // Overwrite exactly (version.len() + 1) bytes with `version` + NUL,
+        // preserving the binary's total length (remaining slot bytes stay as
+        // filler, ignored past the NUL by the runtime's cstr read).
+        data = data.slice(0, off) ++ version ++ nul ++ data.slice(off + version.len() + 1, data.len())
+        patched = patched + 1
+    if patched == 0:
+        return comp_fail(ctx, "version stamp sentinel not found in " ++ input_path)
+    let output_dir = comp_dirname(output_path)
+    if fs.mkdir_all(output_dir) != 0:
+        return comp_fail(ctx, "could not create output directory: " ++ output_dir)
+    if fs.write_text(output_path, data) != 0:
+        return comp_fail(ctx, "could not write: " ++ output_path)
+    // fs.chmod is a ToolFs method the comptime evaluator serves natively;
+    // the raw with_fs_chmod extern is not comptime-callable.
+    if fs.chmod(output_path, 0o755) != 0:
+        return comp_fail(ctx, "could not chmod: " ++ output_path)
+    // arm64 macOS enforces the linker's ad-hoc code signature. Patching any
+    // byte invalidates it, so restore an ad-hoc signature after every stamp.
+    // Linux and Windows do not use this signing step.
+    if os() == "Macos":
+        let root = ctx.project_info().project_root()
+        let capture_dir = comp_join("out/command", ctx.target_name())
+        if fs.mkdir_all(capture_dir) != 0:
+            return comp_fail(ctx, "could not create codesign capture directory: " ++ capture_dir)
+        var codesign_args: Vec[str] = Vec.new()
+        codesign_args.push("/usr/bin/codesign")
+        codesign_args.push("--sign")
+        codesign_args.push("-")
+        codesign_args.push("--force")
+        codesign_args.push(comp_abs(root, output_path))
+        let result = ctx.process_runner().run_capture(codesign_args, comp_abs(root, comp_join(capture_dir, "codesign.stdout")), comp_abs(root, comp_join(capture_dir, "codesign.stderr")), 120000)
+        if result.rc != 0:
+            if result.stderr.len() > 0:
+                ctx.diagnostics().error(result.stderr)
+            return comp_fail(ctx, f"codesign failed with exit code {result.rc}: " ++ output_path)
+    0
+
+// Post-link version stamp (#650). The compiler is compiled with a commit-
+// INDEPENDENT source (out/gen/main.w carries only the sentinel slot), so the
+// expensive build caches across commits. This cheap action patches the real
+// `v<base>-g<commit>` into a fixed-width slot in the linked binary. A HEAD-only
+// change re-runs this action without invalidating the compiler link.
+pub fn run_patch_version_action(ctx: ActionCtx) -> i32:
+    let output_path = ctx.output()
+    if output_path.len() == 0:
+        return comp_fail(ctx, "requires an output path")
+    var unstamped = ""
+    let inputs = ctx.inputs()
+    for ii in 0..inputs.len() as i32:
+        let p = inputs.get(ii as i64)
+        if p.ends_with(".unstamped"):
+            unstamped = p
+    if unstamped.len() == 0:
+        return comp_fail(ctx, "no .unstamped binary among inputs")
+    let version = comp_resolve_compiler_version(ctx)
+    if version.len() == 0:
+        return comp_fail(ctx, "could not resolve compiler version from src/version")
+    comp_patch_version_binary(ctx, unstamped, output_path, version)
 
 pub fn run_generate_llvm_link_metadata_action(ctx: ActionCtx) -> i32:
     let fs = ctx.fs()
