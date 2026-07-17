@@ -27,7 +27,7 @@ comptime fn map_overwrite() -> i32:
     var m = HashMap[str, i32].new()
     m.insert("key", 100)
     m.insert("key", 200)
-    m.get("key")
+    m.get("key").unwrap()
 
 comptime fn map_overwrite_len() -> i64:
     var m = HashMap[str, i32].new()
@@ -39,7 +39,7 @@ comptime fn map_remove_val() -> i32:
     var m = HashMap[str, i32].new()
     m.insert("x", 10)
     m.insert("y", 20)
-    m.remove("x")
+    m.remove("x").unwrap()
 
 comptime fn map_remove_len() -> i64:
     var m = HashMap[str, i32].new()

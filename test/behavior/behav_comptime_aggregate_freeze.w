@@ -25,8 +25,8 @@ const PACKAGE: Package = comptime build_package()
 const PACKAGE_TOTAL: i64 = comptime PACKAGE.total
 const PACKAGE_FIRST: i32 = comptime PACKAGE.values.get(0)
 const PACKAGE_SECOND: i32 = comptime PACKAGE.values.get(1)
-const PACKAGE_LEFT: i32 = comptime PACKAGE.table.get("left")
-const PACKAGE_RIGHT: i32 = comptime PACKAGE.table.get("right")
+const PACKAGE_LEFT: i32 = comptime PACKAGE.table.get("left").unwrap()
+const PACKAGE_RIGHT: i32 = comptime PACKAGE.table.get("right").unwrap()
 
 fn main:
     assert(PACKAGE.total == 2)

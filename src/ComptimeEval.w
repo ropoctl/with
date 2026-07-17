@@ -2684,12 +2684,18 @@ impl ComptimeEvaluator:
             let key_signal = self.eval_expr(self.ast.get_extra(extra_start))
             if key_signal.kind != ComptimeControlKind.CTL_VALUE:
                 return key_signal
+            // #665: runtime get returns Option[V]; comptime must agree.
+            let get_opt_tid = self.map_option_result_tid(recv_value, node)
+            if get_opt_tid == 0:
+                return self.fail(node, "HashMap.get() needs a resolved Option type in comptime")
             for i in 0..recv_value.extra_count:
                 let base = recv_value.extra_start + i * 2
                 let old_key = self.extra_values.get(base as i64)
                 if comptime_values_equal(old_key, key_signal.value, self.extra_values) != 0:
-                    return comptime_control_value(self.extra_values.get((base + 1) as i64))
-            return self.fail(node, "HashMap.get() missing key in comptime")
+                    let some_start = self.extra_values.len() as i32
+                    self.extra_values.push(self.extra_values.get((base + 1) as i64))
+                    return comptime_control_value(comptime_value_enum(get_opt_tid, self.sema.syms.some, some_start, 1))
+            return comptime_control_value(comptime_value_enum(get_opt_tid, self.sema.syms.none, self.extra_values.len() as i32, 0))
 
         if method == "clear":
             if arg_count != 0:
@@ -2703,6 +2709,11 @@ impl ComptimeEvaluator:
             let key_signal = self.eval_expr(self.ast.get_extra(extra_start))
             if key_signal.kind != ComptimeControlKind.CTL_VALUE:
                 return key_signal
+            // #665: runtime remove returns Option[V] and leaves the map
+            // untouched on a miss; comptime must agree.
+            let remove_opt_tid = self.map_option_result_tid(recv_value, node)
+            if remove_opt_tid == 0:
+                return self.fail(node, "HashMap.remove() needs a resolved Option type in comptime")
             let new_start = self.extra_values.len() as i32
             var found = 0
             var removed = comptime_value_invalid()
@@ -2717,14 +2728,84 @@ impl ComptimeEvaluator:
                 self.extra_values.push(old_key)
                 self.extra_values.push(old_value)
             if found == 0:
-                return self.fail(node, "HashMap.remove() missing key in comptime")
+                return comptime_control_value(comptime_value_enum(remove_opt_tid, self.sema.syms.none, self.extra_values.len() as i32, 0))
             let updated = comptime_value_map(recv_value.type_id, new_start, recv_value.extra_count - 1)
             let rebind = self.rebind_collection_receiver(recv_node, updated, node)
             if rebind.kind != ComptimeControlKind.CTL_VALUE:
                 return rebind
-            return comptime_control_value(removed)
+            let some_start = self.extra_values.len() as i32
+            self.extra_values.push(removed)
+            return comptime_control_value(comptime_value_enum(remove_opt_tid, self.sema.syms.some, some_start, 1))
 
         self.fail(node, "HashMap method is not comptime-evaluable yet")
+
+    mut fn map_option_result_tid(recv_value: ComptimeValue, node: i32) -> i32:
+        // Comptime fn bodies are evaluated before sema types their
+        // expressions, so the call node often has no type; derive
+        // Option[V] from the receiver's value type instead.
+        let typed = self.node_type_or(node, 0)
+        if typed != 0:
+            return typed
+        let recv_resolved = self.sema.resolve_alias(recv_value.type_id)
+        if self.sema.get_type_kind(recv_resolved) != TypeKind.TY_GENERIC_INST:
+            return 0
+        if self.sema.get_generic_inst_arg_count(recv_resolved as i32) < 2:
+            return 0
+        let val_tid = self.sema.get_generic_inst_arg(recv_resolved as i32, 1)
+        let existing = self.sema.find_generic_inst(self.sema.syms.option, val_tid)
+        if existing != 0:
+            return existing
+        let args: Vec[i32] = Vec.new()
+        args.push(val_tid)
+        self.sema.ensure_generic_inst_type(self.sema.syms.option, args, 1) as i32
+
+    fn is_option_enum_value(value: ComptimeValue) -> bool:
+        let resolved = self.sema.resolve_alias(value.type_id)
+        if self.sema.get_type_kind(resolved) != TypeKind.TY_GENERIC_INST:
+            return false
+        self.sema.get_generic_inst_base(resolved as i32) == self.sema.syms.option
+
+    mut fn eval_option_method_call(recv_value: ComptimeValue, field: i32, extra_start: i32, arg_count: i32, node: i32) -> ComptimeControl:
+        // §10.5's non-closure combinators. The closure-taking ones (map,
+        // and_then, filter) wait on comptime closure evaluation (#665.3).
+        let method = self.pool.resolve(field)
+        let is_some = if recv_value.data0 as i32 == self.sema.syms.some: 1 else: 0
+
+        if method == "is_some":
+            if arg_count != 0:
+                return self.fail(node, "Option.is_some() takes no arguments")
+            return comptime_control_value(comptime_value_bool(is_some))
+        if method == "is_none":
+            if arg_count != 0:
+                return self.fail(node, "Option.is_none() takes no arguments")
+            return comptime_control_value(comptime_value_bool(1 - is_some))
+        if method == "unwrap":
+            if arg_count != 0:
+                return self.fail(node, "Option.unwrap() takes no arguments")
+            if is_some == 0:
+                return self.fail(node, "called unwrap on None in comptime")
+            return comptime_control_value(self.extra_values.get(recv_value.extra_start as i64))
+        if method == "expect":
+            if arg_count != 1:
+                return self.fail(node, "Option.expect() expects one argument")
+            let msg_signal = self.eval_expr(self.ast.get_extra(extra_start))
+            if msg_signal.kind != ComptimeControlKind.CTL_VALUE:
+                return msg_signal
+            if is_some == 0:
+                if msg_signal.value.kind == ComptimeValueKind.CV_STR:
+                    return self.fail(node, msg_signal.value.text ++ ": None")
+                return self.fail(node, "Option.expect() on None in comptime")
+            return comptime_control_value(self.extra_values.get(recv_value.extra_start as i64))
+        if method == "unwrap_or":
+            if arg_count != 1:
+                return self.fail(node, "Option.unwrap_or() expects one argument")
+            let default_signal = self.eval_expr(self.ast.get_extra(extra_start))
+            if default_signal.kind != ComptimeControlKind.CTL_VALUE:
+                return default_signal
+            if is_some == 0:
+                return comptime_control_value(default_signal.value)
+            return comptime_control_value(self.extra_values.get(recv_value.extra_start as i64))
+        self.fail(node, "Option method '" ++ method ++ "' is not comptime-evaluable yet")
 
 fn comptime_str_find(haystack: str, needle: str) -> i32:
     if needle.len() == 0:
@@ -2854,6 +2935,8 @@ impl ComptimeEvaluator:
         // same intrinsic evaluation as the direct-method form.
         if recv.kind == ComptimeValueKind.CV_INT:
             return self.eval_int_method_call(recv, self.node_type_or(lhs, recv.type_id), method, extra_start, arg_count, node)
+        if recv.kind == ComptimeValueKind.CV_ENUM and self.is_option_enum_value(recv):
+            return self.eval_option_method_call(recv, method, extra_start, arg_count, node)
         self.fail(node, "pipeline method '" ++ self.pool.resolve(method) ++ "' is not comptime-evaluable yet")
 
     mut fn eval_pipeline(node: i32) -> ComptimeControl:
@@ -6461,6 +6544,8 @@ impl ComptimeEvaluator:
                 return self.eval_map_method_call(recv_node, recv_signal.value, field, self.ast.get_data1(node), arg_count, node)
             if recv_signal.value.kind == ComptimeValueKind.CV_STR:
                 return self.eval_str_method_call(recv_signal.value, field, self.ast.get_data1(node), arg_count, node)
+            if recv_signal.value.kind == ComptimeValueKind.CV_ENUM and self.is_option_enum_value(recv_signal.value):
+                return self.eval_option_method_call(recv_signal.value, field, self.ast.get_data1(node), arg_count, node)
             return self.fail(node, "method '" ++ self.pool.resolve(field) ++ "' is not comptime-evaluable yet")
         let generic_fn_sym = self.generic_callee_symbol(callee)
         if generic_fn_sym != 0:

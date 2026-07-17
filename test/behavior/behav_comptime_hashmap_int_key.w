@@ -27,7 +27,7 @@ comptime fn int_map_remove_val() -> str:
     var m = HashMap[i32, str].new()
     m.insert(1, "first")
     m.insert(2, "second")
-    m.remove(1)
+    m.remove(1).unwrap()
 
 comptime fn int_map_remove_len() -> i64:
     var m = HashMap[i32, str].new()
