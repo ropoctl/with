@@ -260,6 +260,13 @@ pub fn rt_clock_ns() -> i64:
         return 0
     ts.tv_sec * 1000000000 + ts.tv_nsec
 
+pub fn rt_wall_clock_sec() -> i64:
+    // CLOCK_REALTIME
+    var ts = Timespec { tv_sec: 0, tv_nsec: 0 }
+    if clock_gettime(0, &raw mut ts) != 0:
+        return 0
+    ts.tv_sec
+
 pub fn rt_nanosleep(ns: i64) -> i32:
     var req = Timespec { tv_sec: ns / 1000000000, tv_nsec: ns % 1000000000 }
     var rem = Timespec { tv_sec: 0, tv_nsec: 0 }

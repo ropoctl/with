@@ -26,6 +26,7 @@ extern fn stat(path: *const u8, buf: *mut u8) -> i32
 extern fn chmod(path: *const u8, mode: i32) -> i32
 extern fn _exit(code: i32) -> Unit
 extern fn mach_absolute_time() -> u64
+extern fn time(t: *mut i64) -> i64
 extern fn __error() -> *mut i32
 extern fn arc4random_buf(buf: *mut u8, len: u64)
 extern fn sigaltstack(ss: *const u8, old_ss: *mut u8) -> i32
@@ -241,6 +242,9 @@ pub fn rt_clock_ns() -> i64:
         timebase_denom = info.denom as i64
     let ticks = mach_absolute_time() as i64
     ticks * timebase_numer / timebase_denom
+
+pub fn rt_wall_clock_sec() -> i64:
+    time(0 as *mut i64)
 
 // ── Sleep ───────────────────────────────────────────────────────
 

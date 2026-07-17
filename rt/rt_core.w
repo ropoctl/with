@@ -19,6 +19,7 @@ extern fn rt_mmap(size: u64) -> *mut u8
 extern fn rt_munmap(ptr: *mut u8, size: u64)
 extern fn rt_exit(code: i32)
 extern fn rt_clock_ns() -> i64
+extern fn rt_wall_clock_sec() -> i64
 extern fn rt_getenv(name: *const u8) -> *const u8
 extern fn rt_store_args(argc: i32, argv: *const *const u8)
 
@@ -3246,7 +3247,7 @@ pub fn with_str_split_vec(out: *mut u8, s: str, delim: str) -> Unit:
 // ── Time ───────────────────────────────────────────────────────────
 
 pub fn with_time_now() -> i64:
-    rt_clock_ns()
+    rt_wall_clock_sec()
 
 pub fn with_clock_nanos() -> i64:
     rt_clock_ns()

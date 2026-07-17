@@ -14,6 +14,7 @@ extern fn VirtualFree(addr: *mut u8, size: u64, free_type: u32) -> i32
 extern fn ExitProcess(code: i32) -> Unit
 extern fn QueryPerformanceCounter(value: *mut i64) -> i32
 extern fn QueryPerformanceFrequency(value: *mut i64) -> i32
+extern fn GetSystemTimeAsFileTime(filetime: *mut i64) -> Unit
 extern fn Sleep(ms: u32) -> Unit
 extern fn GetCurrentProcessId() -> i32
 extern fn OpenProcess(access: u32, inherit: i32, pid: i32) -> i64
@@ -311,6 +312,12 @@ pub unsafe fn rt_clock_ns() -> i64:
     let seconds = now / qpc_freq
     let remainder = now % qpc_freq
     seconds * 1000000000 + (remainder * 1000000000) / qpc_freq
+
+pub unsafe fn rt_wall_clock_sec() -> i64:
+    // FILETIME: 100ns intervals since 1601-01-01; rebase to the Unix epoch.
+    var ft: i64 = 0
+    GetSystemTimeAsFileTime(&raw mut ft)
+    (ft - 116444736000000000) / 10000000
 
 pub unsafe fn rt_nanosleep(ns: i64) -> i32:
     let ms = if ns <= 0: 0 else: ((ns + 999999) / 1000000) as u32
