@@ -72,7 +72,7 @@ fn emitc_trim(text: str) -> str:
         end = end - 1
     text.slice(start as i64, end as i64)
 
-fn emitc_c_compiler() -> str:
+fn emitc_c_compiler(ctx: &ActionCtx) -> str:
     let explicit = env("WITH_EMIT_C_CC")
     if explicit.len() > 0:
         return explicit
@@ -84,16 +84,26 @@ fn emitc_c_compiler() -> str:
         if os() == "Windows":
             return llvm_prefix ++ "/bin/clang++.exe"
         return llvm_prefix ++ "/bin/clang++"
+    // The static-LLVM SDK may not ship the clang driver (only the archives
+    // the compiler links statically). Use it when present; otherwise the
+    // host C compiler, which is what the emit-c smoke already uses.
+    let sdk_clang =
+        if os() == "Windows":
+            ".deps/llvm-22.1.6-windows-x86_64-msvc/bin/clang++.exe"
+        else if os() == "Linux":
+            ".deps/llvm-22.1.6-linux-x86_64/bin/clang++"
+        else if os() == "Macos":
+            ".deps/llvm-22.1.6-darwin-arm64/bin/clang++"
+        else:
+            ""
+    if sdk_clang.len() > 0 and ctx.fs().exists(sdk_clang):
+        return sdk_clang
     if os() == "Windows":
-        return ".deps/llvm-22.1.6-windows-x86_64-msvc/bin/clang++.exe"
-    if os() == "Linux":
-        return ".deps/llvm-22.1.6-linux-x86_64/bin/clang++"
-    if os() == "Macos":
-        return ".deps/llvm-22.1.6-darwin-arm64/bin/clang++"
-    "clang++"
+        return "clang++.exe"
+    "cc"
 
-fn emitc_push_c_compiler(argv: Vec[str]) -> Vec[str]:
-    argv.push(emitc_c_compiler())
+fn emitc_push_c_compiler(ctx: &ActionCtx, argv: Vec[str]) -> Vec[str]:
+    argv.push(emitc_c_compiler(ctx))
     argv
 
 fn emitc_push_c_source(argv: Vec[str], path: str) -> Vec[str]:
@@ -556,7 +566,7 @@ fn emitc_compile_c_compiler(ctx: &ActionCtx, main_c: str, output_path: str) -> i
     if fs.read_text(llvm_rsp).len() == 0:
         return emitc_fail(ctx, "missing LLVM link metadata: " ++ llvm_rsp)
     var argv: Vec[str] = Vec.new()
-    argv = emitc_push_c_compiler(move argv)
+    argv = emitc_push_c_compiler(ctx, move argv)
     argv |> push("-O2")
     argv = emitc_push_host_c_flags(move argv)
     argv |> push("-o")
@@ -691,7 +701,7 @@ fn emitc_compile_hello(ctx: &ActionCtx, hello_c: str, output_path: str) -> i32:
     if platform_obj.len() == 0:
         return emitc_fail(ctx, "unsupported host runtime object for emit-c hello compile: " ++ os() ++ "/" ++ arch())
     var argv: Vec[str] = Vec.new()
-    argv = emitc_push_c_compiler(move argv)
+    argv = emitc_push_c_compiler(ctx, move argv)
     argv |> push("-O2")
     argv = emitc_push_host_c_flags(move argv)
     argv |> push("-o")

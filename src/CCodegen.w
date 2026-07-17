@@ -100,6 +100,9 @@ enum CcBuiltin: i32:
     MAP_INCREMENT
     MAP_DECREMENT
     MAP_UPDATE
+    MAP_KEYS
+    MAP_VALUES
+    MAP_ITEMS
     VEC_MAP
     VEC_FILTER
     VEC_FOLD
@@ -5522,6 +5525,17 @@ impl CCodegen:
             return 1
         0
 
+    mut fn call_arg_address_text(body: &MirBody, op_id: i32, arg_text: str) -> str:
+        // A constant operand has no address; materialize it as a C99
+        // compound literal, an addressable lvalue for the call's duration
+        // (the LLVM backend's entry-alloca-and-store for the same shape).
+        if body.operand_kinds.get(op_id as i64) != OperandKind.OK_CONSTANT:
+            return "&(" ++ arg_text ++ ")"
+        var lit_tid = self.operand_tid(body, op_id)
+        if lit_tid == 0 or self.is_void_tid(lit_tid) != 0:
+            lit_tid = self.sema.ty_i64 as i32
+        "&((" ++ self.c_type(lit_tid, 0) ++ ")" ++ cc_lbrace() ++ arg_text ++ cc_rbrace() ++ ")"
+
     mut fn call_args_text(body: &MirBody, args_id: i32, callee_operand: i32) -> str:
         if args_id < 0 or args_id >= body.call_arg_starts.len() as i32:
             return ""
@@ -5548,7 +5562,7 @@ impl CCodegen:
                 if self.operand_is_pointer_value(body, op_id) != 0:
                     out = out ++ arg_text
                     continue
-                out = out ++ "&(" ++ arg_text ++ ")"
+                out = out ++ self.call_arg_address_text(body, op_id, arg_text)
                 continue
             // If the argument is a struct value but the callee expects a pointer, emit &
             if i < callee_param_count:
@@ -5577,7 +5591,7 @@ impl CCodegen:
                     let arg_resolved = arg_resolved_for_ptr
                     let arg_tk = arg_tk_for_ptr
                     if arg_tk != TypeKind.TY_PTR and arg_tk != TypeKind.TY_REF:
-                        out = out ++ "&(" ++ arg_text ++ ")"
+                        out = out ++ self.call_arg_address_text(body, op_id, arg_text)
                         continue
                 // Reverse: callee expects struct by value but arg is a pointer — dereference
                 if p_tk == TypeKind.TY_STRUCT:
@@ -5695,6 +5709,9 @@ fn cc_builtin_from_mir_intrinsic(intrinsic: MirIntrinsic) -> CcBuiltin:
     if intrinsic == MirIntrinsic.MAP_INCREMENT: return CcBuiltin.MAP_INCREMENT
     if intrinsic == MirIntrinsic.MAP_DECREMENT: return CcBuiltin.MAP_DECREMENT
     if intrinsic == MirIntrinsic.MAP_UPDATE: return CcBuiltin.MAP_UPDATE
+    if intrinsic == MirIntrinsic.MAP_KEYS: return CcBuiltin.MAP_KEYS
+    if intrinsic == MirIntrinsic.MAP_VALUES: return CcBuiltin.MAP_VALUES
+    if intrinsic == MirIntrinsic.MAP_ITEMS: return CcBuiltin.MAP_ITEMS
     if intrinsic == MirIntrinsic.VEC_MAP: return CcBuiltin.VEC_MAP
     if intrinsic == MirIntrinsic.VEC_FILTER: return CcBuiltin.VEC_FILTER
     if intrinsic == MirIntrinsic.VEC_FOLD: return CcBuiltin.VEC_FOLD
@@ -5864,7 +5881,12 @@ impl CCodegen:
             let elem_ty = self.c_type(elem_tid, 0)
             var out = "    " ++ cc_lbrace() ++ " " ++ elem_ty ++ " __with_tmp = " ++ elem_text ++ "; with_vec_push(" ++ recv_ptr ++ ", &__with_tmp); " ++ cc_rbrace() ++ "\n"
             if has_ret != 0:
-                out = out ++ "    " ++ self.place_text(body, dest_place) ++ " = *(" ++ recv_ptr ++ ");\n"
+                // Mirror the LLVM backend: materialize the receiver only into
+                // a vec-typed dest. A unit-typed join local (statement-if
+                // result) is not an assignment target for the whole vec.
+                let push_dst_tid = self.place_tid(body, dest_place)
+                if self.c_type(push_dst_tid, 0) == "with_vec":
+                    out = out ++ "    " ++ self.place_text(body, dest_place) ++ " = *(" ++ recv_ptr ++ ");\n"
             out = out ++ f"    goto bb{next_bb};"
             return out
 
@@ -5988,8 +6010,10 @@ impl CCodegen:
             let key_ty = self.c_type(key_tid, 0)
             let val_ty = self.c_type(val_tid, 0)
             let is_str_key = if self.sema.get_type_kind(self.sema.resolve_alias(key_tid as TypeId)) == TypeKind.TY_STR: "1" else: "0"
+            // No lazy creation here: like the LLVM backend, insert loads the
+            // handle MAP_NEW produced. Lazily creating wrote through const
+            // receivers and silently accepted handles LLVM would crash on.
             var out = "    " ++ cc_lbrace() ++ " " ++ key_ty ++ " __with_k = " ++ key_text ++ "; " ++ val_ty ++ " __with_v = " ++ val_text ++ ";"
-            out = out ++ " if ((" ++ recv ++ ") == 0) " ++ cc_lbrace() ++ " " ++ recv ++ " = (int64_t)(intptr_t)with_hashmap_new(sizeof(__with_k), sizeof(__with_v)); " ++ cc_rbrace()
             out = out ++ " with_hashmap_insert((void*)(intptr_t)(" ++ recv ++ "), &__with_k, &__with_v, " ++ is_str_key ++ "); " ++ cc_rbrace() ++ "\n"
             out = out ++ f"    goto bb{next_bb};"
             return out
@@ -6538,6 +6562,28 @@ impl CCodegen:
             var out = "    " ++ cc_lbrace() ++ " " ++ key_ty ++ " __with_k = " ++ key_text ++ "; " ++ fn_name ++ "((void*)(intptr_t)(" ++ recv ++ "), &__with_k, " ++ is_str_key ++ "); " ++ cc_rbrace() ++ "\n"
             out = out ++ f"    goto bb{next_bb};"
             return out
+
+        if kind == CcBuiltin.MAP_KEYS:
+            if argc < 1:
+                self.fail("map.keys expects a receiver")
+                return "    abort();"
+            let recv = self.map_recv_text(body, args_id)
+            let keys_recv_operand = self.call_arg_operand(body, args_id, 0)
+            var keys_key_tid = self.hashmap_key_tid(self.operand_tid(body, keys_recv_operand))
+            if keys_key_tid == 0 or self.is_void_tid(keys_key_tid) != 0:
+                keys_key_tid = self.sema.ty_i64 as i32
+            let keys_key_ty = self.c_type(keys_key_tid, 0)
+            var out = ""
+            if has_ret != 0:
+                out = "    with_hashmap_keys_out((void*)&(" ++ self.place_text(body, dest_place) ++ "), (void*)(intptr_t)(" ++ recv ++ "), sizeof(" ++ keys_key_ty ++ "));\n"
+            else:
+                out = "    (void)0;\n"
+            out = out ++ f"    goto bb{next_bb};"
+            return out
+
+        if kind == CcBuiltin.MAP_VALUES or kind == CcBuiltin.MAP_ITEMS:
+            self.fail("emit-c: HashMap.values()/items() lowering is not implemented; use keys() or the LLVM backend")
+            return "    abort();"
 
         if kind == CcBuiltin.MAP_UPDATE:
             self.fail("emit-c: HashMap.update requires closure lowering")

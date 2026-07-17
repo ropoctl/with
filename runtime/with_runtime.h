@@ -26,6 +26,7 @@ with_str with_str_concat_n_move_first(const with_str *parts, int64_t count);
 bool with_str_eq(with_str a, with_str b);
 int32_t with_str_cmp(with_str a, with_str b);
 with_str with_str_from_cstr(const char *s);
+with_str with_str_from_bytes(const uint8_t *s, int64_t len);
 with_str with_str_from_vec_u8(const void *bytes);
 with_str with_str_substr(with_str s, int64_t start, int64_t len);
 with_str with_str_slice(with_str s, int64_t start, int64_t end);
@@ -55,6 +56,7 @@ typedef struct {
 } with_vec;
 
 with_vec with_vec_new(int64_t elem_size);
+void with_str_split_vec(with_vec *out, with_str s, with_str delim);
 void with_vec_new_out(with_vec *out, int64_t elem_size);
 void with_vec_new_with_capacity_out(with_vec *out, int64_t elem_size, int64_t cap);
 void with_vec_push(with_vec *v, const void *elem);
@@ -119,6 +121,7 @@ int64_t with_hashmap_get(void *handle, const void *key, void *out_val, int64_t i
 int64_t with_hashmap_contains(void *handle, const void *key, int64_t is_str_key);
 int64_t with_hashmap_remove(void *handle, const void *key, void *out_val, int64_t is_str_key);
 int64_t with_hashmap_len(void *handle);
+void with_set_memory_limit_bytes(int64_t limit);
 void with_hashmap_clear(void *handle);
 void with_hashmap_keys_out(with_vec *out, void *handle, int64_t key_size);
 void with_hashmap_values_out(with_vec *out, void *handle, int64_t val_size);
@@ -194,6 +197,7 @@ void with_lines_out(with_vec *out, with_str s);
 with_str with_getenv_str(with_str name);
 int32_t with_setenv_str(with_str name, with_str value);
 int32_t with_getpid(void);
+int32_t with_sysinfo(void *out);
 int32_t with_process_alive(int32_t pid);
 void with_fill_random(uint8_t *buf, int64_t len);
 
