@@ -976,6 +976,65 @@ fn bs_one_liner_args(first: str, second: str) -> Vec[str]:
     args |> push(second)
     args
 
+fn bs_fmt_case(ctx: &ActionCtx, compiler_path: str, output_dir: str, label: str, flag: str, input: str, expected: str) -> i32:
+    let src = bs_join(output_dir, label ++ ".w")
+    var rc = bs_write_fixture(ctx, src, input, "fmt case " ++ label)
+    if rc != 0: return rc
+    var args: Vec[str] = Vec.new()
+    args |> push("fmt")
+    if flag.len() > 0:
+        args |> push(flag)
+    args |> push(bs_abs(ctx.project_info().project_root(), src))
+    bs_expect_cli_success_exact(ctx, compiler_path, label, args, expected)
+
+pub fn run_cli_selfhost_fmt_action(ctx: ActionCtx) -> i32:
+    // #638 / §29.13: block-style conversions, inline and block form, plus
+    // the guard rails (annotation colons, semicolon-split, struct literals).
+    let inputs = ctx.inputs()
+    if inputs.len() == 0:
+        return bs_fail(ctx, "missing compiler input")
+    let fs = ctx.fs()
+    let output_dir = ctx.output()
+    if output_dir.len() == 0:
+        return bs_fail(ctx, "missing output directory")
+    if fs.exists(output_dir) and fs.remove_tree(output_dir) != 0:
+        return bs_fail(ctx, "could not remove previous output directory: " ++ output_dir)
+    if fs.mkdir_all(output_dir) != 0:
+        return bs_fail(ctx, "could not create output directory: " ++ output_dir)
+    let compiler_input = inputs.get(0)
+    if not fs.exists(compiler_input):
+        return bs_fail(ctx, "missing compiler: " ++ compiler_input)
+    let compiler_path = bs_abs(ctx.project_info().project_root(), compiler_input)
+
+    var rc = bs_fmt_case(ctx, compiler_path, output_dir, "fmt-brace-inline-fn", "--prefer-brace", "fn add(a: i32, b: i32) -> i32: a + b\n", "fn add(a: i32, b: i32) -> i32 {a + b}")
+    if rc != 0: return rc
+    rc = bs_fmt_case(ctx, compiler_path, output_dir, "fmt-colon-inline-fn", "--prefer-colon", "fn add(a: i32, b: i32) -> i32 {a + b}\n", "fn add(a: i32, b: i32) -> i32: a + b")
+    if rc != 0: return rc
+    rc = bs_fmt_case(ctx, compiler_path, output_dir, "fmt-brace-nested-inline", "--prefer-brace", "fn f(): if x: y\n", "fn f() {if x {y}}")
+    if rc != 0: return rc
+    rc = bs_fmt_case(ctx, compiler_path, output_dir, "fmt-brace-else-chain", "--prefer-brace", "fn m:\n    if x: y else: z\n", "fn m {\n    if x {y} else {z}\n}")
+    if rc != 0: return rc
+    rc = bs_fmt_case(ctx, compiler_path, output_dir, "fmt-colon-else-chain", "--prefer-colon", "fn m:\n    if x {y} else {z}\n", "fn m:\n    if x: y else: z")
+    if rc != 0: return rc
+    rc = bs_fmt_case(ctx, compiler_path, output_dir, "fmt-brace-multiline-params", "--prefer-brace", "fn f(\n    a: i32,\n) -> i32: a\n", "fn f(\n    a: i32,\n) -> i32 {a}")
+    if rc != 0: return rc
+    rc = bs_fmt_case(ctx, compiler_path, output_dir, "fmt-brace-generic-bound", "--prefer-brace", "fn g[T: Ord](x: T) -> T: x\n", "fn g[T: Ord](x: T) -> T {x}")
+    if rc != 0: return rc
+    rc = bs_fmt_case(ctx, compiler_path, output_dir, "fmt-brace-trailing-comment", "--prefer-brace", "fn f(): a + b  // hi\n", "fn f() {a + b} // hi")
+    if rc != 0: return rc
+    rc = bs_fmt_case(ctx, compiler_path, output_dir, "fmt-brace-semicolon-guard", "--prefer-brace", "fn f(): a; b\n", "fn f(): a\nb")
+    if rc != 0: return rc
+    rc = bs_fmt_case(ctx, compiler_path, output_dir, "fmt-colon-empty-stays", "--prefer-colon", "fn f() { }\n", "fn f() {}")
+    if rc != 0: return rc
+    rc = bs_fmt_case(ctx, compiler_path, output_dir, "fmt-brace-struct-literal", "--prefer-brace", "fn g(): let p = Point { x: 1 }\n", "fn g() {let p = Point {x: 1}}")
+    if rc != 0: return rc
+    rc = bs_fmt_case(ctx, compiler_path, output_dir, "fmt-default-preserve", "", "fn add(a: i32) -> i32: a + 1\n", "fn add(a: i32) -> i32: a + 1")
+    if rc != 0: return rc
+    rc = bs_fmt_case(ctx, compiler_path, output_dir, "fmt-brace-idempotent", "--prefer-brace", "fn add(a: i32, b: i32) -> i32 {a + b}\n", "fn add(a: i32, b: i32) -> i32 {a + b}")
+    if rc != 0: return rc
+    print("CLI-SELFHOST-FMT OK")
+    0
+
 pub fn run_cli_selfhost_one_liner_action(ctx: ActionCtx) -> i32:
     let inputs = ctx.inputs()
     if inputs.len() == 0:

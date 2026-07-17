@@ -1548,6 +1548,12 @@ pub fn build(ctx: BuildCtx) -> Build:
     cli_selfhost_one_liner_tests = cli_selfhost_one_liner_tests.dep("build")
     out = out.add_target(cli_selfhost_one_liner_tests)
 
+    var cli_selfhost_fmt_tests = target_new(.Action, "cli-selfhost-fmt-tests", "").output("out/test-graph/cli-selfhost-fmt-tests")
+    cli_selfhost_fmt_tests.action = run_cli_selfhost_fmt_action
+    cli_selfhost_fmt_tests = cli_selfhost_fmt_tests.input(release_compiler_bin("with"))
+    cli_selfhost_fmt_tests = cli_selfhost_fmt_tests.dep("build")
+    out = out.add_target(cli_selfhost_fmt_tests)
+
     var cli_selfhost_object_symbol_tests = target_new(.Action, "cli-selfhost-object-symbol-tests", "").output("out/test-graph/cli-selfhost-object-symbol-tests")
     cli_selfhost_object_symbol_tests.action = run_cli_selfhost_object_symbol_action
     cli_selfhost_object_symbol_tests = cli_selfhost_object_symbol_tests.arg("nm")
@@ -1656,6 +1662,7 @@ pub fn build(ctx: BuildCtx) -> Build:
     tests = tests.dep("deep-debug-tool-tests")
     tests = tests.dep("cli-selfhost-smoke-tests")
     tests = tests.dep("cli-selfhost-one-liner-tests")
+    tests = tests.dep("cli-selfhost-fmt-tests")
     tests = tests.dep("cli-selfhost-object-symbol-tests")
     tests = tests.dep("cli-selfhost-build-w-tests")
     tests = tests.dep("cli-selfhost-project-tests")

@@ -101,6 +101,53 @@ fn next_is_newline_or_eof(tokens: &TokenList, pos: i32, count: i32) -> bool:
         return t == TokenKind.TK_NEWLINE or t == TokenKind.TK_SEMICOLON or t == TokenKind.TK_EOF
     true
 
+fn inline_brace_body_single_expr(tokens: &TokenList, pos: i32, count: i32) -> bool:
+    // pos is at an inline {. Convertible to `: expr` only when the matching
+    // } sits on the same line and the body is one expression (§29.13:
+    // multi-statement braced bodies keep their multi-line conversion path).
+    var depth = 1
+    var j = pos + 1
+    var seen_any = false
+    while j < count:
+        let t = tokens.get_tag(j)
+        if t == TokenKind.TK_NEWLINE or t == TokenKind.TK_EOF:
+            return false
+        if t == TokenKind.TK_L_BRACE:
+            depth = depth + 1
+        if t == TokenKind.TK_R_BRACE:
+            depth = depth - 1
+            if depth == 0:
+                return seen_any
+        if t == TokenKind.TK_SEMICOLON and depth == 1:
+            return false
+        if t != TokenKind.TK_COMMENT:
+            seen_any = true
+        j = j + 1
+    false
+
+fn inline_colon_body_convertible(tokens: &TokenList, pos: i32, count: i32) -> bool:
+    // pos is at an inline block-introducing :. Convertible to `{ expr }`
+    // only when the rest of the line is one expression — a top-level ;
+    // is the semicolon-split form, and flushing a } at the ; would strand
+    // the split statements outside the body.
+    var depth = 0
+    var j = pos + 1
+    var seen_any = false
+    while j < count:
+        let t = tokens.get_tag(j)
+        if t == TokenKind.TK_NEWLINE or t == TokenKind.TK_EOF:
+            return seen_any
+        if t == TokenKind.TK_L_BRACE:
+            depth = depth + 1
+        if t == TokenKind.TK_R_BRACE:
+            depth = depth - 1
+        if t == TokenKind.TK_SEMICOLON and depth == 0:
+            return false
+        if t != TokenKind.TK_COMMENT:
+            seen_any = true
+        j = j + 1
+    seen_any
+
 fn emit_indent(indent: i32) -> str:
     var s = ""
     for sp in 0..indent:
@@ -125,6 +172,11 @@ fn format_source_styled(source: str, style: i32) -> str:
     var suppress_stack: Vec[i32] = Vec.new()
     var brace_depth = 0
     var semi_indent = -1
+    // prefer-brace: `}`s owed on this line by inline `: expr` conversions
+    var inline_close_count = 0
+    // Paren/bracket nesting: a colon inside (…) or […] is a parameter or
+    // bound annotation, never a block introducer.
+    var group_depth = 0
 
     var i = 0
     while i < count:
@@ -137,6 +189,10 @@ fn format_source_styled(source: str, style: i32) -> str:
 
         if tag == TokenKind.TK_NEWLINE or tag == TokenKind.TK_SEMICOLON:
             if not at_line_start:
+                while inline_close_count > 0:
+                    out = out ++ "}"
+                    inline_close_count = inline_close_count - 1
+                    prev_tag = TokenKind.TK_R_BRACE
                 if tag == TokenKind.TK_SEMICOLON and semi_indent < 0:
                     semi_indent = line_indent
                 out = out ++ "\n"
@@ -148,6 +204,34 @@ fn format_source_styled(source: str, style: i32) -> str:
                     semi_indent = -1
             i = i + 1
             continue
+
+        // prefer-colon: suppress the matching mid-line } of an inline
+        // brace body this pass converted to `: expr`.
+        if style == 1 and tag == TokenKind.TK_R_BRACE and not at_line_start:
+            let inline_after = brace_depth - 1
+            if suppress_stack.len() > 0 and suppress_stack.get(suppress_stack.len() - 1) == inline_after:
+                let _ = suppress_stack.pop()
+                brace_depth = inline_after
+                i = i + 1
+                continue
+
+        // prefer-brace: an inline body's owed } closes before a same-line
+        // else, and before a trailing comment (never inside it).
+        if style == 2 and inline_close_count > 0 and not at_line_start:
+            if tag == TokenKind.TK_KW_ELSE:
+                out = out ++ "}"
+                inline_close_count = inline_close_count - 1
+                prev_tag = TokenKind.TK_R_BRACE
+            else if tag == TokenKind.TK_COMMENT and next_is_newline_or_eof(tokens, i, count):
+                while inline_close_count > 0:
+                    out = out ++ "}"
+                    inline_close_count = inline_close_count - 1
+                prev_tag = TokenKind.TK_R_BRACE
+
+        if tag == TokenKind.TK_L_PAREN or tag == TokenKind.TK_L_BRACKET:
+            group_depth = group_depth + 1
+        if (tag == TokenKind.TK_R_PAREN or tag == TokenKind.TK_R_BRACKET) and group_depth > 0:
+            group_depth = group_depth - 1
 
         if is_block_keyword(tag):
             block_kw_active = true
@@ -217,15 +301,15 @@ fn format_source_styled(source: str, style: i32) -> str:
         else:
             // Determine effective tag for spacing (colon conversion)
             var space_tag = tag
-            if style == 1 and tag == TokenKind.TK_L_BRACE and block_kw_active:
-                if next_is_newline_or_eof(tokens, i, count):
+            if style == 1 and tag == TokenKind.TK_L_BRACE and block_kw_active and group_depth == 0:
+                if next_is_newline_or_eof(tokens, i, count) or inline_brace_body_single_expr(tokens, i, count):
                     space_tag = TokenKind.TK_COLON
             let space = needs_space_before(space_tag, prev_tag)
             if space:
                 out = out ++ " "
 
         // prefer-brace: convert block-introducing : to {
-        if style == 2 and tag == TokenKind.TK_COLON and block_kw_active:
+        if style == 2 and tag == TokenKind.TK_COLON and block_kw_active and group_depth == 0:
             if next_is_newline_or_eof(tokens, i, count):
                 out = out ++ " {"
                 close_stack.push(line_indent)
@@ -233,10 +317,25 @@ fn format_source_styled(source: str, style: i32) -> str:
                 prev_tag = TokenKind.TK_L_BRACE
                 i = i + 1
                 continue
+            if inline_colon_body_convertible(tokens, i, count):
+                out = out ++ " {"
+                inline_close_count = inline_close_count + 1
+                block_kw_active = false
+                prev_tag = TokenKind.TK_L_BRACE
+                i = i + 1
+                continue
 
         // prefer-colon: convert block-introducing { to :
-        if style == 1 and tag == TokenKind.TK_L_BRACE and block_kw_active:
+        if style == 1 and tag == TokenKind.TK_L_BRACE and block_kw_active and group_depth == 0:
             if next_is_newline_or_eof(tokens, i, count):
+                out = out ++ ":"
+                suppress_stack.push(brace_depth)
+                brace_depth = brace_depth + 1
+                block_kw_active = false
+                prev_tag = TokenKind.TK_COLON
+                i = i + 1
+                continue
+            if inline_brace_body_single_expr(tokens, i, count):
                 out = out ++ ":"
                 suppress_stack.push(brace_depth)
                 brace_depth = brace_depth + 1
@@ -260,6 +359,9 @@ fn format_source_styled(source: str, style: i32) -> str:
 
     // prefer-brace: close any remaining open blocks
     if style == 2:
+        while inline_close_count > 0:
+            out = out ++ "}"
+            inline_close_count = inline_close_count - 1
         while close_stack.len() > 0:
             let top = close_stack.pop()
             out = out ++ emit_indent(top) ++ "}\n"
