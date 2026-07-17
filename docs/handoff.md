@@ -110,12 +110,11 @@ not deferred.
 
 ---
 
-## #665 — comptime HashMap Option convergence (LANDED bb31e86a, battery finishing)
+## #665 — comptime HashMap Option convergence (LANDED bb31e86a, battery GREEN)
 
-Committed at maintainer instruction while the confirming full battery was still
-running (it had passed build + FIXPOINT; the new agent should confirm
-`GATES EXIT: 0` in `scratchpad/gates_665b.log` or re-run — if any target failed,
-fix-forward). The fix: comptime `HashMap.get`/`remove` now return `Option[V]`
+Confirmed: the full battery passed on bb31e86a (`GATES EXIT: 0` — all 9 targets,
+FIXPOINT, audit violations=0, EMIT-C smoke, last-green recorded). The fix:
+comptime `HashMap.get`/`remove` now return `Option[V]`
 (was naked value — a per-phase type divergence); added `eval_option_method_call`
 in `src/ComptimeEval.w` for comptime Option receivers (unwrap/expect/is_some/
 is_none/unwrap_or). Closure-taking Option combinators (map/and_then/filter) and
