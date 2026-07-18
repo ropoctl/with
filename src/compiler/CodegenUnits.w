@@ -56,20 +56,23 @@ type CodegenUnitsSysInfo {
 extern fn with_sysinfo(out: *mut u8) -> i32
 
 // Default unit count for the build-to-binary path. Split only when the
-// module is large enough for the bitcode round-trip to pay for itself,
-// scale to cores (capped — returns diminish past the big units), and bound
-// concurrent pre-strip parses by host memory: compiler-sized modules peak
-// near ~3 GB per in-flight unit.
+// module is large enough for per-unit generation to pay for itself, and
+// scale to cores. Under per-unit generation (#681) each thread parses a
+// ~1/K-size unit bitcode, so per-unit memory is small and roughly constant
+// in total; the memory guard models ~0.75 GB per in-flight unit on top of
+// a ~4 GB frontend. Measured on a 16-core/64 GB host: 16 units 149.2 s /
+// 15.5 GB vs 8 units ~162 s / 13.2 GB (old pipeline regressed at 16:
+// 170.9 s / 30.5 GB from K full-module parses).
 pub fn codegen_units_default_count(mir_body_count: i32) -> i32:
     if mir_body_count < 2000:
         return 1
     var info = CodegenUnitsSysInfo { cpu_cores: 1, memory_total: 0, page_size: 4096 }
     let _ = with_sysinfo(&info as *mut u8)
     var k = if info.cpu_cores > 0: info.cpu_cores else: 1
-    if k > 8:
-        k = 8
+    if k > 16:
+        k = 16
     let mem_gb = if info.memory_total > 0: info.memory_total / (1024 * 1024 * 1024) else: 8
-    let mem_cap = ((mem_gb - 6) / 3) as i32
+    let mem_cap = (((mem_gb - 4) * 4) / 3) as i32
     if mem_cap < 2:
         return 1
     if k > mem_cap:
