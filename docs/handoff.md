@@ -1,10 +1,11 @@
 # Handoff: current state
 
-Updated 2026-07-17. HEAD = **bb31e86a** on `main`, pushed. The prior #489
-collection-await campaign is long closed. This handoff covers a session that
-drained most of the pre-v0.16.0 bug queue and, critically, **canonized two BDFL
-rulings (D11, D12) into the spec/decision-log that are NOT YET IMPLEMENTED** —
-those are the primary pending work.
+Updated 2026-07-18 (late). HEAD = **57970cd7** on `main` + this doc commit.
+The battery-first directive for e6c770b9 is COMPLETE — see "GATED" section
+below. The prior #489 collection-await campaign is long closed. This handoff
+covers a session that drained most of the pre-v0.16.0 bug queue and,
+critically, **canonized two BDFL rulings (D11, D12) into the spec/decision-log
+that are NOT YET IMPLEMENTED** — those are the primary pending work.
 
 The single most important rule for the incoming agent:
 
@@ -167,18 +168,27 @@ as comptime fns) remain — keep #665 open for those.
 - Doc-only commits (spec/decisions/handoff) don't need the battery.
 - Commit with explicit paths to keep unrelated in-flight changes out.
 
-## Reseed — CURRENT (2026-07-18)
+## Reseed — CURRENT (2026-07-18, second reseed of the day)
 
-Installed seed `~/.local/bin/with` AND `src/main` = **v0.15.1-g00e484351**
-(= HEAD 00e48435), both verified rc=0 with valid signatures after the
-2026-07-18 reseed. The daily driver therefore carries the full build-perf
-campaign: `[time]` instrumentation, unstamped verdict keying, core-width
-sliding-window tests, `:dev`, hardened stamp. The first `with build` after
-any reseed rebuilds the chain once (seed hash is a stage1 input — expected).
-**Verify every reseed with `~/.local/bin/with --version; echo $?`** — an
-in-place overwrite of the running signed binary can leave a stale arm64 vnode
-signature cache → SIGKILL rc=137 (root-fixed in the installer 7ba518e2:
-temp-sibling + rename; the stamp action now uses the same pattern, 0efd2552).
+Installed seed `~/.local/bin/with` AND `src/main` = **v0.15.1-g2765fd4da**
+(= HEAD 2765fd4d), both verified rc=0 with valid signatures. The seed now
+carries the FULL #681 per-unit generation pipeline (a497d145 / bc0c9832 /
+e6c770b9 16-unit default) on top of the build-perf campaign. The first
+`with build` after any reseed rebuilds the chain once (seed hash is a stage1
+input — expected). **Verify every reseed with
+`~/.local/bin/with --version; echo $?`** — an in-place overwrite of the
+running signed binary can leave a stale arm64 vnode signature cache →
+SIGKILL rc=137 (root-fixed in the installer 7ba518e2: temp-sibling + rename;
+the stamp action now uses the same pattern, 0efd2552).
+
+**Stale-machine recovery (hit live 2026-07-18):** a machine whose seed
+predates a stdlib API that build.w names (`Target.allow_parallel`,
+`write_tar_gz`) fails EVERY `with build` subcommand — including `:seed` — in
+seconds with "unknown method ... / build.w evaluation wrapper compilation
+failed". That fingerprint = stale seed, not a code bug. Recovery: gh-download
+the `with-darwin-aarch64` release asset (re-uploaded at reseeds; check asset
+`updatedAt`, not the release date), verify `--version`/ancestry, and
+temp-sibling-install to BOTH `src/main` and `~/.local/bin/with`.
 
 ## Release posture (v0.16.0)
 
@@ -266,33 +276,35 @@ interpreted byte loop over the ~100 MB binary are not viable here.
 
 The maintainer moved machines mid-campaign. What transferred and how:
 
-- **Seed:** the `with-darwin-aarch64` asset on the v0.15.1 release was
-  refreshed 2026-07-18 to the current verified seed (**ga2413f2e8**, the
-  last fully-gated compiler; 104,136,144 bytes). The previous asset was
-  from June 8 and CANNOT evaluate today's build.w (predates
-  `allow_parallel` and the D14 targets). On a fresh machine:
-  `with build :seed` fetches it; verify with `src/main --version` →
-  `with v0.15.1-ga2413f2e8`. Keep the asset current after future reseeds —
-  a stale seed asset silently strands every machine but the one that
-  reseeded locally.
+- **Seed:** the `with-darwin-aarch64` asset on the v0.15.1 release is the
+  live seed channel — refreshed at each reseed (check the asset's
+  `updatedAt`, not the release publish date). Refreshed twice on
+  2026-07-18: first for the laptop switch (last fully-gated pre-#681
+  compiler), then — after the battery below went green — to
+  **g2765fd4da**, which carries the full #681 pipeline. `with build :seed`
+  fetches it, but ONLY if the machine's current seed can still evaluate
+  build.w; a too-stale seed fails EVERY subcommand including `:seed`
+  itself (fingerprint + direct-gh-download recovery: see the Reseed
+  section above). Keep the asset current after future reseeds — a stale
+  seed asset silently strands every machine but the one that reseeded
+  locally.
 - **Not in the repo, copy manually if wanted:** the agent memory dir
   (`~/.claude/projects/-Users-eric-with/` — behavioral/feedback memories;
   project state is fully duplicated here and in docs/build_time_log.md)
   and `.deps/llvm-22.1.6-darwin-arm64` (rebuildable via
   `tools/build-static-llvm.sh`, ~hours).
 - Background batteries running on the old machine died with it; that is
-  why the FIRST ACTION below re-runs the battery.
+  why the battery had to be re-run (now DONE — next section).
 
-## FIRST ACTION NEXT SESSION (any machine)
+## GATED (2026-07-18): e6c770b9 battery green; reseed delivered
 
-HEAD e6c770b9 (pushed) landed the 16-unit default with maintainer-authorized
-UNGATED status (laptop switch mid-battery). Before ANY other work or reseed:
-run the full battery and confirm `GATES EXIT: 0`. If red, the suspect is the
-one-file formula change (src/compiler/CodegenUnits.w, e6c770b9) — probes
-measured it green (149.2s/15.5GB at 16 units) but the formal gate never
-finished. Everything through f60506f8 was fully gated. The seed predates the
-#681 pipeline — a reseed after the green battery delivers it (maintainer
-approval for that reseed: standing campaign directive).
+The battery-first directive is DONE. Full battery on 2765fd4d (= e6c770b9 +
+handoff doc): **`GATES EXIT: 0`** — build, FIXPOINT byte-identical through
+the 16-unit per-unit pipeline, audit facts=2197572 violations=0, all 9 test
+targets green (1876 files), test-green + last-green recorded. The 16-unit
+default is deterministic and formally gated; nothing through HEAD is ungated.
+The standing-approved reseed chain (`:update-seed` → `:install-user`) ran on
+that green tree and verified (see Reseed section).
 
 ## CURRENT WORK: structural campaigns, one at a time (maintainer-directed)
 
@@ -300,13 +312,13 @@ Order agreed 2026-07-18: **#681 → #682 → #683**, then the north-star
 campaign: **peak build memory UNDER 8 GB** (compiler buildable on an 8 GB
 machine, Mac/Linux/Windows).
 
-**#681 state: COMPLETE (all tiers landed and pushed).**
+**#681 state: COMPLETE (all tiers landed, pushed, and GATED).**
 - 88ade44f disposal quick tier; a497d145 MIR-via-raw-pointer (the sharing
   contract; the ~490 sites go through typed in-place-deref accessors —
   NEVER a ref-returning accessor, that shape segfaults, filed #687);
   bc0c9832 per-unit generation from MIR (serial gen, one cg alive at a
   time + parallel slim emit over ~1/K-size unit bitcodes); e6c770b9
-  16-unit default (UNGATED — see FIRST ACTION above).
+  16-unit default (GATED 2026-07-18 — see the GATED section above).
 - Measured: peak RSS 21.1 → 13.2 GB (−37%) at 8 units; 16 units 149.2 s /
   15.5 GB (old pipeline: 170.9 s / 30.5 GB). Fixpoint byte-identical;
   drop-audit 25/25; produced compiler self-checks.
