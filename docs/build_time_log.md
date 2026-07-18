@@ -1,0 +1,107 @@
+# Build-time experiment log
+
+Task: reduce build time by efficiency only — never by destroying
+functionality or test coverage. Regressions get reverted. Measurements come
+from the executor's own instrumentation (`[times]` lines /
+`out/.build-state/build-times.tsv`) unless noted. Companion docs:
+`docs/build-perf-reference-study.md` (reference-compiler evidence), campaign
+#679, decisions D13/D14.
+
+## Baseline (2026-07-17, before the campaign)
+
+- Full verification battery: ~40 min wall, >30 GB peak RSS, for EVERY change
+  including docs. No timing instrumentation existed; this number was only
+  measurable by wall-clock archaeology.
+
+## Landed experiments (2026-07-17 → 2026-07-18 session)
+
+| Change (commit) | Measured effect |
+|---|---|
+| #650 post-link version stamp (5f8ad53a) | commit-only rebuild ~12 min → 16.6 s (probe-verified) |
+| Executor timing instrumentation (c3de4c0b) | 0 direct; first measurement: stage1 175.9 + stage2 174.3 + link 173.0 = 77% of 681 s `with build` |
+| Test verdicts keyed on with.unstamped (4dcf9419) | restamp no longer invalidates 1876 verdicts (proven: 7 cached/0 ran after WITH_VERSION change); non-compiler commits: test leg → seconds |
+| Test runner cores-width + sliding window (196056ac) | test leg ~22 min (4-wide batch) → ~8 min (16-wide) |
+| `:dev` tier + D14 tiering (7d14dba4, 00e48435) | iterate loop: full battery → `with check` 92 s or seed→stage1 3 m 43 s |
+| audit:all ∥ :test in battery recipe (D14) | ~6 min audit hides inside test leg |
+| Stamp temp-sibling+rename (0efd2552) | robustness (self-overwrite crash window closed); 0 time |
+| #680 stage A: edge audit + 29 declared edges (76c6d969, 0262e1ed) | 0 direct; unblocks concurrency; audit self-reports regressions every graph load |
+| #680 stage B: allow_parallel worker pool (a2413f2e, 44ab0d26) | full chain 757.8 s → 684.2 s (~10%); object/IR tail now runs as cores/2-width waves; fixpoint stayed byte-identical |
+
+Current state: compiler-change battery ≈ 25 min (build 684 s + fixpoint 312 s
++ max(audit, test) ≈ 8 min + evidence tails). Non-compiler commit ≈ 16 s
+build + cached-verdict sweep. Iterate tier ≈ 92 s / 3.7 min.
+
+## Where the remaining time is (measured)
+
+- `with build` 684.2 s: stage1 190.5 + stage2 191.4 + link-compiler 189.1 =
+  571 s (83%) — an inherently serial self-compile chain; scheduling cannot
+  reduce it further. compiler-no-c-export 18.6 s, regex-runtime-ir 14.5 s
+  (overlapped), pooled object waves.
+- `:fixpoint` 311.9 s: two more object emits of the same source (141.8 +
+  139.2) + bless 22.9. Cost of the byte-fixpoint invariant (kept — D14).
+- `:test` ≈ 8 min at 16-wide when the compiler changed; seconds otherwise.
+
+## 2026-07-18 — Experiment: WITH_PROFILE decomposition of the 190 s stage compile
+
+Command: `WITH_PROFILE=1 with build out/gen/main.w -O1 -o <probe>` (seed
+compiler, identical to a stage1 compile). Result (wall ≈ 180 s):
+
+- Frontend, single-threaded, ~97 s: resolve 1.86 + imports 0.39 + comptime
+  3.24 + frontend.sema 30.58 + sema 43.19 (types=9526) + mir.lower 17.83
+  (bodies=6876). **Sema = 73.8 s is the largest serial block.**
+- LLVM backend ~83 s wall: gen_module 14.5 (serial) + 8 parallel units where
+  wall = slowest unit: unit2 67.8, unit0 60.0, unit1 39.1, then 16-28 s for
+  the rest. **4.2x unit imbalance; perfect balance would be ~36 s.**
+- link 0.72, dsymutil 0.24.
+
+Conclusions: (a) the cheapest lever is codegen-unit BALANCE — the packer
+bins by basic-block count, a bad proxy for -O1 cost; ~30 s recoverable per
+stage compile × 5 compiles/battery ≈ 2.5 min, zero memory cost, must stay
+deterministic (fixpoint). (b) After balance, the K=8 unit cap is worth
+revisiting — but only after #681 drops the ~3 GB/unit parse cost, else
+memory explodes. (c) Sema (73.8 s serial) is the long-term frontend target;
+parallelizing it is deep work (park until the cheap levers are spent).
+
+→ Next experiment: rebalance units on a better deterministic cost metric.
+
+## 2026-07-18 — Experiment: codegen-unit packing by instruction count (KEPT)
+
+Change: `wl_fn_instruction_count` in LlvmBridge.w (block/instr walk);
+`codegen_units_plan` bins by instruction count instead of block count
+(src/compiler/CodegenUnits.w:106). Deterministic (counts from the parsed
+module).
+
+Probe (stage1 carrying the change, profiled self-compile):
+- Unit spread BEFORE: 16.1–67.8 s (4.2x), wall = 67.8 s.
+- Unit spread AFTER: 25.0–50.3 s (2.0x), wall = 50.3 s.
+- Per-compile: ~180 s → ~161 s (~19 s). Projected ~95 s per full battery
+  (5 self-compiles). Battery-scale measurement in the gate run below.
+
+Remaining skew (unit7 50.3 vs unit3 25.0) is a few indivisible
+mega-functions dominating their bins; fixing needs more units (blocked on
+#681 memory) or function splitting (not worth it). Battery + fixpoint gate
+this before commit.
+
+## Idea queue (from .reference study; ranked by expected value)
+
+1. Decompose the 190 s stage compile with WITH_PROFILE (per-phase lines
+   exist in Compilation.w/Backend.w) — decides whether the next lever is
+   frontend (parse/sema/MIR, single-threaded) or LLVM backend. → THIS LOG,
+   next entry.
+2. #686: build.w-only edits rebuild the stage chain (action signature hashes
+   the whole build source). Fix = scope the hash to the action's comptime
+   call closure (`with analyze closure:call` can compute it). Saves ~12 min
+   per build-layer iteration.
+3. #681: codegen-unit windowing + dispose base module/MIR (memory, but the
+   ~3 GB/unit bitcode re-parse also costs time).
+4. #682: serialized prelude snapshot — O(100ms) × ~2000 child processes per
+   battery.
+5. #683: stop re-interpreting build.w per worker (~1.1 s minimum per action,
+   measured on a trivial two-action project).
+6. #680 stage C: delegate remaining in-process kinds (regex-runtime-object
+   3.7 s, bridges) through the pool (~8 s bound).
+7. #684: separate compilation with module interfaces — the only fix for the
+   571 s serial chain. Endgame.
+8. regex-runtime-ir built twice per cold chain (bootstrap+normal legs, ~14 s
+   each) — different compilers (seed vs stage2) make them legitimately
+   distinct today; unifiable only at fixpoint. Low value; revisit after 2.
