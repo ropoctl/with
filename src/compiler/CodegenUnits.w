@@ -102,8 +102,12 @@ pub fn codegen_units_plan(base_module: i64, unit_count: i32) -> CodegenUnitPlan:
                 k = k + 1
             fn_units.push(best)
             let best_idx = best as i64
+            // Cost = instruction count: -O1 pass cost tracks instructions far
+            // better than block count (a straight-line giant is one block).
+            // Measured before this change: unit spread 16.1s..67.8s (4.2x).
+            // Deterministic — counts come from the parsed module.
             with bin_loads.slot(best_idx) as mut load_slot:
-                load_slot.set(best_load + wl_fn_block_count(f) as i64 + 1)
+                load_slot.set(best_load + wl_fn_instruction_count(f) as i64 + 1)
             // Internalized functions must survive across objects: rename under
             // a reserved prefix so promotion to external cannot collide with
             // runtime-archive symbols. External functions keep their names.

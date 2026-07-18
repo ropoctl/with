@@ -947,6 +947,18 @@ pub fn wl_parse_bitcode_in_context(ctx: i64, path: str) -> i64:
 pub fn wl_fn_is_declaration(f: i64) -> i32: unsafe { LLVMIsDeclaration(f as *mut u8) }
 pub fn wl_fn_block_count(f: i64) -> i32: unsafe { LLVMCountBasicBlocks(f as *mut u8) as i32 }
 
+pub fn wl_fn_instruction_count(f: i64) -> i32:
+    var count = 0
+    unsafe:
+        var bb = LLVMGetFirstBasicBlock(f as *mut u8)
+        while bb as i64 != 0:
+            var inst = LLVMGetFirstInstruction(bb)
+            while inst as i64 != 0:
+                count = count + 1
+                inst = LLVMGetNextInstruction(inst)
+            bb = LLVMGetNextBasicBlock(bb)
+    count
+
 // Mirror Function::deleteBody(): drop every reference held by the body
 // before erasing it. Instructions may be used across blocks (SSA dominance)
 // and terminators reference successor blocks, so blocks cannot simply be
