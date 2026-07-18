@@ -298,9 +298,19 @@ build 16s + cached verdict sweep.
 - **#680** parallel build-graph executor with memory-claim admission (d8).
   **Stage A LANDED** (76c6d969 audit + 0262e1ed edges): the build closure
   audits clean — zero declaration-order-dependent edges; single-writer per
-  invocation already guaranteed by validate_outputs. Stage B (ready-queue
-  scheduler over the worker-spawn mechanism; design in the issue) is
-  unblocked and is the next campaign step.
+  invocation already guaranteed by validate_outputs.
+  **Stage B LANDED + MEASURED** (a2413f2e machinery + 44ab0d26 markers, with
+  an intermediate reseed — build.w cannot name a new stdlib API until a seed
+  embeds it): `Target.allow_parallel()` pools pure compile actions as
+  captured workers at cores/2 width (`WITH_BUILD_JOBS` override);
+  declaration order stays program order; pool drains before unmarked
+  execution. Full chain: 684.2s vs 757.8s serial (~10%); fixpoint stayed
+  byte-identical. Remaining build time is the serial stage chain itself
+  (83%) — #684's territory. Stages C (delegate in-process kinds) and D
+  (memory-claim admission) remain, each its own cycle. LANDMINE: std.build
+  Target has three full copy-literals (Target.target/optimize/output) that
+  must gain any new field, else the embedded stdlib breaks and only behavior
+  tests spawning out/stage/bin/with-stage2 catch it.
 - **#681** codegen-unit windowing + dispose base module/MIR pre-fan-out (d2)
   — the >30 GB peak; /drop-audit gate if lowering is touched.
 - **#682** serialized prelude snapshot keyed by compiler fingerprint (d6).
