@@ -80,7 +80,30 @@ Probe (stage1 carrying the change, profiled self-compile):
 Remaining skew (unit7 50.3 vs unit3 25.0) is a few indivisible
 mega-functions dominating their bins; fixing needs more units (blocked on
 #681 memory) or function splitting (not worth it). Battery + fixpoint gate
-this before commit.
+this before commit. GATED GREEN and landed (cf22186c): battery-scale
+stage2 191.4→165.8s, link-compiler 189.1→167.9s (~25s each). Fixpoint
+objects barely moved (140s — frontend-dominated, less backend to balance).
+
+## 2026-07-18 — Experiment: parallelize invariance-check variants (KEPT)
+
+Instrumentation surfaced `invariance-check` as the single longest battery
+item: 468.2s — five meaning-preserving perturbation variants, each a full
+~93s `check src/main.w`, run SERIALLY against one repo copy inside one
+action. The variants are independent by construction (each applies to a
+pristine copy), so: one target per variant (`invariance-<label>`), each
+with its own repo copy under its own output dir, marked `.allow_parallel()`;
+`invariance-check` becomes a Group over the five (graph edges unchanged).
+Coverage identical — same five variants, same check, same failure
+diagnostics (perturbed tree left per-variant for inspection).
+
+Measured: all five retire at 103.1s (fully overlapped) — 468.2s → ~103s
+wall, 4.5x, ~6 min off every compiler-change battery. Five concurrent
+whole-compiler checks fit comfortably in host memory.
+
+Side observation, logged for #686: the measurement run itself paid a
+~10-min stage-chain rebuild because editing build.w invalidates the chain
+(action signatures hash the build source). Every build-layer experiment
+pays this tax; #686 is now the highest-leverage remaining build-graph fix.
 
 ## Idea queue (from .reference study; ranked by expected value)
 
