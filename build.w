@@ -688,7 +688,39 @@ fn invariance_run_check(ctx: &ActionCtx, compiler_path: str, repo_copy: str, lab
         return invariance_fail(ctx, "variant '" ++ label ++ "' produced unexpected output; stdout=" ++ stdout_path)
     0
 
-fn invariance_check_action(ctx: ActionCtx) -> i32:
+// One variant per target so the allow_parallel pool overlaps the five
+// ~93s checks (was one serial 468s action). Coverage is identical: same
+// variants, same check, each against its own pristine repo copy.
+fn invariance_variant_action(ctx: ActionCtx) -> i32:
+    let args = ctx.args()
+    if args.len() == 0:
+        return invariance_fail(ctx, "missing variant label argument")
+    let label = args.get(0)
+    var file = ""
+    var payload = ""
+    if label == "comment-sema":
+        // Comment appended mid-merge (byte shift, no tokens).
+        file = "src/Sema.w"
+        payload = "\n// invariance probe comment\n"
+    if label == "let-sema":
+        // Fresh top-level let mid-merge (the #660 killer shape: one new
+        // interned symbol shifts every later-first-seen symbol id).
+        file = "src/Sema.w"
+        payload = "\nlet __INVARIANCE_PAD_A: i32 = 0\n"
+    if label == "two-lets-sema":
+        // Two fresh lets (larger id shift).
+        file = "src/Sema.w"
+        payload = "\nlet __INVARIANCE_PAD_B: i32 = 0\nlet __INVARIANCE_PAD_C: i32 = 0\n"
+    if label == "let-parser":
+        // Fresh let in a different merge position.
+        file = "src/Parser.w"
+        payload = "\nlet __INVARIANCE_PAD_D: i32 = 0\n"
+    if label == "let-main":
+        // Fresh let in the root module (parsed first, ids lowest).
+        file = "src/main.w"
+        payload = "\nlet __INVARIANCE_PAD_E: i32 = 0\n"
+    if file.len() == 0:
+        return invariance_fail(ctx, "unknown variant label: " ++ label)
     let inputs = ctx.inputs()
     if inputs.len() == 0:
         return invariance_fail(ctx, "missing compiler input")
@@ -720,53 +752,13 @@ fn invariance_check_action(ctx: ActionCtx) -> i32:
     if fs.write_text(build_project_join(repo_copy, "out/gen/compiler/EmbeddedClangResourceData.w"), fs.read_text("out/gen/compiler/EmbeddedClangResourceData.w")) != 0:
         return invariance_fail(ctx, "could not copy embedded clang resource data module")
 
-    // Pristine copies of the files the variants touch.
-    let sema_copy = build_project_join(repo_copy, "src/Sema.w")
-    let parser_copy = build_project_join(repo_copy, "src/Parser.w")
-    let main_copy = build_project_join(repo_copy, "src/main.w")
-    let sema_pristine = fs.read_text(sema_copy)
-    let parser_pristine = fs.read_text(parser_copy)
-    let main_pristine = fs.read_text(main_copy)
-    if sema_pristine.len() == 0 or parser_pristine.len() == 0 or main_pristine.len() == 0:
-        return invariance_fail(ctx, "could not read pristine sources from the repo copy")
-
-    // Variant 1: comment appended mid-merge (byte shift, no tokens).
-    if fs.write_text(sema_copy, sema_pristine ++ "\n// invariance probe comment\n") != 0:
-        return invariance_fail(ctx, "could not write variant comment-sema")
-    var rc = invariance_run_check(ctx, compiler_path, repo_copy, "comment-sema")
-    if rc != 0: return rc
-
-    // Variant 2: fresh top-level let mid-merge (the #660 killer shape:
-    // one new interned symbol shifts every later-first-seen symbol id).
-    if fs.write_text(sema_copy, sema_pristine ++ "\nlet __INVARIANCE_PAD_A: i32 = 0\n") != 0:
-        return invariance_fail(ctx, "could not write variant let-sema")
-    rc = invariance_run_check(ctx, compiler_path, repo_copy, "let-sema")
-    if rc != 0: return rc
-
-    // Variant 3: two fresh lets (larger id shift).
-    if fs.write_text(sema_copy, sema_pristine ++ "\nlet __INVARIANCE_PAD_B: i32 = 0\nlet __INVARIANCE_PAD_C: i32 = 0\n") != 0:
-        return invariance_fail(ctx, "could not write variant two-lets-sema")
-    rc = invariance_run_check(ctx, compiler_path, repo_copy, "two-lets-sema")
-    if rc != 0: return rc
-    if fs.write_text(sema_copy, sema_pristine) != 0:
-        return invariance_fail(ctx, "could not restore Sema.w")
-
-    // Variant 4: fresh let in a different merge position (Parser.w).
-    if fs.write_text(parser_copy, parser_pristine ++ "\nlet __INVARIANCE_PAD_D: i32 = 0\n") != 0:
-        return invariance_fail(ctx, "could not write variant let-parser")
-    rc = invariance_run_check(ctx, compiler_path, repo_copy, "let-parser")
-    if rc != 0: return rc
-    if fs.write_text(parser_copy, parser_pristine) != 0:
-        return invariance_fail(ctx, "could not restore Parser.w")
-
-    // Variant 5: fresh let in the root module (parsed first, ids lowest).
-    if fs.write_text(main_copy, main_pristine ++ "\nlet __INVARIANCE_PAD_E: i32 = 0\n") != 0:
-        return invariance_fail(ctx, "could not write variant let-main")
-    rc = invariance_run_check(ctx, compiler_path, repo_copy, "let-main")
-    if rc != 0: return rc
-    if fs.write_text(main_copy, main_pristine) != 0:
-        return invariance_fail(ctx, "could not restore main.w")
-    0
+    let edit_copy = build_project_join(repo_copy, file)
+    let pristine = fs.read_text(edit_copy)
+    if pristine.len() == 0:
+        return invariance_fail(ctx, "could not read pristine source: " ++ edit_copy)
+    if fs.write_text(edit_copy, pristine ++ payload) != 0:
+        return invariance_fail(ctx, "could not write variant " ++ label)
+    invariance_run_check(ctx, compiler_path, repo_copy, label)
 
 // Debug-allocator fixture lane: build tools/debug_drop.w, then run it in `check`
 // mode over test/debug_alloc/*.w. Gives the floor eyes for the over/under-drop
@@ -1705,10 +1697,23 @@ pub fn build(ctx: BuildCtx) -> Build:
     issue61_regression = issue61_regression.dep("build")
     out = out.add_target(issue61_regression)
 
-    var invariance_check = target_new(.Action, "invariance-check", "").output("out/test-graph/invariance-check")
-    invariance_check.action = invariance_check_action
-    invariance_check = invariance_check.input(release_compiler_bin("with"))
-    invariance_check = invariance_check.dep("build")
+    let invariance_labels: Vec[str] = Vec.new()
+    invariance_labels.push("comment-sema")
+    invariance_labels.push("let-sema")
+    invariance_labels.push("two-lets-sema")
+    invariance_labels.push("let-parser")
+    invariance_labels.push("let-main")
+    var invariance_check = target_new(.Group, "invariance-check", "")
+    for ii in 0..invariance_labels.len() as i32:
+        let inv_label = invariance_labels.get(ii as i64)
+        var inv = target_new(.Action, "invariance-" ++ inv_label, "").output("out/test-graph/invariance-" ++ inv_label)
+        inv.action = invariance_variant_action
+        inv = inv.input(release_compiler_bin("with"))
+        inv = inv.arg(inv_label)
+        inv = inv.allow_parallel()
+        inv = inv.dep("build")
+        out = out.add_target(inv)
+        invariance_check = invariance_check.dep("invariance-" ++ inv_label)
     out = out.add_target(invariance_check)
 
     var embedded_runtime_regression = target_new(.Action, "embedded-runtime-regression", "").output("out/test-graph/embedded-runtime-regression")
