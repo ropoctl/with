@@ -441,7 +441,7 @@ type Codegen {
 
     // Wave 10 MIR backend input (optional).
     mir_dispatch_count: i32,
-    mir_input: MirModule,
+    mir_ptr: i64,
     mir_local_ptrs: HashMap[i32, i64],
     mir_local_values: HashMap[i32, i64],
     mir_memory_locals: HashMap[i32, i32],
@@ -669,8 +669,8 @@ impl Codegen:
     mut fn audit_codegen_call_coverage():
         if self.analysis_enabled == 0 or self.analysis_query != "audit":
             return
-        for bi in 0..self.mir_input.bodies.len() as i32:
-            let body = self.mir_input.bodies.get(bi as i64)
+        for bi in 0..self.mir_bodies_len() as i32:
+            let body = self.mir_body_at(bi as i64)
             if body.lowering_failed != 0:
                 continue
             let reachable = self.mir_reachable_blocks(&body)
@@ -961,7 +961,7 @@ fn Codegen.init_with_opt(module_name: str, opt_level: i32) -> Codegen:
         tracked_input_root: "",
         tracked_input_paths: Vec.new(),
         mir_dispatch_count: 0,
-        mir_input: MirModule.init(),
+        mir_ptr: 0,
         mir_local_ptrs: HashMap.new(),
         mir_local_values: HashMap.new(),
         mir_memory_locals: HashMap.new(),
@@ -1170,14 +1170,38 @@ impl Codegen:
             return 0
         wl_abi_size_of(dl, ty)
 
-    mut fn gen_module_from_mir(mir_mod: MirModule, pool: AstPool) -> i32:
-        let mir_err = validate_mir_module(mir_mod)
+    // MIR is shared read-only via raw pointer: the caller retains ownership
+    // and must keep the module alive through generation. Removes the per-cg
+    // deep copy of all MIR bodies, and is the sharing contract per-unit
+    // generation threads reuse (#681).
+    mut fn gen_module_from_mir(mir_ptr: i64, pool: AstPool) -> i32:
+        let mir_err = unsafe { validate_mir_module((*(mir_ptr as *const MirModule))) }
         if mir_err.len() > 0:
             with_eprint("error: invalid MIR input for LLVM backend: " ++ mir_err)
             self.had_error = 1
             return 1
-        self.mir_input = mir_mod
+        self.mir_ptr = mir_ptr
         self.gen_module(pool)
+
+    fn mir_bodies_len() -> i64: unsafe { (*(self.mir_ptr as *const MirModule)).bodies.len() }
+    fn mir_body_at(i: i64) -> MirBody: unsafe { (*(self.mir_ptr as *const MirModule)).bodies.get(i) }
+    fn mir_fn_syms_len() -> i64: unsafe { (*(self.mir_ptr as *const MirModule)).body_fn_syms.len() }
+    fn mir_fn_sym_at(i: i64) -> i32: unsafe { (*(self.mir_ptr as *const MirModule)).body_fn_syms.get(i) }
+    fn mir_find_body_idx(sym: i32) -> i32: unsafe { (*(self.mir_ptr as *const MirModule)).find_body(sym) }
+    fn mir_resolve_alias_at(tid: i32) -> i32: unsafe { (*(self.mir_ptr as *const MirModule)).mir_resolve_alias(tid) }
+    fn mir_type_kind_at(tid: i32) -> i32: unsafe { (*(self.mir_ptr as *const MirModule)).mir_get_type_kind(tid) }
+    fn mir_type_d0_at(tid: i32) -> i32: unsafe { (*(self.mir_ptr as *const MirModule)).mir_get_type_d0(tid) }
+    fn mir_type_d1_at(tid: i32) -> i32: unsafe { (*(self.mir_ptr as *const MirModule)).mir_get_type_d1(tid) }
+    fn mir_type_d2_at(tid: i32) -> i32: unsafe { (*(self.mir_ptr as *const MirModule)).mir_get_type_d2(tid) }
+    fn mir_type_extra_at(idx: i32) -> i32: unsafe { (*(self.mir_ptr as *const MirModule)).mir_get_type_extra(idx) }
+    fn mir_type_kinds_len() -> i64: unsafe { (*(self.mir_ptr as *const MirModule)).sema_type_kinds.len() }
+    fn mir_type_d0_len() -> i64: unsafe { (*(self.mir_ptr as *const MirModule)).sema_type_d0.len() }
+    fn mir_type_d1_len() -> i64: unsafe { (*(self.mir_ptr as *const MirModule)).sema_type_d1.len() }
+    fn mir_type_d2_len() -> i64: unsafe { (*(self.mir_ptr as *const MirModule)).sema_type_d2.len() }
+    fn mir_type_extra_len() -> i64: unsafe { (*(self.mir_ptr as *const MirModule)).sema_type_extra.len() }
+    fn mir_type_name_at(tid: i32) -> i32: unsafe { (*(self.mir_ptr as *const MirModule)).mir_get_type_name(tid) }
+    fn mir_type_kinds_get(i: i64) -> i32: unsafe { (*(self.mir_ptr as *const MirModule)).sema_type_kinds.get(i) }
+    fn mir_type_d0_get(i: i64) -> i32: unsafe { (*(self.mir_ptr as *const MirModule)).sema_type_d0.get(i) }
 
     // ── Helper: is method symbol ──────────────────────────────────────
 
@@ -3273,34 +3297,34 @@ impl Codegen:
         sema_sym
 
     fn codegen_resolve_sema_type(tid: i32) -> i32:
-        let resolved = self.mir_input.mir_resolve_alias(tid)
-        if resolved > 0 and self.mir_input.mir_get_type_kind(resolved) != 0:
+        let resolved = self.mir_resolve_alias_at(tid)
+        if resolved > 0 and self.mir_type_kind_at(resolved) != 0:
             return resolved
         self.sema.resolve_alias(tid as TypeId) as i32
 
     fn codegen_get_type_kind(tid: i32) -> i32:
-        if tid >= 0 and tid < self.mir_input.sema_type_kinds.len() as i32:
-            return self.mir_input.mir_get_type_kind(tid)
+        if tid >= 0 and tid < self.mir_type_kinds_len() as i32:
+            return self.mir_type_kind_at(tid)
         self.sema.get_type_kind(tid)
 
     fn codegen_get_type_d0(tid: i32) -> i32:
-        if tid >= 0 and tid < self.mir_input.sema_type_d0.len() as i32:
-            return self.mir_input.mir_get_type_d0(tid)
+        if tid >= 0 and tid < self.mir_type_d0_len() as i32:
+            return self.mir_type_d0_at(tid)
         self.sema.get_type_d0(tid)
 
     fn codegen_get_type_d1(tid: i32) -> i32:
-        if tid >= 0 and tid < self.mir_input.sema_type_d1.len() as i32:
-            return self.mir_input.mir_get_type_d1(tid)
+        if tid >= 0 and tid < self.mir_type_d1_len() as i32:
+            return self.mir_type_d1_at(tid)
         self.sema.get_type_d1(tid)
 
     fn codegen_get_type_d2(tid: i32) -> i32:
-        if tid >= 0 and tid < self.mir_input.sema_type_d2.len() as i32:
-            return self.mir_input.mir_get_type_d2(tid)
+        if tid >= 0 and tid < self.mir_type_d2_len() as i32:
+            return self.mir_type_d2_at(tid)
         self.sema.get_type_d2(tid)
 
     fn codegen_get_type_extra(idx: i32) -> i32:
-        if idx >= 0 and idx < self.mir_input.sema_type_extra.len() as i32:
-            return self.mir_input.mir_get_type_extra(idx)
+        if idx >= 0 and idx < self.mir_type_extra_len() as i32:
+            return self.mir_type_extra_at(idx)
         if idx >= 0 and idx < self.sema.type_extra.len() as i32:
             return self.sema.type_extra.get(idx as i64)
         0
@@ -4443,8 +4467,8 @@ impl Codegen:
         false
 
     mut fn declare_mir_only_functions():
-        for bi in 0..self.mir_input.body_fn_syms.len() as i32:
-            let body_sym = self.mir_input.body_fn_syms.get(bi as i64)
+        for bi in 0..self.mir_fn_syms_len() as i32:
+            let body_sym = self.mir_fn_sym_at(bi as i64)
             if body_sym == 0:
                 continue
             if not self.mir_body_is_generated_function_clause(body_sym):
@@ -4458,15 +4482,15 @@ impl Codegen:
                 self.declare_function_from_sig(sig_sym, sig_idx, 1)
 
     mut fn gen_mir_only_functions():
-        for bi in 0..self.mir_input.body_fn_syms.len() as i32:
-            let body_sym = self.mir_input.body_fn_syms.get(bi as i64)
+        for bi in 0..self.mir_fn_syms_len() as i32:
+            let body_sym = self.mir_fn_sym_at(bi as i64)
             if body_sym == 0:
                 continue
             if not self.mir_body_is_generated_function_clause(body_sym):
                 continue
             if self.generated_mir_body_syms.contains(body_sym):
                 continue
-            let body = self.mir_input.bodies.get(bi as i64)
+            let body = self.mir_body_at(bi as i64)
             if body.lowering_failed != 0 or body.block_count() == 0:
                 continue
             self.gen_function_mir(0, body)
@@ -5427,12 +5451,12 @@ impl Codegen:
         if cached_value.is_some() and cached_type.is_some():
             return ConcreteMirFunction { sym: mono_sym, value: cached_value.unwrap() as i64, fn_type: cached_type.unwrap() as i64, sig: sig_idx }
 
-        let body_idx = self.mir_input.find_body(sema_sym)
+        let body_idx = self.mir_find_body_idx(sema_sym)
         if body_idx < 0:
             with_eprint(f"error: concrete specialization MIR was not lowered before freeze for {label}")
             self.had_error = 1
             return self.invalid_concrete_mir_function()
-        let body = self.mir_input.bodies.get(body_idx as i64)
+        let body = self.mir_body_at(body_idx as i64)
         let param_count = self.sema.sig_get_param_count(sig_idx)
         let signature_ret_sema = self.sema.sig_return_type(sig_idx)
         let is_async = self.sema.task_fns.contains(sema_sym)

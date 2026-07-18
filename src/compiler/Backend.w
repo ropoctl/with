@@ -46,7 +46,7 @@ impl Zcu:
         let do_profile = runtime_getenv("WITH_PROFILE").len() > 0
         let t_codegen = runtime_clock_nanos()
         var backend_mir = self.last_mir_module
-        let result = cg.gen_module_from_mir(move backend_mir, backend_pool)
+        let result = cg.gen_module_from_mir(&raw const backend_mir as i64, backend_pool)
         var tracked_paths = self.tracked_input_paths
         self.tracked_input_paths = tracked_input_merge_unique(move tracked_paths, &cg.tracked_input_paths)
         if result != 0:
@@ -116,7 +116,7 @@ impl Zcu:
         if self.pool.state.symbol_texts.len() as i32 <= 4 or self.last_sema.pool.state.symbol_texts.len() as i32 <= 4 or cg.intern.state.symbol_texts.len() as i32 <= 4 or backend_debug_pool_flow_enabled() != 0:
             runtime_eprint(f"[backend] cg.intern symbols={cg.intern.state.symbol_texts.len() as i32}")
         var backend_mir = self.last_mir_module
-        let result = cg.gen_module_from_mir(move backend_mir, backend_pool)
+        let result = cg.gen_module_from_mir(&raw const backend_mir as i64, backend_pool)
         var tracked_paths = self.tracked_input_paths
         self.tracked_input_paths = tracked_input_merge_unique(move tracked_paths, &cg.tracked_input_paths)
         if result != 0:
@@ -146,7 +146,7 @@ impl Zcu:
         cg.current_decl_source_file = self.current_source_path
         cg.enable_analysis(query)
         var backend_mir = self.last_mir_module
-        let rc = cg.gen_module_from_mir(move backend_mir, backend_pool)
+        let rc = cg.gen_module_from_mir(&raw const backend_mir as i64, backend_pool)
         cg.audit_declared_share_place_contracts()
         cg.audit_return_shape_contracts()
         cg.audit_trait_table_contracts()
