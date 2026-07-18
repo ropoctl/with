@@ -209,6 +209,28 @@ and needs a borrow variant; the 82 self.intern mutation sites are the
 clone-boundary checklist. Days-class; own session with /drop-audit +
 fixpoint + battery gates.
 
+## 2026-07-18 — #681 STRUCTURAL LANDED: per-unit generation from MIR (KEPT)
+
+The campaign's core change (a497d145 MIR-via-pointer groundwork + bc0c9832
+per-unit generation). The whole-module bitcode round-trip is gone: units
+are generated directly from MIR (serial, one cg alive at a time), then
+threads parse ~1/K-size unit bitcodes and optimize+emit. Bring-up took two
+rounds: round 1 linked-failed on duplicate synthesized prelude trait
+defaults (external bodies emitted per unit) — fixed by a deterministic
+post-gen demotion walk mirroring the old strip's ownership rules.
+
+Measured (stage-equivalent compiler compile):
+- Peak RSS: 21.1 GB (baseline) → 20.0 (disposal) → **13.2 GB (−37%)**
+- Max unit: 50.3 s → 36.7 s (thread parse tax gone)
+- Wall: neutral (~160-165 s); serial gen 23.6 s vs 14.5 s whole-module
+- Gates: fixpoint byte-identical, drop-audit 25/25, 1876 tests, produced
+  compiler self-checks.
+
+Consequences: unit counts >8 are now viable (parse cost no longer scales
+with units — retest 12/16 units next); the 8 GB-host architecture is in
+place (remaining: frontend residency #682/#685, unit-count-vs-memory
+tuning on small hosts).
+
 ## Remaining queue (updated)
 
 1. #686 signature scoping — the ~10-min tax on every build-layer edit; now
