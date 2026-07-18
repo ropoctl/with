@@ -1676,8 +1676,8 @@ unsafe fn run_build_graph(root: str, cfg: ProjectConfig, graph: &BuildGraph, act
             if not build_graph_define_valid(define):
                 with_eprint("error: invalid build.w define for '" ++ target.name ++ "': " ++ define)
                 return 1
+        var pool_dep_inflight = false
         if pool_oldest < pool_names.len() as i32:
-            var pool_dep_inflight = false
             for di in 0..target.deps.len() as i32:
                 let dep_name = target.deps.get(di as i64)
                 for pi in pool_oldest..pool_names.len() as i32:
@@ -1686,17 +1686,6 @@ unsafe fn run_build_graph(root: str, cfg: ProjectConfig, graph: &BuildGraph, act
                         break
                 if pool_dep_inflight:
                     break
-            if pool_dep_inflight:
-                while pool_oldest < pool_names.len() as i32:
-                    let retire_rc = build_pool_retire_oldest(pool_names, pool_pids, pool_t0s, pool_outs, pool_errs, pool_timeouts, pool_oldest, timed_names, timed_ns, completed_targets)
-                    if retire_rc != 0:
-                        if survey:
-                            survey_failed.push(pool_names.get(pool_oldest as i64))
-                        if not survey and pool_failed_rc == 0:
-                            pool_failed_rc = retire_rc
-                    pool_oldest = pool_oldest + 1
-                if pool_failed_rc != 0:
-                    return pool_failed_rc
         var dep_rebuilt = false
         for di in 0..target.deps.len() as i32:
             let dep_name = target.deps.get(di as i64)
@@ -1704,6 +1693,22 @@ unsafe fn run_build_graph(root: str, cfg: ProjectConfig, graph: &BuildGraph, act
                 if completed_targets.contains(dep_name):
                     dep_rebuilt = true
                     break
+        // An in-flight dep IS a rebuilding dep. Groups only propagate that
+        // bit and execute nothing, so they pass through without draining —
+        // a Group between marked targets must not break the wave.
+        if pool_dep_inflight:
+            dep_rebuilt = true
+        if target.kind != 9 and pool_dep_inflight:
+            while pool_oldest < pool_names.len() as i32:
+                let retire_rc = build_pool_retire_oldest(pool_names, pool_pids, pool_t0s, pool_outs, pool_errs, pool_timeouts, pool_oldest, timed_names, timed_ns, completed_targets)
+                if retire_rc != 0:
+                    if survey:
+                        survey_failed.push(pool_names.get(pool_oldest as i64))
+                    if not survey and pool_failed_rc == 0:
+                        pool_failed_rc = retire_rc
+                pool_oldest = pool_oldest + 1
+            if pool_failed_rc != 0:
+                return pool_failed_rc
         if target.kind == 9:
             if not dep_rebuilt:
                 skipped_targets.push(target.name)
