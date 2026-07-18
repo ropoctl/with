@@ -296,6 +296,11 @@ build 16s + cached verdict sweep.
 - **#679** umbrella: full verification ≤10 min / ≤8 GB; invariants that do
   not bend (self-hosting, -O1, per-commit fixpoint, no external deps).
 - **#680** parallel build-graph executor with memory-claim admission (d8).
+  **Stage A LANDED** (76c6d969 audit + 0262e1ed edges): the build closure
+  audits clean — zero declaration-order-dependent edges; single-writer per
+  invocation already guaranteed by validate_outputs. Stage B (ready-queue
+  scheduler over the worker-spawn mechanism; design in the issue) is
+  unblocked and is the next campaign step.
 - **#681** codegen-unit windowing + dispose base module/MIR pre-fan-out (d2)
   — the >30 GB peak; /drop-audit gate if lowering is touched.
 - **#682** serialized prelude snapshot keyed by compiler fingerprint (d6).
