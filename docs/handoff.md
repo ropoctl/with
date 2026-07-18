@@ -262,6 +262,27 @@ interpreted byte loop over the ~100 MB binary are not viable here.
    chain, no commits between: `:test → :test-green → :last-green →
    :update-seed → :install-user`; verify installed signature/version/exit code.
 
+## LAPTOP-SWITCH STATE (2026-07-18)
+
+The maintainer moved machines mid-campaign. What transferred and how:
+
+- **Seed:** the `with-darwin-aarch64` asset on the v0.15.1 release was
+  refreshed 2026-07-18 to the current verified seed (**ga2413f2e8**, the
+  last fully-gated compiler; 104,136,144 bytes). The previous asset was
+  from June 8 and CANNOT evaluate today's build.w (predates
+  `allow_parallel` and the D14 targets). On a fresh machine:
+  `with build :seed` fetches it; verify with `src/main --version` →
+  `with v0.15.1-ga2413f2e8`. Keep the asset current after future reseeds —
+  a stale seed asset silently strands every machine but the one that
+  reseeded locally.
+- **Not in the repo, copy manually if wanted:** the agent memory dir
+  (`~/.claude/projects/-Users-eric-with/` — behavioral/feedback memories;
+  project state is fully duplicated here and in docs/build_time_log.md)
+  and `.deps/llvm-22.1.6-darwin-arm64` (rebuildable via
+  `tools/build-static-llvm.sh`, ~hours).
+- Background batteries running on the old machine died with it; that is
+  why the FIRST ACTION below re-runs the battery.
+
 ## FIRST ACTION NEXT SESSION (any machine)
 
 HEAD e6c770b9 (pushed) landed the 16-unit default with maintainer-authorized
