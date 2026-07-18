@@ -285,3 +285,38 @@ pub fn collect_test_files(target_dir: str) -> Vec[str]:
         if path.ends_with(".w"):
             w_files.push(path)
     build_graph_sorted_strings(w_files)
+
+pub fn build_graph_time_fmt(ns: i64) -> str:
+    let tenths = ns / 100000000
+    f"{tenths / 10}.{tenths % 10}s"
+
+fn build_graph_time_picked(picked: &Vec[i64], idx: i64) -> bool:
+    for i in 0..picked.len() as i32:
+        if picked.get(i as i64) == idx:
+            return true
+    false
+
+// Per-invocation wall-time record: chronological TSV beside the cache state
+// (the dir build_cache_state_dir names), plus a slowest-first stderr summary.
+// Durations must never enter hashed build inputs or compared artifacts.
+pub fn build_graph_times_report(root: str, names: &Vec[str], ns_list: &Vec[i64], total_ns: i64) -> Unit:
+    if names.len() == 0:
+        return
+    var text = "target\tseconds\n"
+    for i in 0..names.len() as i32:
+        text = text ++ names.get(i as i64) ++ "\t" ++ build_graph_time_fmt(ns_list.get(i as i64)) ++ "\n"
+    text = text ++ "TOTAL\t" ++ build_graph_time_fmt(total_ns) ++ "\n"
+    let state_dir = resolve_join(root, "out/.build-state")
+    let _mkdir = build_graph_rt_mkdir_p(state_dir)
+    let _write = build_graph_rt_write_file(resolve_join(state_dir, "build-times.tsv"), text)
+    var summary = "[times] total " ++ build_graph_time_fmt(total_ns) ++ f" across {names.len() as i32} executed; slowest:"
+    let picked: Vec[i64] = Vec.new()
+    while picked.len() < 5 and picked.len() < names.len():
+        var best: i64 = -1
+        for i in 0..names.len() as i32:
+            if not build_graph_time_picked(&picked, i as i64):
+                if best < 0 or ns_list.get(i as i64) > ns_list.get(best):
+                    best = i as i64
+        picked.push(best)
+        summary = summary ++ " " ++ names.get(best) ++ " " ++ build_graph_time_fmt(ns_list.get(best))
+    build_graph_rt_eprint(summary ++ " (out/.build-state/build-times.tsv)")

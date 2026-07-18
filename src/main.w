@@ -1567,8 +1567,22 @@ unsafe fn run_build_graph(root: str, cfg: ProjectConfig, graph: &BuildGraph, act
         return generated_rc
     let completed_targets: Vec[str] = Vec.new()
     let skipped_targets: Vec[str] = Vec.new()
+    // Per-target wall time: only the top-level driver records/reports; worker
+    // re-entries (forced action / test workers) stay silent.
+    let times_top_level = not force_action_worker_target and not build_test_worker_env_enabled()
+    let run_t0 = with_clock_nanos()
+    let timed_names: Vec[str] = Vec.new()
+    let timed_ns: Vec[i64] = Vec.new()
+    var timing_name = ""
+    var timing_t0: i64 = 0
     for ti in 0..graph.targets.len() as i32:
         let target = graph.targets.get(ti as i64)
+        if timing_name.len() > 0:
+            let spent = with_clock_nanos() - timing_t0
+            timed_names.push(timing_name)
+            timed_ns.push(spent)
+            with_eprint("[time] " ++ timing_name ++ " " ++ build_graph_time_fmt(spent))
+            timing_name = ""
         if build_graph_kind_removed(target.kind):
             with_eprint("error: build.w target kind " ++ build_graph_kind_name(target.kind) ++ f" ({target.kind}) was removed; regenerate your build graph")
             return 1
@@ -1607,6 +1621,9 @@ unsafe fn run_build_graph(root: str, cfg: ProjectConfig, graph: &BuildGraph, act
                     skipped_targets.push(target.name)
                     completed_targets.push(target.name)
                     continue
+        if times_top_level:
+            timing_name = target.name
+            timing_t0 = with_clock_nanos()
         let standard_result = build_graph_dispatch_standard_target(root, target, completed_targets)
         if standard_result.handled:
             if standard_result.rc != 0:
@@ -1737,6 +1754,13 @@ unsafe fn run_build_graph(root: str, cfg: ProjectConfig, graph: &BuildGraph, act
         comp.print_warnings()
         build_cache_record(root, target, comp.tracked_input_paths(), Vec.new())
         completed_targets.push(target.name)
+    if timing_name.len() > 0:
+        let spent = with_clock_nanos() - timing_t0
+        timed_names.push(timing_name)
+        timed_ns.push(spent)
+        with_eprint("[time] " ++ timing_name ++ " " ++ build_graph_time_fmt(spent))
+    if times_top_level:
+        build_graph_times_report(root, &timed_names, &timed_ns, with_clock_nanos() - run_t0)
     if survey and survey_failed.len() as i32 > 0:
         with_eprint(f"survey: {survey_failed.len() as i32} target(s) failed:")
         for sfi in 0..survey_failed.len() as i32:
