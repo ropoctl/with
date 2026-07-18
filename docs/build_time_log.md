@@ -105,6 +105,34 @@ Side observation, logged for #686: the measurement run itself paid a
 (action signatures hash the build source). Every build-layer experiment
 pays this tax; #686 is now the highest-leverage remaining build-graph fix.
 
+## 2026-07-18 — Experiment: group passthrough + more pooled checks (KEPT)
+
+Two-part batch (5ad88c76 + 70c887e5): (a) Groups no longer drain the pool
+— a Group executes nothing and only propagates dep_rebuilt, and an
+in-flight dep IS a rebuilding dep, so the invariance-check Group between
+marked targets stopped breaking the wave; (b) issue61-regression and
+embedded-runtime-regression marked allow_parallel (same pure shape as the
+invariance variants).
+
+Measured in the gating battery: one seven-wide wave — issue61 101.0s +
+five invariance variants ~102s + embedded-runtime 5.1s, all overlapped.
+~100s more off the test leg. Battery green, fixpoint held.
+
+Watch item: behavior-tests read 147.7s this battery vs 109.2s earlier —
+possibly contention with the wave or run variance; check next battery
+before drawing conclusions.
+
+## Remaining queue (updated)
+
+1. #686 signature scoping — the ~10-min tax on every build-layer edit; now
+   the single highest-leverage remaining item. Design: module-granular
+   hashing (hash only the build/ file containing the action + its use
+   closure) as a tractable middle ground before #683's compiled graph.
+2. Sema 73.8 s serial block (from the profile) — deep compiler work.
+3. #681 codegen-unit memory (enables >8 units → further backend wall cuts).
+4. #682 prelude snapshot; #683 compiled build graph; #684 separate
+   compilation (endgame).
+
 ## Idea queue (from .reference study; ranked by expected value)
 
 1. Decompose the 190 s stage compile with WITH_PROFILE (per-phase lines
