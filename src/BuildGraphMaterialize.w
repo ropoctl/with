@@ -81,6 +81,7 @@ fn build_graph_materialized_target(kind: i32, name: str, entry: str, target_kind
         cwd: "",
         env: Vec.new(),
         network: 0,
+        parallel: 0,
     }
 
 impl BuildGraphMaterializer:
@@ -143,6 +144,9 @@ impl BuildGraphMaterializer:
         let network_field = self.field_value(value, "network")
         if network_field.kind == ComptimeValueKind.CV_BOOL:
             target.network = if network_field.data0 != 0: 1 else: 0
+        let parallel_field = self.field_value(value, "parallel")
+        if parallel_field.kind == ComptimeValueKind.CV_BOOL:
+            target.parallel = if parallel_field.data0 != 0: 1 else: 0
         let action = self.field_value(value, "action")
         if kind == 23:
             if action.kind != ComptimeValueKind.CV_FN:

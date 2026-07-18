@@ -436,6 +436,7 @@ pub type Target {
     cwd: str,
     env: Vec[str],
     network: bool,
+    parallel: bool,
 }
 
 pub type GeneratedSource {
@@ -1839,6 +1840,7 @@ pub fn target_new(kind: BuildKind, name: str, entry: str) -> Target:
         cwd: "",
         env: Vec.new(),
         network: false,
+        parallel: false,
     }
 
 pub fn Target.timeout(move self: Target, ms: i32) -> Target:
@@ -1859,6 +1861,14 @@ pub fn Target.with_env(move self: Target, key: str, value: str) -> Target:
 pub fn Target.allow_network(move self: Target) -> Target:
     var out = self
     out.network = true
+    out
+
+// Declares this action a pure function of its declared inputs: no reads of
+// undeclared state, no effect-ordering against other targets. The executor
+// may run it concurrently with other allow_parallel targets.
+pub fn Target.allow_parallel(move self: Target) -> Target:
+    var out = self
+    out.parallel = true
     out
 
 pub fn Build.add_target(move self: Build, target: Target) -> Build:
@@ -2217,6 +2227,7 @@ pub fn Target.target(self: &Self, target: BuildTarget) -> Target:
         cwd: self.cwd,
         env: self.env,
         network: self.network,
+        parallel: self.parallel,
     }
 
 pub fn Target.optimize(self: &Self, mode: OptimizeMode) -> Target:
@@ -2240,6 +2251,7 @@ pub fn Target.optimize(self: &Self, mode: OptimizeMode) -> Target:
         cwd: self.cwd,
         env: self.env,
         network: self.network,
+        parallel: self.parallel,
     }
 
 pub fn Target.link_system_lib(move self: Target, lib: str) -> Target:
@@ -2278,6 +2290,7 @@ pub fn Target.output(self: &Self, output: str) -> Target:
         cwd: self.cwd,
         env: self.env,
         network: self.network,
+        parallel: self.parallel,
     }
 
 pub fn Target.input(move self: Target, input: str) -> Target:

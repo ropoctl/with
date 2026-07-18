@@ -20,6 +20,7 @@ pub type BuildGraphTarget {
     cwd: str,
     env: Vec[str],
     network: i32,
+    parallel: i32,
 }
 
 pub type BuildGraphGeneratedSource {
@@ -82,6 +83,7 @@ fn build_graph_target_new(kind: i32, name: str, entry: str, target_kind: i32, op
         cwd: "",
         env: Vec.new(),
         network: 0,
+        parallel: 0,
     }
 
 pub fn empty_build_graph_target -> BuildGraphTarget:
@@ -189,6 +191,8 @@ pub fn build_graph_emit(graph: &BuildGraph) -> str:
             out = out ++ "env\t" ++ f"{ti}\t" ++ build_graph_escape(target.env.get(ei as i64)) ++ "\n"
         if target.network != 0:
             out = out ++ "network\t" ++ f"{ti}\t1\n"
+        if target.parallel != 0:
+            out = out ++ "parallel\t" ++ f"{ti}\t1\n"
     out
 
 fn build_graph_parse_i32(text: str) -> i32:
