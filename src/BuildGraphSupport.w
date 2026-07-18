@@ -257,7 +257,7 @@ fn build_graph_str_compare(a: str, b: str) -> i32:
         return -1
     1
 
-fn build_graph_sorted_strings(items: Vec[str]) -> Vec[str]:
+pub fn build_graph_sorted_strings(items: Vec[str]) -> Vec[str]:
     var sorted: Vec[str] = Vec.new()
     for i in 0..items.len() as i32:
         let item = items.get(i as i64)

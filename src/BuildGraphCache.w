@@ -2,6 +2,7 @@
 
 use BuildGraphModel
 use BuildGraphRuntime
+use BuildGraphSupport
 use compiler.TrackedInputs
 use std.crypto.sha256
 
@@ -283,6 +284,32 @@ pub fn build_cache_hash_directory_w_files(root: str, dir: str) -> str:
         combined = combined ++ path ++ ":" ++ build_cache_fingerprint_file(path) ++ "\n"
     build_cache_sha256_text(combined)
 
+// #686: the evaluator resolves std modules from the embedded stdlib; their
+// closure paths carry the embedded prefix. Hash the disk mirror (what the
+// current global hash also does for std.build); a missing file hashes as a
+// stable marker so path-set changes still shift the signature.
+fn build_cache_action_source_disk_path(root: str, path: str) -> str:
+    if path.starts_with("<embedded-std>/"):
+        return root ++ "/lib/" ++ path.slice("<embedded-std>/".len(), path.len())
+    if path.starts_with("/"):
+        return path
+    root ++ "/" ++ path
+
+fn build_cache_hash_action_sources(root: str, paths: &Vec[str]) -> str:
+    let unsorted: Vec[str] = Vec.new()
+    for i in 0..paths.len() as i32:
+        unsorted.push(paths.get(i as i64))
+    let sorted = build_graph_sorted_strings(unsorted)
+    var combined = ""
+    for i in 0..sorted.len() as i32:
+        let p = sorted.get(i as i64)
+        let disk = build_cache_action_source_disk_path(root, p)
+        if build_graph_rt_file_exists(disk) != 0:
+            combined = combined ++ p ++ ":" ++ build_cache_fingerprint_file(disk) ++ "\n"
+        else:
+            combined = combined ++ p ++ ":missing\n"
+    build_cache_sha256_text(combined)
+
 fn build_cache_hash_build_graph_sources(root: str) -> str:
     var combined = "build.w:" ++ build_cache_fingerprint_file(root ++ "/build.w") ++ "\n"
     combined = combined ++ "build:" ++ build_cache_hash_directory_w_files(root, "build") ++ "\n"
@@ -433,7 +460,15 @@ fn build_cache_compute_signature(target: &BuildGraphTarget, root: str) -> str:
     if build_cache_target_uses_current_compiler(target):
         sig = sig ++ ":WITH:" ++ build_cache_current_compiler_fingerprint()
     if target.kind == 23:
-        sig = sig ++ ":BUILD_GRAPH:" ++ build_cache_hash_build_graph_sources(root)
+        // #686: hash only the modules the action's code can reach (defining
+        // file + use closure, computed at materialize). A build.w-only edit
+        // no longer invalidates actions whose code lives in build/ modules.
+        // Empty closure (mapping unavailable) falls back to hashing all
+        // build-graph sources — the always-safe superset.
+        if target.action_source_paths.len() > 0:
+            sig = sig ++ ":ACTION_CODE:" ++ build_cache_hash_action_sources(root, &target.action_source_paths)
+        else:
+            sig = sig ++ ":BUILD_GRAPH:" ++ build_cache_hash_build_graph_sources(root)
     if build_cache_is_stage_target(target):
         let src_hash = build_cache_hash_directory_w_files(root, "src")
         sig = sig ++ ":SRC:" ++ src_hash

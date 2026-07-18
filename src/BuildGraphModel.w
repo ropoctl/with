@@ -21,6 +21,7 @@ pub type BuildGraphTarget {
     env: Vec[str],
     network: i32,
     parallel: i32,
+    action_source_paths: Vec[str],
 }
 
 pub type BuildGraphGeneratedSource {
@@ -84,6 +85,7 @@ fn build_graph_target_new(kind: i32, name: str, entry: str, target_kind: i32, op
         env: Vec.new(),
         network: 0,
         parallel: 0,
+        action_source_paths: Vec.new(),
     }
 
 pub fn empty_build_graph_target -> BuildGraphTarget:

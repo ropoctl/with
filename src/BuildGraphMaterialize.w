@@ -2,6 +2,7 @@
 
 use BuildGraphKinds
 use BuildGraphModel
+use BuildGraphRuntime
 use ComptimeValue
 use Sema
 
@@ -82,6 +83,7 @@ fn build_graph_materialized_target(kind: i32, name: str, entry: str, target_kind
         env: Vec.new(),
         network: 0,
         parallel: 0,
+        action_source_paths: Vec.new(),
     }
 
 impl BuildGraphMaterializer:
@@ -153,6 +155,7 @@ impl BuildGraphMaterializer:
                 out.error_msg = "action target '" ++ name_value.text ++ "' is missing an action function"
                 return out
             target.action_fn = action.data0 as i32
+            target.action_source_paths = self.action_source_closure(action.data0 as i32)
         else if action.kind == ComptimeValueKind.CV_FN and action.data0 != 0:
             let action_name = self.sema.pool_resolve(action.data0 as i32)
             if action_name != "build_noop_action":
@@ -160,6 +163,53 @@ impl BuildGraphMaterializer:
                 return out
         out.targets.push(target)
         out
+
+    // #686: the module files an action's code can reach — its defining file
+    // plus the transitive use closure from Sema's retained module graph. A
+    // file-granular over-approximation of the call closure: it can
+    // over-invalidate, never under-invalidate. Empty result = caller falls
+    // back to hashing all build-graph sources.
+    fn action_source_closure(action_sym: i32) -> Vec[str]:
+        let empty: Vec[str] = Vec.new()
+        let found = self.sema.fn_decl_source_paths.get(action_sym)
+        if not found.is_some():
+            build_graph_rt_eprint("[graph] action closure MISS (no source path) for '" ++ self.sema.pool_resolve(action_sym) ++ "'")
+            return empty
+        let defining = found.unwrap()
+        var start_module = -1
+        for mi in 0..self.sema.module_paths.len() as i32:
+            if self.sema.module_paths.get(mi as i64) == defining:
+                start_module = mi
+                break
+        if start_module < 0:
+            build_graph_rt_eprint("[graph] action closure MISS (module not found) for '" ++ self.sema.pool_resolve(action_sym) ++ "' defined in '" ++ defining ++ "'")
+            return empty
+        let visited: Vec[i32] = Vec.new()
+        let queue: Vec[i32] = Vec.new()
+        visited.push(start_module)
+        queue.push(start_module)
+        var qi = 0
+        while qi < queue.len() as i32:
+            let m = queue.get(qi as i64)
+            qi = qi + 1
+            let istart = self.sema.module_import_starts.get(m as i64)
+            let icount = self.sema.module_import_counts.get(m as i64)
+            for ii in 0..icount:
+                let t = self.sema.module_import_targets.get((istart + ii) as i64)
+                if t < 0:
+                    continue
+                var seen = false
+                for vi in 0..visited.len() as i32:
+                    if visited.get(vi as i64) == t:
+                        seen = true
+                        break
+                if not seen:
+                    visited.push(t)
+                    queue.push(t)
+        let paths: Vec[str] = Vec.new()
+        for i in 0..visited.len() as i32:
+            paths.push(self.sema.module_paths.get(visited.get(i as i64) as i64))
+        paths
 
     fn materialize_generated_source(value: ComptimeValue, graph: BuildGraph) -> BuildGraph:
         var out = graph
