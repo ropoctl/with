@@ -167,16 +167,18 @@ as comptime fns) remain — keep #665 open for those.
 - Doc-only commits (spec/decisions/handoff) don't need the battery.
 - Commit with explicit paths to keep unrelated in-flight changes out.
 
-## Reseed (PENDING maintainer approval)
+## Reseed — CURRENT (2026-07-18)
 
-Installed seed `~/.local/bin/with` = **v0.15.1-g9eddd2c32**; HEAD is bb31e86a,
-so the seed is ~10 commits behind (missing everything this session). D11's
-implementation will REQUIRE a reseed (self-host flip). One chain, no commits
-between: `:test → :test-green → :last-green → :update-seed → :install-user`.
+Installed seed `~/.local/bin/with` AND `src/main` = **v0.15.1-g00e484351**
+(= HEAD 00e48435), both verified rc=0 with valid signatures after the
+2026-07-18 reseed. The daily driver therefore carries the full build-perf
+campaign: `[time]` instrumentation, unstamped verdict keying, core-width
+sliding-window tests, `:dev`, hardened stamp. The first `with build` after
+any reseed rebuilds the chain once (seed hash is a stage1 input — expected).
 **Verify every reseed with `~/.local/bin/with --version; echo $?`** — an
 in-place overwrite of the running signed binary can leave a stale arm64 vnode
 signature cache → SIGKILL rc=137 (root-fixed in the installer 7ba518e2:
-temp-sibling + rename; but verify).
+temp-sibling + rename; the stamp action now uses the same pattern, 0efd2552).
 
 ## Release posture (v0.16.0)
 
