@@ -262,6 +262,23 @@ interpreted byte loop over the ~100 MB binary are not viable here.
    chain, no commits between: `:test → :test-green → :last-green →
    :update-seed → :install-user`; verify installed signature/version/exit code.
 
+## CURRENT WORK: structural campaigns, one at a time (maintainer-directed)
+
+Order agreed 2026-07-18: **#681 → #682 → #683**, then the north-star
+campaign: **peak build memory UNDER 8 GB** (compiler buildable on an 8 GB
+machine, Mac/Linux/Windows).
+
+**#681 state:** quick tier LANDED (88ade44f — base-module disposal; peak
+21.1→~20.0 GB measured; wall neutral). The main course — per-unit IR
+generation from MIR — is fully designed and feasibility-confirmed in the
+issue comments (per-thread Codegen + cloned InternPool + shared read-only
+Sema/MIR; audit:all's frozen-Sema invariant is the thread-safety
+guarantee). Implement in a FRESH session against that spec; gates:
+/drop-audit before+after, fixpoint, full battery. Also see
+docs/build_time_log.md (experiment log — the loop session's record: unit
+packing, invariance wave, #686 scoped signatures = 19.7s build-layer
+sweeps, 16-unit negative result).
+
 ## Build-performance campaign (2026-07-17 session, maintainer-directed)
 
 The maintainer ruled the ~40-min battery unacceptable and directed "fix this
