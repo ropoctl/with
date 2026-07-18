@@ -260,26 +260,47 @@ interpreted byte loop over the ~100 MB binary are not viable here.
    chain, no commits between: `:test → :test-green → :last-green →
    :update-seed → :install-user`; verify installed signature/version/exit code.
 
-## Build-speed findings discovered this session (follow-up work, not yet filed)
+## Build-performance campaign (2026-07-17 session, maintainer-directed)
 
-The maintainer flagged the ~40-min battery as unacceptable. Verified facts:
+The maintainer ruled the ~40-min battery unacceptable and directed "fix this
+issue deeply." Evidence base: `docs/build-perf-reference-study.md` (multi-agent
+comparison vs `.reference/{go,rust,swift,Vale,zig}`; 10 adversarially-verified
+deltas). Landed this session:
 
-1. **No timing instrumentation anywhere** — not one clock read in `build.w`,
-   `build/*.w`, `src/BuildGraph*.w`. Fix: executor records per-target wall
-   time, prints it on completion lines, persists a sorted per-run summary
-   (never into hashed inputs or fixpoint-compared artifacts).
-2. **Test runner width defaults to 4** on a 16-core host —
-   `build_graph_test_jobs` (`src/BuildGraphTests.w:66`, env
-   `WITH_BUILD_TEST_JOBS`, cap 32) with batch-of-4 barrier scheduling
-   (spawn 4, wait all 4; `BuildGraphTests.w:156-181`). Free ~3-4x on the
-   longest phase; the width is not part of any verdict key.
-3. **Test verdict cache fingerprints the STAMPED binary** — test targets run
-   `out/release/bin/with` (`build.w:1512`) and the key hashes its bytes
-   (`BuildGraphCache.w:370-371`). The #650 stamp rewrites those bytes every
-   commit, so every commit invalidates all ~1900 verdicts even when the
-   compiler is semantically identical — defeating #650 for the test phase.
-   Fix: fingerprint the `.unstamped` sibling when present (D13's own logic:
-   the stamp is provenance, not semantics).
-4. A multi-agent study comparing `.reference/{go,rust,swift,Vale,zig}` build
-   architecture (units/parallelism/incrementality/stage policy/memory) against
-   With's was run this session — see its report in the session record.
+- **c3de4c0b** — per-target wall-time instrumentation in the graph executor
+  (`[time]` lines + `out/.build-state/build-times.tsv`). First measurement
+  ever: stage1 175.9s + stage2 174.3s + link 173.0s = 77% of `with build`
+  (681s total); the ~30 runtime objects are a serial ~90s tail.
+- **4dcf9419** — test verdicts keyed on `with.unstamped` (D13: stamp is
+  provenance). PROVEN: restamp with a different version → verdicts stay
+  cached. Commits no longer invalidate ~1900 banked test passes.
+- **196056ac** — test runner defaults to host-core width (was 4 on 16 cores;
+  `WITH_BUILD_TEST_JOBS` still overrides, cap 32) with a join-oldest sliding
+  window instead of the spawn-4-join-all batch barrier.
+- **:dev target + D14 tiering policy** (this batch) — iterate = `with check`
+  / `with build :dev` (seed→stage1); battery gates commit batches;
+  independent build-layer changes share one battery, land as separate
+  commits; audit:all ∥ :test concurrency sanctioned. CLAUDE.md amended.
+- **Stamp temp-sibling hardening** (this batch) — `comp_patch_version_binary`
+  writes/signs `with.tmp` then renames; in-place write corrupted a running
+  binary at that path (self-seeded rebuild hazard).
+
+**Measured effect:** commit-only rebuild 16s (was ~12 min); test leg ~8 min
+at core width (was ~22); post-reseed a non-compiler commit's battery ≈
+build 16s + cached verdict sweep.
+
+### Structural arc — FILED as the #679 campaign (dependency order)
+
+- **#679** umbrella: full verification ≤10 min / ≤8 GB; invariants that do
+  not bend (self-hosting, -O1, per-commit fixpoint, no external deps).
+- **#680** parallel build-graph executor with memory-claim admission (d8).
+- **#681** codegen-unit windowing + dispose base module/MIR pre-fan-out (d2)
+  — the >30 GB peak; /drop-audit gate if lowering is touched.
+- **#682** serialized prelude snapshot keyed by compiler fingerprint (d6).
+- **#683** compile/serialize the build graph once; stop re-interpreting
+  build.w per worker (d9; the measured ~1.1s/action floor).
+- **#684** separate compilation with module interfaces (d5) — the only fix
+  for the 175s-per-stage constant; prerequisites #680+#682; sequence LAST.
+- **#685** allocator slab release + phase arenas (d7).
+- **#686** over-invalidation: build.w-only edits rebuild the stage chain
+  (CONFIRMED live 2026-07-17); regex-runtime-ir built twice per cold build.
