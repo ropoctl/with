@@ -150,6 +150,42 @@ just got ~10 min cheaper — the fix that accelerates the loop itself.
 Also declared the 6 fixpoint/last-green edges the graph audit surfaced on
 its first pass over the test closure.
 
+## 2026-07-18 — Experiment: 16 codegen units (NEGATIVE — no change made)
+
+Measured via the existing WITH_CODEGEN_UNITS override, zero code touched:
+max unit 56.7 s (8-unit baseline: 50.3), wall 170.9 s (vs ~161), peak RSS
+30.5 GB (vs ~24), sys time 164 s — sixteen full-module bitcode parses
+contend for memory bandwidth and swamp the finer split. 8 units stays the
+right default on this host. Confirms #681's structural tier (pre-split the
+bitcode so each unit parses ~1/K) is the only route to profit from more
+units. Negative results are results; this one cost 3 minutes.
+
+## Loop summary (2026-07-18, stopping point)
+
+Landed this loop, all gated green, every number from the executor's own
+instrumentation:
+- Codegen-unit packing by instruction count: stage compiles ~180 → ~161 s
+  (unit spread 4.2x → 2.0x); at battery scale stage2 −25.6 s, link −21.2 s.
+- Invariance variants parallelized: 468.2 → ~103 s (5 concurrent checks).
+- Group passthrough + pooled issue61/embedded-runtime: one 7-wide wave;
+  ~100 s more off the test leg.
+- #686 scoped action signatures + input-set fix: build-layer edit tax
+  ~10 min → 19.7 s no-op sweep (the fix that made the loop itself cheaper).
+- Cold full chain: 757.8 → 625.2 s (−17.5%). Reseeded; all in the driver.
+
+Combined with the pre-loop campaign session: full verification for a
+compiler change ≈ 20 min (was ~40 for everything), non-compiler commits
+≈ 2 min, iterate tier 92 s / 3.7 min, and every run reports where its
+time went.
+
+The remaining items are all multi-day structural campaigns, filed with
+designs and evidence — not loop-iteration-sized: sema parallelization
+(73.8 s serial, the largest single block), #681 structural bitcode
+pre-split, #682 prelude snapshot, #683 compiled build graph, #684 separate
+compilation (the only fix for the ~170 s-per-stage constant). The
+iteration-sized efficiency levers are exhausted — by measurement, not
+assumption.
+
 ## Remaining queue (updated)
 
 1. #686 signature scoping — the ~10-min tax on every build-layer edit; now
