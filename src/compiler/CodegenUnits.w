@@ -223,12 +223,17 @@ unsafe fn codegen_unit_thread_entry(arg: *mut u8) -> i32:
 // own thread (per-thread LLVMContext is the LLVM threading contract). A
 // failed spawn degrades that unit to inline execution rather than failing
 // the build. Returns 0 on success; emits loudly on failure.
+// CONSUMES base_module: it is disposed right after the bitcode write so the
+// parent does not hold a whole-module copy (~GBs) while unit threads each
+// parse their own (#681; the 8 GB-host goal). Callers must not touch the
+// handle afterwards.
 pub fn codegen_units_emit(base_module: i64, obj_path: str, opt_level: i32, unit_count: i32, do_profile: bool) -> i32:
     let plan = codegen_units_plan(base_module, unit_count)
     let bc_path = obj_path ++ ".units.bc"
     if wl_write_bitcode(base_module, bc_path) != 0:
         runtime_eprint("error: codegen-units bitcode write failed")
         return 1
+    wl_module_dispose(base_module)
     let jobs: Vec[CodegenUnitJob] = Vec.new()
     var ji = 0
     while ji < unit_count:
