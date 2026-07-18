@@ -104,6 +104,19 @@ pub fn build_graph_rt_chmod(path: str, mode: i32) -> i32:
 pub fn build_graph_rt_getpid() -> i32:
     with_getpid()
 
+// Same out-param layout with_sysinfo fills for codegen units.
+type BuildGraphSysInfo {
+    cpu_cores: i32,
+    memory_total: i64,
+    page_size: i64,
+}
+extern fn with_sysinfo(out: *mut u8) -> i32
+
+pub fn build_graph_rt_cpu_cores() -> i32:
+    var info = BuildGraphSysInfo { cpu_cores: 0, memory_total: 0, page_size: 0 }
+    let _ = with_sysinfo(&info as *mut u8)
+    info.cpu_cores
+
 pub fn build_graph_rt_clock_nanos() -> i64:
     with_clock_nanos()
 

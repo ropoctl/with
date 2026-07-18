@@ -67,7 +67,14 @@ fn build_graph_test_jobs -> i32:
     let raw = build_graph_rt_getenv("WITH_BUILD_TEST_JOBS")
     let parsed = build_graph_test_parse_jobs(raw)
     if parsed <= 0:
-        return 4
+        // Default to host core width; test children are small compared to
+        // the driver, so cores — not a fixed 4 — is the right ceiling.
+        let cores = build_graph_rt_cpu_cores()
+        if cores < 1:
+            return 4
+        if cores > 32:
+            return 32
+        return cores
     if parsed > 32:
         return 32
     parsed
@@ -153,10 +160,14 @@ pub fn build_graph_run_external_test_files(root: str, target: &BuildGraphTarget,
     var failed_paths: Vec[str] = Vec.new()
     var first_failure = 0
     var next = 0
-    while next < run_files.len() as i32:
-        let active: Vec[BuildGraphExternalTestJob] = Vec.new()
-        let active_keys: Vec[str] = Vec.new()
-        while next < run_files.len() as i32 and active.len() < jobs_limit as i64:
+    var oldest = 0
+    let active: Vec[BuildGraphExternalTestJob] = Vec.new()
+    let active_keys: Vec[str] = Vec.new()
+    // Sliding window: keep jobs_limit children in flight, retiring the oldest
+    // to open each slot (no batch barrier — one slow file no longer idles the
+    // rest of the window).
+    while oldest < run_files.len() as i32:
+        if next < run_files.len() as i32 and next - oldest < jobs_limit:
             let test_path = run_files.get(next as i64)
             let base = build_graph_path_basename(test_path)
             let stdout_path = resolve_join(capture_dir, base ++ ".stdout")
@@ -169,16 +180,17 @@ pub fn build_graph_run_external_test_files(root: str, target: &BuildGraphTarget,
             active.push(build_graph_external_test_job_new(test_path, stdout_path, stderr_path, pid))
             active_keys.push(run_keys.get(next as i64))
             next = next + 1
-        for ai in 0..active.len() as i32:
-            let job_path = active.get(ai as i64).test_path
-            let rc = build_graph_wait_external_test_job(target, active.get(ai as i64))
-            if rc == 0:
-                pass_keys.push(active_keys.get(ai as i64))
-                pass_paths.push(build_cache_project_relative_path(root, job_path))
-            else:
-                failed_paths.push(job_path)
-                if first_failure == 0:
-                    first_failure = rc
+            continue
+        let job_path = active.get(oldest as i64).test_path
+        let rc = build_graph_wait_external_test_job(target, active.get(oldest as i64))
+        if rc == 0:
+            pass_keys.push(active_keys.get(oldest as i64))
+            pass_paths.push(build_cache_project_relative_path(root, job_path))
+        else:
+            failed_paths.push(job_path)
+            if first_failure == 0:
+                first_failure = rc
+        oldest = oldest + 1
 
     // Persist the passing set even when the target is red (compaction:
     // the file is rewritten with exactly the keys proven this run plus
