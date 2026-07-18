@@ -186,6 +186,29 @@ compilation (the only fix for the ~170 s-per-stage constant). The
 iteration-sized efficiency levers are exhausted — by measurement, not
 assumption.
 
+## 2026-07-18 — #681 campaign opened: base-module disposal (KEPT) + design
+
+North star recorded (maintainer): after #681/#682/#683, peak build memory
+UNDER 8 GB — buildable on an 8 GB machine, Mac/Linux/Windows.
+
+Quick tier landed (88ade44f): codegen_units_emit disposes the parent's
+whole-module copy right after the bitcode write (deinit() is dead code —
+the module leaked until exit). Measured A/B on a stage compile: peak RSS
+21.1 → ~20.0 GB; wall neutral within variance (161/166/172 s runs).
+Finding: only ~1.1 GB of the ~3 GB module came back — the LLVMContext
+retains its uniquing tables. That is direct evidence that the 8 GB goal
+needs per-unit IR GENERATION (each thread's context holds one unit), not
+disposal tuning.
+
+Structural design confirmed feasible and specced on #681: per-thread
+Codegen (own context/module + cloned InternPool — MBs; ids thread-local),
+shared read-only Sema/AST/MIR via the existing raw-pointer thread
+precedent, with audit:all's frozen-Sema invariant supplying exactly the
+thread-safety guarantee the design needs. Gen takes `move MirModule` today
+and needs a borrow variant; the 82 self.intern mutation sites are the
+clone-boundary checklist. Days-class; own session with /drop-audit +
+fixpoint + battery gates.
+
 ## Remaining queue (updated)
 
 1. #686 signature scoping — the ~10-min tax on every build-layer edit; now
