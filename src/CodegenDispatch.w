@@ -74,6 +74,8 @@ impl Codegen:
     mut fn gen_generator_next_functions_from_mir():
         for bi in 0..self.mir_fn_syms_len() as i32:
             let raw_sym = self.mir_fn_sym_at(bi as i64)
+            if not self.unit_owns(raw_sym):
+                continue
             if not self.sema.generator_next_fn_syms.contains(raw_sym):
                 continue
             let body = self.mir_body_at(bi as i64)

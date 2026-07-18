@@ -19,6 +19,18 @@ impl Zcu:
         if self.last_mir_module.body_count() == 0:
             runtime_eprint("error: missing MIR input for LLVM backend")
             return 1
+        // #681: multi-unit builds generate each unit's module directly from
+        // MIR (serially — one cg alive at a time), then optimize+emit the
+        // small per-unit bitcodes on threads. Peak memory ≈ frontend + one
+        // unit module, replacing whole-module bitcode + K full parses.
+        if not module_object_mode:
+            let env_units0 = codegen_units_env_count()
+            let unit_count0 = if env_units0 > 0: env_units0 else: codegen_units_default_count(self.last_mir_module.body_count())
+            if unit_count0 > 1:
+                var backend_pool0 = pool
+                if self.last_sema.ast.decl_count() > 0:
+                    backend_pool0 = self.last_sema.ast
+                return self.compile_units_generated(backend_pool0, opt_level, output_path, debug_info, unit_count0)
         var backend_pool = pool
         var backend_intern = self.pool
         if self.last_sema.ast.decl_count() > 0:
@@ -55,25 +67,7 @@ impl Zcu:
         if do_profile:
             let codegen_ns = runtime_clock_nanos() - t_codegen
             runtime_eprint(f"[profile] llvm.gen_module  {codegen_ns / 1000000}.{(codegen_ns % 1000000) / 1000} ms")
-        // #650 codegen units: optimize + emit per deterministic unit instead
-        // of one whole-module pipeline. Module-object mode keeps the single
-        // object (--emit-obj contracts a single file: fixpoint objects and
-        // bootstrap/runtime objects stay whole). WITH_CODEGEN_UNITS overrides;
-        // otherwise large modules split by the host-aware default.
-        var unit_count = 1
-        if not module_object_mode:
-            let env_units = codegen_units_env_count()
-            unit_count = if env_units > 0: env_units else: codegen_units_default_count(self.last_mir_module.body_count())
         self.last_codegen_unit_count = 1
-        if unit_count > 1:
-            let units_rc = codegen_units_emit(cg.llmod, output_path, opt_level, unit_count, do_profile)
-            if units_rc != 0:
-                return 1
-            if runtime_file_exists(output_path) == 0:
-                runtime_eprint(f"error: codegen-units reported success but no object file exists at {output_path}")
-                return 1
-            self.last_codegen_unit_count = unit_count
-            return 0
         if opt_level > 0:
             let t_opt = runtime_clock_nanos()
             cg.optimize(opt_level)
@@ -91,6 +85,75 @@ impl Zcu:
         if do_profile:
             let emit_ns = runtime_clock_nanos() - t_emit
             runtime_eprint(f"[profile] llvm.emit_object  {emit_ns / 1000000}.{(emit_ns % 1000000) / 1000} ms")
+        0
+
+    // #681: serial per-unit generation. Each round constructs one Codegen
+    // (its own context/module; sema/intern copied exactly as the single-unit
+    // path does — only one alive at a time), generates only unit-k bodies,
+    // applies the shared global-ownership surgery, writes the unit's small
+    // bitcode, and disposes everything before the next round. Threads then
+    // optimize+emit the small bitcodes concurrently.
+    mut fn compile_units_generated(pool: AstPool, opt_level: i32, output_path: str, debug_info: bool, unit_count: i32) -> i32:
+        let do_profile = runtime_getenv("WITH_PROFILE").len() > 0
+        var backend_mir = self.last_mir_module
+        let mir_ptr = &raw const backend_mir as i64
+        var assign = codegen_units_assign_from_mir(mir_ptr, unit_count)
+        // Pin main's body to unit 0: the exit wrapper is synthesized there
+        // and must wrap the definition, not a declaration.
+        let main_sym = self.last_sema.pool_lookup_symbol("main")
+        if main_sym != 0:
+            var mi = 0
+            while mi < assign.fn_syms.len() as i32:
+                if assign.fn_syms.get(mi as i64) == main_sym:
+                    let main_slot = mi as i64
+                    with assign.units.slot(main_slot) as mut unit_slot:
+                        unit_slot.set(0)
+                mi = mi + 1
+        let t_codegen = runtime_clock_nanos()
+        let unit_bcs: Vec[str] = Vec.new()
+        var k = 0
+        while k < unit_count:
+            var backend_intern = self.pool
+            if self.last_sema.pool.state.symbol_texts.len() as i32 > 1:
+                backend_intern = self.last_sema.pool
+            var cg = Codegen.init_with_opt_and_intern(f"with_module_u{k}", opt_level, move backend_intern, self.last_sema)
+            cg.source_file = self.current_source_path
+            cg.source_text = self.current_source_text
+            cg.decl_source_paths = self.decl_source_paths
+            cg.current_decl_source_file = self.current_source_path
+            cg.module_object_mode = 0
+            if not debug_info:
+                cg.debug_info = 0
+            cg.unit_total = unit_count
+            cg.unit_index = k
+            var ai = 0
+            while ai < assign.fn_syms.len() as i32:
+                cg.unit_assign_insert(assign.fn_syms.get(ai as i64), assign.units.get(ai as i64), ai)
+                ai = ai + 1
+            let rc = cg.gen_module_from_mir(mir_ptr, pool)
+            var tracked = self.tracked_input_paths
+            self.tracked_input_paths = tracked_input_merge_unique(move tracked, &cg.tracked_input_paths)
+            if rc != 0:
+                runtime_eprint(f"error: code generation failed for unit {k}")
+                return 1
+            codegen_units_apply_global_ownership(cg.llmod, k)
+            let unit_bc = f"{output_path}.u{k}.gen.bc"
+            if wl_write_bitcode(cg.llmod, unit_bc) != 0:
+                runtime_eprint(f"error: unit bitcode write failed for unit {k}")
+                return 1
+            unit_bcs.push(unit_bc)
+            cg.deinit()
+            k = k + 1
+        if do_profile:
+            let codegen_ns = runtime_clock_nanos() - t_codegen
+            runtime_eprint(f"[profile] llvm.gen_units_serial  {codegen_ns / 1000000}.{(codegen_ns % 1000000) / 1000} ms")
+        let emit_rc = codegen_units_emit_generated_all(&unit_bcs, output_path, opt_level, do_profile)
+        if emit_rc != 0:
+            return 1
+        if runtime_file_exists(output_path) == 0:
+            runtime_eprint(f"error: codegen-units reported success but no object file exists at {output_path}")
+            return 1
+        self.last_codegen_unit_count = unit_count
         0
 
     mut fn emit_ir_backend(pool: AstPool, opt_level: i32) -> bool:

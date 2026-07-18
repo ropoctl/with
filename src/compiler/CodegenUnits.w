@@ -26,6 +26,7 @@
 
 use compiler.LlvmBridge.*
 use compiler.Runtime
+use Mir
 
 extern fn with_fs_remove_file(path: str) -> i32
 @[effect(fn_ptr: escape_value, ctx: escape_value)]
@@ -136,9 +137,14 @@ fn codegen_units_strip(unit_module: i64, plan: &CodegenUnitPlan, k: i32):
                 wl_delete_function_body(f)
             def_index = def_index + 1
         f = wl_get_next_function(f)
+    codegen_units_apply_global_ownership(unit_module, k)
+
+// Global ownership under any multi-unit pipeline (shared by the bitcode
+// strip and per-unit generation, #681): unit 0 owns non-private global
+// definitions and appending-linkage arrays (llvm.global_ctors, llvm.used);
+// other units keep private globals and reference the rest.
+pub fn codegen_units_apply_global_ownership(unit_module: i64, k: i32) -> Unit:
     if k != 0:
-        // Non-private global definitions and appending-linkage arrays
-        // (llvm.global_ctors, llvm.used) are owned by unit 0.
         var g = wl_get_first_global(unit_module)
         while g != 0:
             let next = wl_get_next_global(g)
@@ -289,6 +295,139 @@ fn codegen_units_plan_copy(plan: &CodegenUnitPlan) -> CodegenUnitPlan:
     for i in 0..plan.fn_renames.len() as i32:
         fn_renames.push(plan.fn_renames.get(i as i64))
     CodegenUnitPlan { unit_count: plan.unit_count, fn_units, fn_renames }
+
+// #681 per-unit generation: assign MIR bodies to units BEFORE any LLVM
+// exists. Cost proxy = total MIR statements per body; greedy least-loaded
+// packing over the fixed MIR body order is deterministic.
+pub type CodegenUnitAssign {
+    unit_count: i32,
+    fn_syms: Vec[i32],
+    units: Vec[i32],
+}
+
+pub fn codegen_units_assign_from_mir(mir_ptr: i64, unit_count: i32) -> CodegenUnitAssign:
+    let fn_syms: Vec[i32] = Vec.new()
+    let units: Vec[i32] = Vec.new()
+    let bin_loads: Vec[i64] = Vec.new()
+    var pre = 0
+    while pre < unit_count:
+        bin_loads.push(0)
+        pre = pre + 1
+    unsafe:
+        let m = mir_ptr as *const MirModule
+        for i in 0..(*m).bodies.len() as i32:
+            let sym = (*m).body_fn_syms.get(i as i64)
+            let body = (*m).bodies.get(i as i64)
+            var cost: i64 = 1
+            for b in 0..body.block_count():
+                cost = cost + body.bb_stmt_counts.get(b as i64) as i64
+            var best = 0
+            var best_load = bin_loads.get(0)
+            var k = 1
+            while k < unit_count:
+                if bin_loads.get(k as i64) < best_load:
+                    best = k
+                    best_load = bin_loads.get(k as i64)
+                k = k + 1
+            fn_syms.push(sym)
+            units.push(best)
+            let best_bin = best as i64
+            with bin_loads.slot(best_bin) as mut load_slot:
+                load_slot.set(best_load + cost)
+    CodegenUnitAssign { unit_count, fn_syms, units }
+
+// One GENERATED unit: parse its own small bitcode, optimize, emit. No strip
+// — bodies were filtered at generation time (#681).
+fn codegen_unit_emit_generated(bc_path: str, obj_path: str, opt_level: i32, k: i32, do_profile: bool) -> i32:
+    let t_unit = runtime_clock_nanos()
+    let ctx = wl_context_create()
+    let unit_module = wl_parse_bitcode_in_context(ctx, bc_path)
+    if unit_module == 0:
+        runtime_eprint(f"error: codegen-units generated bitcode parse failed for unit {k}")
+        wl_context_dispose(ctx)
+        return 1
+    let tm = wl_init_target_machine(unit_module, opt_level)
+    if tm == 0:
+        runtime_eprint(f"error: codegen-units target machine init failed for unit {k}")
+        wl_module_dispose(unit_module)
+        wl_context_dispose(ctx)
+        return 1
+    if opt_level > 0:
+        wl_optimize(unit_module, tm, opt_level)
+    let unit_obj = codegen_unit_object_path(obj_path, k)
+    if wl_emit_object(tm, unit_module, unit_obj) != 0:
+        runtime_eprint(f"error: codegen-units emit failed for unit {k}: {unit_obj}")
+        wl_dispose_target_machine(tm)
+        wl_module_dispose(unit_module)
+        wl_context_dispose(ctx)
+        return 1
+    wl_dispose_target_machine(tm)
+    wl_module_dispose(unit_module)
+    wl_context_dispose(ctx)
+    if do_profile:
+        let unit_ns = runtime_clock_nanos() - t_unit
+        runtime_eprint(f"[profile] llvm.unit{k}  {unit_ns / 1000000}.{(unit_ns % 1000000) / 1000} ms")
+    0
+
+type CodegenUnitEmitJob {
+    bc_path: str,
+    obj_path: str,
+    opt_level: i32,
+    unit_index: i32,
+    do_profile: i32,
+    rc: i32,
+}
+
+unsafe fn codegen_unit_emit_thread_entry(arg: *mut u8) -> i32:
+    let job = arg as *mut CodegenUnitEmitJob
+    (*job).rc = codegen_unit_emit_generated((*job).bc_path, (*job).obj_path, (*job).opt_level, (*job).unit_index, (*job).do_profile != 0)
+    0
+
+// Optimize + emit every generated unit bitcode on its own thread; a failed
+// spawn degrades that unit to inline execution. Removes each unit bitcode
+// file on success.
+pub fn codegen_units_emit_generated_all(unit_bc_paths: &Vec[str], obj_path: str, opt_level: i32, do_profile: bool) -> i32:
+    let unit_count = unit_bc_paths.len() as i32
+    let jobs: Vec[CodegenUnitEmitJob] = Vec.new()
+    var ji = 0
+    while ji < unit_count:
+        jobs.push(CodegenUnitEmitJob {
+            bc_path: unit_bc_paths.get(ji as i64),
+            obj_path,
+            opt_level,
+            unit_index: ji,
+            do_profile: if do_profile: 1 else: 0,
+            rc: 0,
+        })
+        ji = ji + 1
+    let handles: Vec[i64] = Vec.new()
+    var k = 0
+    while k < unit_count:
+        unsafe:
+            let job_ptr = (jobs.ptr as *mut CodegenUnitEmitJob) + k as u64
+            let handle = with_thread_spawn(codegen_unit_emit_thread_entry as *mut u8, job_ptr as *mut u8)
+            if handle < 0:
+                (*job_ptr).rc = codegen_unit_emit_generated((*job_ptr).bc_path, obj_path, opt_level, k, do_profile)
+            else:
+                handles.push(handle)
+        k = k + 1
+    var join_rc = 0
+    var hi = 0
+    while hi < handles.len() as i32:
+        let rc = with_thread_join(handles.get(hi as i64))
+        if rc != 0 and join_rc == 0:
+            join_rc = rc
+        hi = hi + 1
+    var unit_rc = join_rc
+    var ri = 0
+    while ri < unit_count:
+        if jobs.get(ri as i64).rc != 0 and unit_rc == 0:
+            unit_rc = jobs.get(ri as i64).rc
+        let _ = with_fs_remove_file(unit_bc_paths.get(ri as i64))
+        ri = ri + 1
+    if unit_rc != 0:
+        runtime_eprint(f"error: codegen-units generated emit failed with exit code {unit_rc}")
+    unit_rc
 
 pub fn codegen_unit_extra_objects(obj_path: str, unit_count: i32) -> Vec[str]:
     let extras: Vec[str] = Vec.new()

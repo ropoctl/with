@@ -442,6 +442,14 @@ type Codegen {
     // Wave 10 MIR backend input (optional).
     mir_dispatch_count: i32,
     mir_ptr: i64,
+    // #681 per-unit generation: when unit_total > 1, this cg instance
+    // generates bodies only for fns assigned to unit_index; everything else
+    // stays a Pass-1 declaration. Synthesized fns (runtime init, wrapped
+    // main) are pinned to unit 0 (main's body is force-assigned there).
+    unit_total: i32,
+    unit_index: i32,
+    unit_assign: HashMap[i32, i32],
+    unit_rename_index: HashMap[i32, i32],
     mir_local_ptrs: HashMap[i32, i64],
     mir_local_values: HashMap[i32, i64],
     mir_memory_locals: HashMap[i32, i32],
@@ -962,6 +970,10 @@ fn Codegen.init_with_opt(module_name: str, opt_level: i32) -> Codegen:
         tracked_input_paths: Vec.new(),
         mir_dispatch_count: 0,
         mir_ptr: 0,
+        unit_total: 0,
+        unit_index: 0,
+        unit_assign: HashMap.new(),
+        unit_rename_index: HashMap.new(),
         mir_local_ptrs: HashMap.new(),
         mir_local_values: HashMap.new(),
         mir_memory_locals: HashMap.new(),
@@ -1202,6 +1214,54 @@ impl Codegen:
     fn mir_type_name_at(tid: i32) -> i32: unsafe { (*(self.mir_ptr as *const MirModule)).mir_get_type_name(tid) }
     fn mir_type_kinds_get(i: i64) -> i32: unsafe { (*(self.mir_ptr as *const MirModule)).sema_type_kinds.get(i) }
     fn mir_type_d0_get(i: i64) -> i32: unsafe { (*(self.mir_ptr as *const MirModule)).sema_type_d0.get(i) }
+
+    fn unit_owns(sym: i32) -> bool:
+        if self.unit_total <= 1:
+            return true
+        let u = self.unit_assign.get(sym)
+        (if u.is_some(): u.unwrap() else: 0) == self.unit_index
+
+    // Dual-key the assignment: MIR carries sema-space syms, but codegen
+    // paths (and the demotion walk's name lookups) resolve in cg-intern
+    // space. Both keys map to the same unit and rename index.
+    mut fn unit_assign_insert(sema_sym: i32, unit: i32, ridx: i32):
+        self.unit_assign.insert(sema_sym, unit)
+        self.unit_rename_index.insert(sema_sym, ridx)
+        let alias_text = self.sema_symbol_text(sema_sym)
+        if alias_text.len() > 0:
+            let cg_sym = self.intern.intern(alias_text)
+            if cg_sym != sema_sym:
+                self.unit_assign.insert(cg_sym, unit)
+                self.unit_rename_index.insert(cg_sym, ridx)
+
+    // Units other than the owner must not DEFINE externally-linked fns they
+    // did not plan for (synthesized bodies — e.g. prelude trait defaults —
+    // are emitted by passes shared across units). Deterministic module walk;
+    // renamed __wcu$ fns are owner-defined already, internal/private fns are
+    // legitimately per-unit (trampolines), declarations are untouched.
+    mut fn unit_demote_foreign_definitions():
+        if self.unit_total <= 1 or self.unit_index == 0:
+            return
+        var f = wl_get_first_function(self.llmod)
+        while f != 0:
+            if wl_fn_is_declaration(f) == 0 and wl_get_linkage(f) == wl_external_linkage():
+                let nm = wl_get_value_name(f)
+                if not nm.starts_with("__wcu$") and nm != "main":
+                    let nm_sym = self.intern.intern(nm)
+                    if not self.unit_owns(nm_sym):
+                        wl_delete_function_body(f)
+            f = wl_get_next_function(f)
+
+    // Non-empty when a would-be-internal planned fn is instead promoted
+    // external under a collision-proof name; identical in every unit so
+    // cross-unit calls resolve at link time (#681, the __wcu$ scheme).
+    fn unit_promoted_name(sym: i32, effective_name: str) -> str:
+        if self.unit_total <= 1:
+            return ""
+        let ridx = self.unit_rename_index.get(sym)
+        if not ridx.is_some():
+            return ""
+        f"__wcu${ridx.unwrap()}$" ++ effective_name
 
     // ── Helper: is method symbol ──────────────────────────────────────
 
@@ -4285,7 +4345,11 @@ impl Codegen:
             let is_prelude = self.current_decl_source_file.contains("lib/std/")
             if effective_name != "main" and not is_prelude and
                 not codegen_preserve_runtime_link_name(self.current_decl_source_file, effective_name):
-                wl_set_linkage(function, wl_internal_linkage())
+                let promoted = self.unit_promoted_name(name_sym, effective_name)
+                if promoted.len() > 0:
+                    wl_set_value_name(function, promoted)
+                else:
+                    wl_set_linkage(function, wl_internal_linkage())
 
         // @[weak] — set weak linkage (LLVMWeakAnyLinkage = 5)
         // Must be checked before c_export which also sets linkage.
@@ -4428,11 +4492,19 @@ impl Codegen:
             if cg_sym != fn_sym:
                 self.record_c_abi_transform(fn_sym, has_sret, sret_ty, byval_mask, byval_types, 0, direct_types, 0)
         if force_internal != 0:
-            wl_set_linkage(function, wl_internal_linkage())
+            let promoted_fi = self.unit_promoted_name(fn_sym, effective_name)
+            if promoted_fi.len() > 0:
+                wl_set_value_name(function, promoted_fi)
+            else:
+                wl_set_linkage(function, wl_internal_linkage())
         else if self.module_object_mode == 0:
             if effective_name != "main" and not self.current_decl_source_file.contains("lib/std/") and
                 not codegen_preserve_runtime_link_name(self.current_decl_source_file, effective_name):
-                wl_set_linkage(function, wl_internal_linkage())
+                let promoted_mo = self.unit_promoted_name(fn_sym, effective_name)
+                if promoted_mo.len() > 0:
+                    wl_set_value_name(function, promoted_mo)
+                else:
+                    wl_set_linkage(function, wl_internal_linkage())
 
         self.fn_values.insert(cg_sym, function)
         self.fn_fn_types.insert(cg_sym, fn_type)
@@ -4485,6 +4557,8 @@ impl Codegen:
         for bi in 0..self.mir_fn_syms_len() as i32:
             let body_sym = self.mir_fn_sym_at(bi as i64)
             if body_sym == 0:
+                continue
+            if not self.unit_owns(body_sym):
                 continue
             if not self.mir_body_is_generated_function_clause(body_sym):
                 continue
@@ -5838,19 +5912,27 @@ impl Codegen:
                     let tp_count = self.pool.fn_meta_tp_count(meta)
                     let is_generic_struct_method = self.is_method_on_generic_struct(name_sym) and self.sema.fn_node_is_generic_template(decl as i32, name_sym) != 0
                     if tp_count == 0 and self.sema.generic_fn_node_for_symbol(name_sym) == 0 and not is_generic_struct_method:
-                        self.gen_function_dispatch_at(decl, i)
+                        if self.unit_owns(name_sym):
+                            self.gen_function_dispatch_at(decl, i)
         self.gen_mir_only_functions()
         self.gen_generator_next_functions_from_mir()
 
         if self.had_error != 0:
             return 1
 
-        self.emit_module_runtime_init_helpers()
+        // Synthesized fns are pinned to unit 0 (main's MIR body is
+        // force-assigned there by the Backend, so wrapper and wrapped body
+        // land together).
+        if self.unit_total <= 1 or self.unit_index == 0:
+            self.emit_module_runtime_init_helpers()
         if self.had_error != 0:
             return 1
 
         // Wrap main for exit
-        self.wrap_main_for_exit()
+        if self.unit_total <= 1 or self.unit_index == 0:
+            self.wrap_main_for_exit()
+
+        self.unit_demote_foreign_definitions()
 
         // Finalize debug info before verification
         self.debug_finalize_module()
