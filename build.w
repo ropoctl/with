@@ -1279,6 +1279,14 @@ pub fn build(ctx: BuildCtx) -> Build:
     stage1 = stage1.dep("with-sha256")
     out = out.add_target(stage1)
 
+    // Dev tier (D14): the sanctioned iterate loop. One self-compile —
+    // seed → stage1 — yields a testable compiler at out/bootstrap/bin/
+    // with-stage1 in ~3.5 min. The full chain + fixpoint battery remains
+    // mandatory at commit/reseed/release tier.
+    var dev = target_new(.Group, "dev", "")
+    dev = dev.dep("stage1")
+    out = out.add_target(dev)
+
     var stage2 = target_new(.Action, "stage2", "").output(stage_compiler_bin("with-stage2"))
     stage2.action = run_with_compiler_build_action
     stage2 = stage2.compiler(bootstrap_compiler_bin("with-stage1"))
