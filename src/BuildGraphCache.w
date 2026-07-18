@@ -368,6 +368,13 @@ fn build_cache_test_target_sig_text(target: &BuildGraphTarget) -> str:
     sig
 
 pub fn build_cache_test_compiler_fingerprint(compiler_path: str) -> str:
+    // The stamped binary differs across commits only in its version slot
+    // (D13: the stamp is provenance, not semantics). Key verdicts on the
+    // unstamped sibling when it exists so banked passes survive
+    // commit-identity-only changes; fall back for compilers with no sibling.
+    let unstamped = compiler_path ++ ".unstamped"
+    if build_graph_rt_file_exists(unstamped) != 0:
+        return build_cache_fingerprint_file(unstamped)
     build_cache_fingerprint_file(compiler_path)
 
 pub fn build_cache_test_verdict_key(root: str, target: &BuildGraphTarget, compiler_fp: str, test_path: str) -> str:
