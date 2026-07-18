@@ -279,16 +279,34 @@ Order agreed 2026-07-18: **#681 → #682 → #683**, then the north-star
 campaign: **peak build memory UNDER 8 GB** (compiler buildable on an 8 GB
 machine, Mac/Linux/Windows).
 
-**#681 state:** quick tier LANDED (88ade44f — base-module disposal; peak
-21.1→~20.0 GB measured; wall neutral). The main course — per-unit IR
-generation from MIR — is fully designed and feasibility-confirmed in the
-issue comments (per-thread Codegen + cloned InternPool + shared read-only
-Sema/MIR; audit:all's frozen-Sema invariant is the thread-safety
-guarantee). Implement in a FRESH session against that spec; gates:
-/drop-audit before+after, fixpoint, full battery. Also see
-docs/build_time_log.md (experiment log — the loop session's record: unit
-packing, invariance wave, #686 scoped signatures = 19.7s build-layer
-sweeps, 16-unit negative result).
+**#681 state: COMPLETE (all tiers landed and pushed).**
+- 88ade44f disposal quick tier; a497d145 MIR-via-raw-pointer (the sharing
+  contract; the ~490 sites go through typed in-place-deref accessors —
+  NEVER a ref-returning accessor, that shape segfaults, filed #687);
+  bc0c9832 per-unit generation from MIR (serial gen, one cg alive at a
+  time + parallel slim emit over ~1/K-size unit bitcodes); e6c770b9
+  16-unit default (UNGATED — see FIRST ACTION above).
+- Measured: peak RSS 21.1 → 13.2 GB (−37%) at 8 units; 16 units 149.2 s /
+  15.5 GB (old pipeline: 170.9 s / 30.5 GB). Fixpoint byte-identical;
+  drop-audit 25/25; produced compiler self-checks.
+- Key mechanisms a future reader needs: fn_sym-keyed plan from MIR
+  statement counts (dual-keyed sema+cg-intern in unit_assign); Pass-2/
+  mir-only/generator-next filters; __wcu$<idx>$ declare-time promotion of
+  would-be-internal planned fns; synthesized fns pinned to unit 0 with
+  main force-assigned there; deterministic post-gen demotion walk for
+  foreign external definitions (synthesized prelude trait defaults — the
+  bring-up's one link failure); global-ownership surgery shared with the
+  old strip.
+- #681 leftovers (small): delete the dead strip pipeline
+  (codegen_units_plan/strip/emit_one/codegen_units_emit); verify the
+  small-host formula on a real 8 GB machine; the serial loop re-copies
+  sema/intern per unit round (~1 s × K — optimize only if it shows).
+
+**Next campaigns in order: #682 (prelude snapshot) → #683 (compiled build
+graph) → the 8 GB north star (remaining residency: frontend ~4 GB — #685
+arenas/slab-release + #682 both attack it).** Experiment log:
+docs/build_time_log.md (the full measured record of every kept and
+rejected change).
 
 ## Build-performance campaign (2026-07-17 session, maintainer-directed)
 
