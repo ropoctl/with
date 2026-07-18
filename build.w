@@ -1692,6 +1692,7 @@ pub fn build(ctx: BuildCtx) -> Build:
     out = out.add_target(c_migrator_tests)
 
     var issue61_regression = target_new(.Action, "issue61-regression", "").output("out/test-graph/issue61-regression")
+    issue61_regression = issue61_regression.allow_parallel()
     issue61_regression.action = issue61_regression_action
     issue61_regression = issue61_regression.input(release_compiler_bin("with"))
     issue61_regression = issue61_regression.dep("build")
@@ -1717,6 +1718,7 @@ pub fn build(ctx: BuildCtx) -> Build:
     out = out.add_target(invariance_check)
 
     var embedded_runtime_regression = target_new(.Action, "embedded-runtime-regression", "").output("out/test-graph/embedded-runtime-regression")
+    embedded_runtime_regression = embedded_runtime_regression.allow_parallel()
     embedded_runtime_regression.action = run_embedded_runtime_regression_action
     embedded_runtime_regression = embedded_runtime_regression.input(release_compiler_bin("with"))
     embedded_runtime_regression = embedded_runtime_regression.dep("build")
