@@ -6,6 +6,55 @@ fn br_fail(ctx: &ActionCtx, message: str) -> i32:
     ctx.diagnostics().error("compat-runtime-source: " ++ message)
     1
 
+// Stage-chain ancestor actions live HERE, not in build.w: the root module's
+// use closure spans every build/ file, so a root-defined action's signature
+// (#686 action_source_paths) would make the stage chain stale on ANY
+// build-layer edit. This module's closure is std.build only.
+pub fn run_write_empty_file_action(ctx: ActionCtx) -> i32:
+    let output = ctx.output()
+    if output.len() == 0:
+        ctx.diagnostics().error(ctx.target_name() ++ ": missing output")
+        return 1
+    let dir = br_dirname(output)
+    let fs = ctx.fs()
+    if fs.mkdir_all(dir) != 0:
+        ctx.diagnostics().error(ctx.target_name() ++ ": could not create output directory: " ++ dir)
+        return 1
+    if fs.write_text(output, "") != 0:
+        ctx.diagnostics().error(ctx.target_name() ++ ": could not write: " ++ output)
+        return 1
+    0
+
+pub fn run_prepare_bootstrap_link_root_action(ctx: ActionCtx) -> i32:
+    // Old seed compilers may prefer out/lib before out/bootstrap-lib. Remove
+    // stale unversioned runtime probes so stage1 selects the freshly generated
+    // bootstrap runtime instead of yesterday's out/lib objects.
+    let fs = ctx.fs()
+    let stale_runtime_objects: Vec[str] = Vec.new()
+    stale_runtime_objects.push("out/lib/cimport_stubs.o")
+    stale_runtime_objects.push("out/lib/rt_core.o")
+    stale_runtime_objects.push("out/lib/rt_darwin_aarch64.o")
+    stale_runtime_objects.push("out/lib/rt_linux_x86_64.o")
+    stale_runtime_objects.push("out/lib/rt_windows_x86_64.o")
+    stale_runtime_objects.push("out/lib/compat_runtime.o")
+    stale_runtime_objects.push("out/lib/panic_runtime.o")
+    stale_runtime_objects.push("out/lib/regex_runtime.o")
+    stale_runtime_objects.push("out/lib/channel_runtime.o")
+    stale_runtime_objects.push("out/lib/fiber_runtime.o")
+    stale_runtime_objects.push("out/lib/fiber.o")
+    stale_runtime_objects.push("out/lib/fiber_asm.o")
+    stale_runtime_objects.push("out/lib/fiber_stubs.o")
+    for i in 0..stale_runtime_objects.len() as i32:
+        let _remove_stale = fs.remove_file(stale_runtime_objects.get(i as i64))
+    let output = ctx.output()
+    if fs.mkdir_all(br_dirname(output)) != 0:
+        ctx.diagnostics().error(ctx.target_name() ++ ": could not create output directory: " ++ br_dirname(output))
+        return 1
+    if fs.write_text(output, "ok\n") != 0:
+        ctx.diagnostics().error(ctx.target_name() ++ ": could not write: " ++ output)
+        return 1
+    0
+
 fn br_join(base: str, child: str) -> str:
     if child.len() == 0:
         return base

@@ -57,21 +57,6 @@ fn with_ir_target_overflow(name: str, compiler: str, source: str, output: str, d
     target = target.arg("overflow=" ++ overflow)
     target
 
-fn run_write_empty_file_action(ctx: ActionCtx) -> i32:
-    let output = ctx.output()
-    if output.len() == 0:
-        ctx.diagnostics().error(ctx.target_name() ++ ": missing output")
-        return 1
-    let dir = build_project_dirname(output)
-    let fs = ctx.fs()
-    if fs.mkdir_all(dir) != 0:
-        ctx.diagnostics().error(ctx.target_name() ++ ": could not create output directory: " ++ dir)
-        return 1
-    if fs.write_text(output, "") != 0:
-        ctx.diagnostics().error(ctx.target_name() ++ ": could not write: " ++ output)
-        return 1
-    0
-
 fn run_cross_unsupported_action(ctx: ActionCtx) -> i32:
     let args = ctx.args()
     let target = if args.len() > 0: args.get(0) else: ""
@@ -87,35 +72,6 @@ fn empty_file_target(name: str, output: str) -> Target:
     target = target.write_scope(build_project_dirname(output))
     target
 
-fn run_prepare_bootstrap_link_root_action(ctx: ActionCtx) -> i32:
-    // Old seed compilers may prefer out/lib before out/bootstrap-lib. Remove
-    // stale unversioned runtime probes so stage1 selects the freshly generated
-    // bootstrap runtime instead of yesterday's out/lib objects.
-    let fs = ctx.fs()
-    let stale_runtime_objects: Vec[str] = Vec.new()
-    stale_runtime_objects.push("out/lib/cimport_stubs.o")
-    stale_runtime_objects.push("out/lib/rt_core.o")
-    stale_runtime_objects.push("out/lib/rt_darwin_aarch64.o")
-    stale_runtime_objects.push("out/lib/rt_linux_x86_64.o")
-    stale_runtime_objects.push("out/lib/rt_windows_x86_64.o")
-    stale_runtime_objects.push("out/lib/compat_runtime.o")
-    stale_runtime_objects.push("out/lib/panic_runtime.o")
-    stale_runtime_objects.push("out/lib/regex_runtime.o")
-    stale_runtime_objects.push("out/lib/channel_runtime.o")
-    stale_runtime_objects.push("out/lib/fiber_runtime.o")
-    stale_runtime_objects.push("out/lib/fiber.o")
-    stale_runtime_objects.push("out/lib/fiber_asm.o")
-    stale_runtime_objects.push("out/lib/fiber_stubs.o")
-    for i in 0..stale_runtime_objects.len() as i32:
-        let _remove_stale = fs.remove_file(stale_runtime_objects.get(i as i64))
-    let output = ctx.output()
-    if fs.mkdir_all(build_project_dirname(output)) != 0:
-        ctx.diagnostics().error(ctx.target_name() ++ ": could not create output directory: " ++ build_project_dirname(output))
-        return 1
-    if fs.write_text(output, "ok\n") != 0:
-        ctx.diagnostics().error(ctx.target_name() ++ ": could not write: " ++ output)
-        return 1
-    0
 
 fn target_with_embedded_stdlib_inputs(target: Target, ctx: &BuildCtx) -> Target:
     var out = target
@@ -145,15 +101,18 @@ fn target_with_compiler_source_inputs(target: Target, ctx: &BuildCtx) -> Target:
     let roots: Vec[str] = Vec.new()
     roots.push("src")
     roots.push("rt")
-    roots.push("build")
     roots.push("lib/std")
+    // build.w / build/*.w are deliberately NOT inputs: the stage compile
+    // never reads them, and the action-code signature (#686) already tracks
+    // the action's own module closure. Declaring them re-created the
+    // rebuild-the-world-on-any-build-edit tax.
     for ri in 0..roots.len() as i32:
         let files = ctx.fs().list_files(roots.get(ri as i64))
         for fi in 0..files.len() as i32:
             let path = files.get(fi as i64)
             if path.ends_with(".w"):
                 out = out.input(path)
-    out.input("build.w")
+    out
 
 fn build_project_trim_line(text: str) -> str:
     var end = 0
@@ -1332,6 +1291,7 @@ pub fn build(ctx: BuildCtx) -> Build:
     stage2_fixpoint = stage2_fixpoint.extra_output("out/command/stage2-fixpoint-object")
     stage2_fixpoint = stage2_fixpoint.write_scope("out/stage/bin")
     stage2_fixpoint = stage2_fixpoint.dep("stage1")
+    stage2_fixpoint = stage2_fixpoint.dep("compiler-main-source")
     stage2_fixpoint = stage2_fixpoint.dep("compat-runtime-source")
     stage2_fixpoint = stage2_fixpoint.dep("embedded-clang-resource-source")
     out = out.add_target(stage2_fixpoint)
@@ -1346,6 +1306,7 @@ pub fn build(ctx: BuildCtx) -> Build:
     stage3_fixpoint = stage3_fixpoint.extra_output("out/command/stage3-fixpoint-object")
     stage3_fixpoint = stage3_fixpoint.write_scope("out/stage/bin")
     stage3_fixpoint = stage3_fixpoint.dep("stage2")
+    stage3_fixpoint = stage3_fixpoint.dep("compiler-main-source")
     stage3_fixpoint = stage3_fixpoint.dep("compat-runtime-source")
     stage3_fixpoint = stage3_fixpoint.dep("embedded-clang-resource-source")
     out = out.add_target(stage3_fixpoint)
@@ -1785,6 +1746,10 @@ pub fn build(ctx: BuildCtx) -> Build:
     last_green = last_green.write_scope("out/command/last-green")
     last_green = last_green.dep("fixpoint")
     last_green = last_green.dep("with-sha256")
+    last_green = last_green.dep("build")
+    last_green = last_green.dep("stage1")
+    last_green = last_green.dep("stage2-fixpoint-object")
+    last_green = last_green.dep("stage3-fixpoint-object")
     out = out.add_target(last_green)
 
     var require_last_green = target_new(.Action, "require-last-green", "").output("out/command/require-last-green/ok")
