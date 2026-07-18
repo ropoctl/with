@@ -262,6 +262,17 @@ interpreted byte loop over the ~100 MB binary are not viable here.
    chain, no commits between: `:test → :test-green → :last-green →
    :update-seed → :install-user`; verify installed signature/version/exit code.
 
+## FIRST ACTION NEXT SESSION (any machine)
+
+HEAD e6c770b9 (pushed) landed the 16-unit default with maintainer-authorized
+UNGATED status (laptop switch mid-battery). Before ANY other work or reseed:
+run the full battery and confirm `GATES EXIT: 0`. If red, the suspect is the
+one-file formula change (src/compiler/CodegenUnits.w, e6c770b9) — probes
+measured it green (149.2s/15.5GB at 16 units) but the formal gate never
+finished. Everything through f60506f8 was fully gated. The seed predates the
+#681 pipeline — a reseed after the green battery delivers it (maintainer
+approval for that reseed: standing campaign directive).
+
 ## CURRENT WORK: structural campaigns, one at a time (maintainer-directed)
 
 Order agreed 2026-07-18: **#681 → #682 → #683**, then the north-star
