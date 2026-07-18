@@ -122,6 +122,34 @@ Watch item: behavior-tests read 147.7s this battery vs 109.2s earlier —
 possibly contention with the wave or run variance; check next battery
 before drawing conclusions.
 
+## 2026-07-18 — Experiment: #686 scoped action signatures (KEPT)
+
+Landed as c05c560d + 2acd23a4 after a three-layer diagnosis, each step
+forced by measurement:
+1. Closure mechanism (materializer records the action fn's defining file +
+   use closure; cache hashes exactly those) — worked on first probe, zero
+   closure misses across the graph.
+2. First failure: root-defined stage-ancestor actions (empty-file writer,
+   prepare-bootstrap-link-root) carried build.w's whole-build/ closure →
+   relocated to build/runtime.w (closure = std.build only).
+3. Second failure + the actual root cause: build/ and build.w were declared
+   INPUTS of every stage target (target_with_compiler_source_inputs) —
+   belt-and-braces from before scoped signatures existed. Removed; the
+   stage compile never reads them.
+
+A methodology lesson mid-diagnosis: probing with a stage1 driver while
+editing src invalidates everything via the driver-fingerprint signature
+component — stale-reason lines ("[stale-debug]") settled in one run what
+three theories could not. Reason-printing is worth keeping in mind as a
+permanent debugging surface.
+
+Verdict, measured: benign build/emit_c.w edit = 19.7 s no-op sweep with
+zero stale targets (was ~10 min stage-chain rebuild). No-edit sweep also
+19.9 s and byte-stable. Every future build-layer experiment in this log
+just got ~10 min cheaper — the fix that accelerates the loop itself.
+Also declared the 6 fixpoint/last-green edges the graph audit surfaced on
+its first pass over the test closure.
+
 ## Remaining queue (updated)
 
 1. #686 signature scoping — the ~10-min tax on every build-layer edit; now
