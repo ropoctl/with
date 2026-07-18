@@ -1414,12 +1414,16 @@ pub fn comp_patch_version_binary(ctx: &ActionCtx, input_path: str, output_path: 
     let output_dir = comp_dirname(output_path)
     if fs.mkdir_all(output_dir) != 0:
         return comp_fail(ctx, "could not create output directory: " ++ output_dir)
-    if fs.write_text(output_path, data) != 0:
-        return comp_fail(ctx, "could not write: " ++ output_path)
+    // Write/sign a temp sibling, then rename atomically. Writing output_path
+    // in place corrupts a currently-executing binary at that path (the
+    // installer hit the same trap; see 7ba518e2) and races any reader.
+    let tmp_path = output_path ++ ".tmp"
+    if fs.write_text(tmp_path, data) != 0:
+        return comp_fail(ctx, "could not write: " ++ tmp_path)
     // fs.chmod is a ToolFs method the comptime evaluator serves natively;
     // the raw with_fs_chmod extern is not comptime-callable.
-    if fs.chmod(output_path, 0o755) != 0:
-        return comp_fail(ctx, "could not chmod: " ++ output_path)
+    if fs.chmod(tmp_path, 0o755) != 0:
+        return comp_fail(ctx, "could not chmod: " ++ tmp_path)
     // arm64 macOS enforces the linker's ad-hoc code signature. Patching any
     // byte invalidates it, so restore an ad-hoc signature after every stamp.
     // Linux and Windows do not use this signing step.
@@ -1433,12 +1437,14 @@ pub fn comp_patch_version_binary(ctx: &ActionCtx, input_path: str, output_path: 
         codesign_args.push("--sign")
         codesign_args.push("-")
         codesign_args.push("--force")
-        codesign_args.push(comp_abs(root, output_path))
+        codesign_args.push(comp_abs(root, tmp_path))
         let result = ctx.process_runner().run_capture(codesign_args, comp_abs(root, comp_join(capture_dir, "codesign.stdout")), comp_abs(root, comp_join(capture_dir, "codesign.stderr")), 120000)
         if result.rc != 0:
             if result.stderr.len() > 0:
                 ctx.diagnostics().error(result.stderr)
-            return comp_fail(ctx, f"codesign failed with exit code {result.rc}: " ++ output_path)
+            return comp_fail(ctx, f"codesign failed with exit code {result.rc}: " ++ tmp_path)
+    if fs.rename(tmp_path, output_path) != 0:
+        return comp_fail(ctx, "could not rename " ++ tmp_path ++ " to " ++ output_path)
     0
 
 // Post-link version stamp (#650). The compiler is compiled with a commit-
