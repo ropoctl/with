@@ -34,6 +34,7 @@ fn with_object_target(name: str, compiler: str, source: str, output: str, opt: s
     target = target.arg(opt)
     target = target.write_scope("out/command/" ++ name)
     target = target.write_scope(build_project_dirname(output))
+    target = target.allow_parallel()
     if dep.len() > 0:
         target = target.dep(dep)
     target
@@ -46,6 +47,7 @@ fn with_ir_target(name: str, compiler: str, source: str, output: str, dep: str) 
     target = target.arg("--no-prelude")
     target = target.write_scope(build_project_dirname(output))
     target = target.write_scope("out/command/" ++ name)
+    target = target.allow_parallel()
     if dep.len() > 0:
         target = target.dep(dep)
     target
