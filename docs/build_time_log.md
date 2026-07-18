@@ -125,9 +125,19 @@ before drawing conclusions.
 ## Remaining queue (updated)
 
 1. #686 signature scoping — the ~10-min tax on every build-layer edit; now
-   the single highest-leverage remaining item. Design: module-granular
-   hashing (hash only the build/ file containing the action + its use
-   closure) as a tractable middle ground before #683's compiled graph.
+   the single highest-leverage remaining item. Design (verified feasible,
+   implement next): today every kind-23 signature includes
+   build_cache_hash_build_graph_sources = hash(build.w + build/* +
+   lib/std/build.w) (BuildGraphCache.w:286-290, used at :435-436). Replace
+   with a per-target `action_code_hash` computed at materialize time: the
+   materializer has the action fn's decl id (Materialize:155) and Sema maps
+   decl -> source path (Sema.w:978 decl_source_paths); hash the defining
+   file plus its `use` closure among {build.w, build/*, lib/std/build.w}
+   (file-granular over-approximation of the call closure — safe, never
+   under-invalidates). Probes after implementing: (a) comment-only edit to
+   build/emit_c.w must leave stage1/stage2/link FRESH; (b) edit to
+   build/compiler.w must invalidate stage actions; (c) build.w edit must
+   invalidate only build.w-defined actions plus changed target defs.
 2. Sema 73.8 s serial block (from the profile) — deep compiler work.
 3. #681 codegen-unit memory (enables >8 units → further backend wall cuts).
 4. #682 prelude snapshot; #683 compiled build graph; #684 separate
