@@ -88,8 +88,21 @@ and **#690** param rebinding rejected despite mutability.md. The
 drop-audit skill (.claude/skills/drop-audit/) did NOT survive the
 machine switch and is not in the repo — copy it from the old machine or
 recommit it; this cycle substituted a --debug-alloc matrix. Remaining
-D12: #678 (str) — delicate, interacts with #689 + §22. Section below is
-the original map, kept for provenance.
+D12: #678 (str) — delicate, interacts with §22. Section below is the
+original map, kept for provenance.
+
+**#689 RESOLVED as duplicate of #608's by-design ruling (2026-07-19):**
+the "reassignment leak" is the A5/#606 narrow drop gate — POD-element
+Vec buffers never free ANYWHERE (even plain scope exit) because the
+compiler copies POD Vec headers as cheap handles; freeing would
+double-free. The "wide flip" (Vecs own their buffers) is a deliberate,
+UNSCHEDULED migration (#608 says refile as a project when scheduled).
+User-Drop types drop-on-reassign correctly today (verified 1,2,2
+allocator-silent). Two follow-ons for the maintainer: (1) the wide flip
+is a candidate 8 GB-north-star lever (the compiler's own POD buffers
+never free — part of the 4.9 GB frontend envelope); (2) D12 heap-owner
+bare-self could be enabled for user-Drop-bearing owners now if wanted
+(their assign-drop path already works).
 
 ### D12 (original map) — `mut fn` mutates in place on EVERY owner type  →  umbrella #644, impl #677 (scalar) + #678 (str)
 
