@@ -1708,6 +1708,11 @@ pub fn build(ctx: BuildCtx) -> Build:
     tests = tests.dep("native-spec-tests")
     tests = tests.dep("native-phase-tests")
     tests = tests.dep("comptime-diff-tests")
+    // Allocator lane in the standing battery: the drop-discipline "floor
+    // eyes". First battery inclusion (2026-07-19) immediately caught
+    // two-week-old fixture rot — a lane that exists but never runs is
+    // silent debt. 14 s, input-keyed (skips when compiler+fixtures fresh).
+    tests = tests.dep("debug-alloc-tests")
     tests = tests.dep("internals-tests")
     tests = tests.dep("lexer-tests")
     tests = tests.dep("parser-tests")
