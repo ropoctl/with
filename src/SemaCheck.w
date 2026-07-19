@@ -16645,8 +16645,10 @@ impl Sema:
         0
 
     fn collection_len_method_return_type(method_name: str) -> i32:
+        // D11 (§18.6): len() is signed Int (i64) on every collection —
+        // never usize, never Option. Do not revert to usize.
         if method_name == "len":
-            return self.ty_usize as i32
+            return self.ty_i64 as i32
         if method_name == "is_empty":
             return self.ty_bool as i32
         if method_name == "len32":
@@ -16866,13 +16868,13 @@ impl Sema:
             if field == self.syms.any or field == self.syms.all or field == self.syms.none_pred:
                 return self.ty_bool as i32
             if field == self.syms.position:
-                return self.ensure_option_type_for(self.ty_usize as i32)
+                return self.ensure_option_type_for(self.ty_i64 as i32)
             if field == self.syms.for_each:
                 return self.ty_void as i32
             if field == self.syms.reduce:
                 return self.ensure_option_type_for(iter_elem_ty)
             if field == self.syms.count:
-                return self.ty_usize as i32
+                return self.ty_i64 as i32
             if field == self.syms.collect:
                 return self.ensure_vec_type_for(iter_elem_ty)
             if field == self.syms.partition:
@@ -16915,7 +16917,7 @@ impl Sema:
                 if method_name == "len_i64":
                     return self.ty_i64 as i32
                 if method_name == "capacity":
-                    return self.ty_usize as i32
+                    return self.ty_i64 as i32
                 if method_name == "is_empty" or method_name == "push_byte" or method_name == "push_str" or method_name == "equals":
                     return self.ty_bool as i32
                 if method_name == "clear":
@@ -18574,7 +18576,7 @@ impl Sema:
                 if mc_method_name_raw == "len_i64":
                     return self.ty_i64 as i32
                 if mc_method_name_raw == "capacity":
-                    return self.ty_usize as i32
+                    return self.ty_i64 as i32
                 if mc_method_name_raw == "is_empty" or mc_method_name_raw == "push_byte" or mc_method_name_raw == "push_str" or mc_method_name_raw == "equals":
                     return self.ty_bool as i32
                 if mc_method_name_raw == "clear":
@@ -18785,13 +18787,13 @@ impl Sema:
                     if field == self.syms.min or field == self.syms.max or field == self.syms.min_by or field == self.syms.max_by or field == self.syms.find:
                         return self.ensure_option_type_for(iter_elem_ty)
                     if field == self.syms.position:
-                        return self.ensure_option_type_for(self.ty_usize as i32)
+                        return self.ensure_option_type_for(self.ty_i64 as i32)
                     if field == self.syms.any or field == self.syms.all or field == self.syms.none_pred:
                         return self.ty_bool as i32
                     if field == self.syms.for_each:
                         return self.ty_void as i32
                     if field == self.syms.count:
-                        return self.ty_usize as i32
+                        return self.ty_i64 as i32
                     if field == self.syms.collect:
                         return self.ensure_vec_type_for(iter_elem_ty)
                     if field == self.syms.partition:

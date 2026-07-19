@@ -1,7 +1,7 @@
 // Spec test: Section 18.6 — Collection Length Methods (formerly 25.47)
 //
 // Collections expose four length accessors that differ only in return type:
-//   .len()    -> usize   (natural width)
+//   .len()    -> Int (i64) — D11: signed, never usize, never Option
 //   .len32()  -> i32     (panics if the length exceeds i32 range)
 //   .len64()  -> i64
 //   .ulen32() -> u32     (panics if the length exceeds u32 range)
@@ -15,10 +15,10 @@ fn make_vec -> Vec[i32]:
     items.push(50)
     items
 
-// PASS: .len() returns usize
-fn test_vec_len_usize:
+// PASS: .len() returns Int (i64)
+fn test_vec_len_int:
     let items = make_vec()
-    let count: usize = items.len()
+    let count: Int = items.len()
     assert(count == 5)
 
 // PASS: .len32() returns i32
@@ -42,7 +42,7 @@ fn test_vec_ulen32_u32:
 // PASS: str carries the same length family
 fn test_str_len_family:
     let s = "hello"
-    let n: usize = s.len()
+    let n: Int = s.len()
     let n32: i32 = s.len32()
     let n64: i64 = s.len64()
     let un32: u32 = s.ulen32()
@@ -57,7 +57,7 @@ fn test_map_len_family:
     m.insert("a", 1)
     m.insert("b", 2)
     m.insert("c", 3)
-    let n: usize = m.len()
+    let n: Int = m.len()
     let n32: i32 = m.len32()
     let n64: i64 = m.len64()
     assert(n == 3)

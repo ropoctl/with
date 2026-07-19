@@ -22,6 +22,6 @@ fn test_optional_chain_flattened_none:
 
 fn test_optional_chain_method_wraps_non_option_return:
     let p = Profile { address: Some(Address { city: Some("NYC"), zip: "10001" }) }
-    let len: Option[usize] = p.address?.city?.len()
+    let len: Option[Int] = p.address?.city?.len()
     assert(len.is_some())
     assert(len.unwrap() == 3)

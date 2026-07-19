@@ -19,14 +19,14 @@ fn test_option_and_then_none:
 // PASS: result map_err
 fn test_result_map_err:
     let r: Result[i32, str] = Err("bad")
-    let r2: Result[i32, usize] = r.map_err(s => s.len())
+    let r2: Result[i32, Int] = r.map_err(s => s.len())
     match r2:
         Err(n) => assert(n == 3)
         Ok(_) => assert(false)
 
 fn test_result_map_err_preserves_ok:
     let r: Result[i32, str] = Ok(7)
-    let r2: Result[i32, usize] = r.map_err(s => s.len())
+    let r2: Result[i32, Int] = r.map_err(s => s.len())
     assert(r2.unwrap() == 7)
 
 // PASS: result map
