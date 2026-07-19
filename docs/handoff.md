@@ -358,6 +358,16 @@ measured — #685 arenas/slab-release + #682 both attack it; the emit side
 is now windowed).** Experiment log: docs/build_time_log.md (the full
 measured record of every kept and rejected change).
 
+**#683 state: substantially DONE (c81e8173, battery-green, reseeded
+gc81e81739 + asset).** Serial build.w actions now run in-process in the
+driver — the per-action worker child (a full build.w re-eval, ~0.85–1.6 s
+each) is gone; commit-shape rebuild 13.9 → 10.4 s (−25 %). Remaining
+floor: pooled children still re-eval per action (~3 s wall per cold
+build, hidden by parallelism) and one re-eval per test target — judged
+not worth a worker-slice protocol; the serialized-graph idea is subsumed
+by #682's machinery if it ever matters. Issue closed with measurements;
+reopen if the resweep of pool-width hosts says otherwise.
+
 **#682 state: DESIGNED, not implemented** — full design + increment plan
 in the 2026-07-18 issue comment; implement in a fresh session against it.
 PREMISE CORRECTION recorded there: measured prelude cost is ~25 ms per
