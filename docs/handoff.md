@@ -358,6 +358,19 @@ measured — #685 arenas/slab-release + #682 both attack it; the emit side
 is now windowed).** Experiment log: docs/build_time_log.md (the full
 measured record of every kept and rejected change).
 
+**#682 state: DESIGNED, not implemented** — full design + increment plan
+in the 2026-07-18 issue comment; implement in a fresh session against it.
+PREMISE CORRECTION recorded there: measured prelude cost is ~25 ms per
+invocation on the 18-core host (~3–5 s wall per battery), not the study's
+"minutes" — #682's real value is as the pathfinder for #684 module
+interfaces. Maintainer may re-weigh #682-now vs #683-first on those
+numbers; order stands until they say otherwise. Key facts: prelude-closure
+AST/intern IDs currently land AFTER user decls (user-dependent offsets) —
+increment 1 is prelude-first prefix ordering, the risky reordering step,
+landed alone. Sema is SoA Vec[i32] + HashMaps (dump raw + rebuild-on-load
+respectively). Snapshot keyed on with.unstamped + prelude mode, stored
+per-tree under out/.build-state/.
+
 ## Build-performance campaign (2026-07-17 session, maintainer-directed)
 
 The maintainer ruled the ~40-min battery unacceptable and directed "fix this
