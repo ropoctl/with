@@ -17539,9 +17539,9 @@ impl Sema:
             return
         let pflags = self.ast.fn_param_flags(info.param_start, 0)
         if fn_param_is_mut_self(pflags) != 0:
-            // D12 scalar let-guard — same rule as the direct-method path.
+            // D12 scalar/str let-guard — same rule as the direct-method path.
             let d12_recv_kind = self.get_type_kind(self.resolve_alias(self.check_expr(expr) as TypeId))
-            if (d12_recv_kind == TypeKind.TY_INT or d12_recv_kind == TypeKind.TY_FLOAT or d12_recv_kind == TypeKind.TY_BOOL) and self.ast.kind(expr) == NodeKind.NK_IDENT:
+            if (d12_recv_kind == TypeKind.TY_INT or d12_recv_kind == TypeKind.TY_FLOAT or d12_recv_kind == TypeKind.TY_BOOL or d12_recv_kind == TypeKind.TY_STR) and self.ast.kind(expr) == NodeKind.NK_IDENT:
                 let d12_recv_sym = self.ast.get_data0(expr)
                 if self.scope_has(d12_recv_sym) != 0 and self.scope_lookup_mut(d12_recv_sym) == 0:
                     self.emit_error("cannot mutate immutable binding `" ++ self.pool_resolve(d12_recv_sym) ++ "`", node)
@@ -18190,12 +18190,12 @@ impl Sema:
             // handled above via the hardcoded list.
             if self.method_has_mut_self_flag(type_name_sym, field) != 0:
                 self.note_place_effect(expr, EFF_WRITE)
-                // D12 (§9.5): on a scalar owner every mut-fn write replaces the
-                // whole value, which on a `let` binding is exactly the
-                // forbidden rebinding — unlike content mutation of an
-                // aggregate (`let xs; xs.push(1)` stays OK, mutability.md).
+                // D12 (§9.5): on a scalar or str owner every mut-fn write
+                // replaces the whole value, which on a `let` binding is
+                // exactly the forbidden rebinding — unlike content mutation
+                // of an aggregate (`let xs; xs.push(1)` stays OK).
                 let d12_recv_kind = self.get_type_kind(self.resolve_alias(self.check_expr(expr) as TypeId))
-                if (d12_recv_kind == TypeKind.TY_INT or d12_recv_kind == TypeKind.TY_FLOAT or d12_recv_kind == TypeKind.TY_BOOL) and self.ast.kind(expr) == NodeKind.NK_IDENT:
+                if (d12_recv_kind == TypeKind.TY_INT or d12_recv_kind == TypeKind.TY_FLOAT or d12_recv_kind == TypeKind.TY_BOOL or d12_recv_kind == TypeKind.TY_STR) and self.ast.kind(expr) == NodeKind.NK_IDENT:
                     let d12_recv_sym = self.ast.get_data0(expr)
                     if self.scope_has(d12_recv_sym) != 0 and self.scope_lookup_mut(d12_recv_sym) == 0:
                         self.emit_error("cannot mutate immutable binding `" ++ self.pool_resolve(d12_recv_sym) ++ "`", node)

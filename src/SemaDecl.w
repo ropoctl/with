@@ -1087,7 +1087,14 @@ impl Sema:
         if method_owner_sym == 0 or self_type_id == 0:
             return 0
         if self.pool_resolve(method_owner_sym) == "str":
-            return 0
+            // D12/#678: `mut self` on a str owner is share-place over the fat
+            // pointer — the callee rewrites the caller's {ptr,len} pair, so
+            // `self = self.slice(1, self.len())` reaches the caller. Read and
+            // plain self stay by-value: a read borrow of a Copy fat pointer
+            // is observationally a copy, and str reads are the hottest
+            // stdlib path — no reason to tax them with indirection.
+            if fn_param_is_mut_self(self.ast.fn_param_flags(param_start, param_idx)) == 0:
+                return 0
         let owner_resolved = self.resolve_alias(self_type_id as TypeId)
         let owner_kind = self.get_type_kind(owner_resolved)
         // D12 (§9.5): the receiver MODE decides share-place, not the owner's
@@ -1095,7 +1102,8 @@ impl Sema:
         // an i32 is a borrow of the caller's place, exactly as for a struct;
         // `x.bump()` mutates `x`. str stays excluded (fat pointer, #678).
         if owner_kind != TypeKind.TY_STRUCT and owner_kind != TypeKind.TY_GENERIC_INST and owner_kind != TypeKind.TY_ENUM and
-           owner_kind != TypeKind.TY_INT and owner_kind != TypeKind.TY_FLOAT and owner_kind != TypeKind.TY_BOOL:
+           owner_kind != TypeKind.TY_INT and owner_kind != TypeKind.TY_FLOAT and owner_kind != TypeKind.TY_BOOL and
+           owner_kind != TypeKind.TY_STR:
             return 0
 
         let p_type_node = self.ast.fn_param_type(param_start, param_idx)
