@@ -168,12 +168,18 @@ as comptime fns) remain — keep #665 open for those.
 - Doc-only commits (spec/decisions/handoff) don't need the battery.
 - Commit with explicit paths to keep unrelated in-flight changes out.
 
-## Reseed — CURRENT (2026-07-18, second reseed of the day)
+## Reseed — CURRENT (2026-07-18, third reseed of the day)
 
-Installed seed `~/.local/bin/with` AND `src/main` = **v0.15.1-g2765fd4da**
-(= HEAD 2765fd4d), both verified rc=0 with valid signatures. The seed now
-carries the FULL #681 per-unit generation pipeline (a497d145 / bc0c9832 /
-e6c770b9 16-unit default) on top of the build-perf campaign. The first
+Installed seed `~/.local/bin/with` AND `src/main` = **v0.15.1-gf3c65c2d7**
+(= HEAD f3c65c2d), both verified rc=0 with valid signatures; release asset
+re-uploaded to match. The seed carries the COMPLETE #681 work: per-unit
+generation (a497d145 / bc0c9832 / e6c770b9) plus the windowed emit
+concurrency + strip-pipeline deletion (0a14b07c / 60dc5ec9). Reseed
+sequencing landmine (hit live): committing ANYTHING between the battery
+and `:update-seed` restamps the binary and require-last-green rejects it —
+recover by rerunning `:test → :test-green → :last-green` (cheap; verdicts
+key on with.unstamped, D13) then `:update-seed → :install-user` with no
+commits in between. The first
 `with build` after any reseed rebuilds the chain once (seed hash is a stage1
 input — expected). **Verify every reseed with
 `~/.local/bin/with --version; echo $?`** — an in-place overwrite of the
@@ -278,10 +284,10 @@ The maintainer moved machines mid-campaign. What transferred and how:
 
 - **Seed:** the `with-darwin-aarch64` asset on the v0.15.1 release is the
   live seed channel — refreshed at each reseed (check the asset's
-  `updatedAt`, not the release publish date). Refreshed twice on
-  2026-07-18: first for the laptop switch (last fully-gated pre-#681
-  compiler), then — after the battery below went green — to
-  **g2765fd4da**, which carries the full #681 pipeline. `with build :seed`
+  `updatedAt`, not the release publish date). Refreshed three times on
+  2026-07-18: for the laptop switch (last fully-gated pre-#681 compiler),
+  then to g2765fd4da (per-unit pipeline gated), then to **gf3c65c2d7**
+  (complete #681 incl. windowed emit). `with build :seed`
   fetches it, but ONLY if the machine's current seed can still evaluate
   build.w; a too-stale seed fails EVERY subcommand including `:seed`
   itself (fingerprint + direct-gh-download recovery: see the Reseed
