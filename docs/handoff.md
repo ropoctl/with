@@ -98,11 +98,29 @@ compiler copies POD Vec headers as cheap handles; freeing would
 double-free. The "wide flip" (Vecs own their buffers) is a deliberate,
 UNSCHEDULED migration (#608 says refile as a project when scheduled).
 User-Drop types drop-on-reassign correctly today (verified 1,2,2
-allocator-silent). Two follow-ons for the maintainer: (1) the wide flip
-is a candidate 8 GB-north-star lever (the compiler's own POD buffers
-never free — part of the 4.9 GB frontend envelope); (2) D12 heap-owner
-bare-self could be enabled for user-Drop-bearing owners now if wanted
-(their assign-drop path already works).
+allocator-silent).
+
+**2026-07-19 maintainer rulings — BOTH EXECUTED:**
+- **Wide flip SCHEDULED: #691** — next cycle's headline campaign,
+  post-v0.16.0, sequenced after #685 arenas. Rust/Vale unique-ownership
+  direction (no ARC/GC); D5 share-place is the migration tool; app
+  developers type zero new characters; four battery-gated increments in
+  the issue.
+- **D12 bare-self gate REMOVED (e101e7e7, battery-green incl. the
+  :debug-alloc-tests lane, reseeded ge101e7e7e + asset):** `mut self`
+  binds mutable for EVERY owner — mode decides, uniformly.
+  `self = W{...}` has exact local-reassignment parity (incl. the
+  provisional A5/#608 POD status #691 retires). Drop-exactly-once
+  through the share-place ref param pinned in
+  da_self_replace_user_drop.w (27 drops, leak count=0); values matrix
+  in behav_d12_self_replace.w. D12 aggregate+scalar surface is now
+  COMPLETE except str (#678).
+- Bonus finding: the allocator lane ran in a battery for the first time
+  and caught two-week-old fixture rot (da_vecdrop_moved_var_reassign
+  was un-compilable since the share-place flip; modernized in 508310f2).
+  **Recommend adding debug-alloc-tests to the standing tests aggregate**
+  (small build.w change, own battery) — the lane is "floor eyes" and
+  proved it catches what nothing else does.
 
 ### D12 (original map) — `mut fn` mutates in place on EVERY owner type  →  umbrella #644, impl #677 (scalar) + #678 (str)
 
