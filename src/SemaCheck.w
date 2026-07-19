@@ -234,24 +234,6 @@ impl Sema:
             return inner_tid
         tid
 
-    // D12 (#677): a `mut self` binding is mutable — bare-self assignment
-    // writes the caller's place — only for owners whose whole-place
-    // overwrite is drop-free: scalar primitives and distinct types over
-    // them. Heap-bearing owners wait for reassignment drop elaboration
-    // (#689: today even `v = w` on a local leaks the old contents).
-    fn d12_mut_self_binding_allowed(tid: i32) -> i32:
-        if tid == 0:
-            return 0
-        let k = self.get_type_kind(self.resolve_alias(tid as TypeId))
-        if k == TypeKind.TY_INT or k == TypeKind.TY_FLOAT or k == TypeKind.TY_BOOL:
-            return 1
-        let unwrapped = self.unwrap_builtin_arg_distinct(tid)
-        if unwrapped != tid:
-            let uk = self.get_type_kind(self.resolve_alias(unwrapped as TypeId))
-            if uk == TypeKind.TY_INT or uk == TypeKind.TY_FLOAT or uk == TypeKind.TY_BOOL:
-                return 1
-        0
-
     mut fn builtin_arg_type_compatible(expected: i32, actual: i32) -> i32:
         if expected == 0 or actual == 0:
             return 1
@@ -1621,12 +1603,13 @@ impl Sema:
                 let p_name = self.ast.fn_param_name(param_start, pi)
                 let p_tid = self.sig_param_type(sig_idx, pi)
                 // D12: a `mut self` receiver IS the caller's place — bare-self
-                // assignment (`self += 1`, `self = Health(...)`) writes the
-                // place, so the binding is mutable. Scoped to drop-free owners
-                // (scalars, distinct-over-scalar) until place reassignment
-                // drops its old contents (#689 — today even `v = w` on a
-                // local leaks); heap-bearing owners keep the status quo.
-                let p_is_mut = if fn_param_is_mut_self(self.ast.fn_param_flags(param_start, pi)) != 0 and self.d12_mut_self_binding_allowed(p_tid) != 0: 1 else: 0
+                // assignment (`self += 1`, `self = Health(...)`, `self = W{...}`)
+                // writes the place, so the binding is mutable, uniformly for
+                // every owner type (mode decides, not the owner's type). The
+                // semantics match plain local reassignment exactly, including
+                // the provisional A5/#608 POD-container non-freeing (#691
+                // retires that for both paths at once).
+                let p_is_mut = if fn_param_is_mut_self(self.ast.fn_param_flags(param_start, pi)) != 0: 1 else: 0
                 self.scope_put(p_name, p_tid, p_is_mut)
                 if fn_param_is_implicit(self.ast.fn_param_flags(param_start, pi)) != 0:
                     self.implicit_binding_types.push(p_tid)
@@ -1951,9 +1934,8 @@ impl Sema:
         for pi in 0..param_count:
             let p_name = self.ast.fn_param_name(param_start, pi)
             // D12: `mut self` binds mutable — see check_fn_body_with_sig_at.
-            let p_tid = self.sig_param_type(sig_idx, pi)
-            let p_is_mut = if fn_param_is_mut_self(self.ast.fn_param_flags(param_start, pi)) != 0 and self.d12_mut_self_binding_allowed(p_tid) != 0: 1 else: 0
-            self.scope_put(p_name, p_tid, p_is_mut)
+            let p_is_mut = if fn_param_is_mut_self(self.ast.fn_param_flags(param_start, pi)) != 0: 1 else: 0
+            self.scope_put(p_name, self.sig_param_type(sig_idx, pi), p_is_mut)
 
         let ret_tid = self.sig_return_type(sig_idx)
         self.current_return_type = ret_tid as TypeId
