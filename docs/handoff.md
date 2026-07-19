@@ -409,11 +409,23 @@ machine, Mac/Linux/Windows).
   the 4.9 GB frontend envelope dominates the small-host budget). Serial
   per-unit sema/intern re-copy (~1 s × K) left as optimize-if-it-shows.
 
-**Next campaigns in order: #682 (prelude snapshot) → #683 (compiled build
-graph) → the 8 GB north star (remaining residency: frontend 4.9 GB
-measured — #685 arenas/slab-release + #682 both attack it; the emit side
-is now windowed).** Experiment log: docs/build_time_log.md (the full
-measured record of every kept and rejected change).
+**QUEUE FOR NEXT SESSION (maintainer-stated 2026-07-19):**
+1. **#678** — D12 str receivers (the last D12 tier; fat-pointer
+   IndirectPlace + §22 ephemeral/view-origin rules; delicate, own cycle).
+2. **#682 increment 1** — prelude-first prefix ordering (design + full
+   increment plan in the issue's 2026-07-18 comment; the risky global
+   decl-reordering step, land alone).
+3. **#685** — arenas/slab release (attacks the measured 4.9 GB frontend
+   envelope; explicitly sequenced BEFORE #691).
+4. **#690** — parameter rebinding per mutability.md.
+5. **#691** — the wide flip, next cycle's headline, after #685 (already
+   filed and scheduled — not an open decision).
+Plus one manual maintainer task: **copy the drop-audit skill
+(.claude/skills/drop-audit/) from the old machine** or commit it to the
+repo — it survived only there.
+
+Experiment log: docs/build_time_log.md (the full measured record of
+every kept and rejected change).
 
 **#683 state: substantially DONE (c81e8173, battery-green, reseeded
 gc81e81739 + asset).** Serial build.w actions now run in-process in the
