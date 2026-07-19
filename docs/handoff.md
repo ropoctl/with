@@ -330,16 +330,27 @@ machine, Mac/Linux/Windows).
   foreign external definitions (synthesized prelude trait defaults — the
   bring-up's one link failure); global-ownership surgery shared with the
   old strip.
-- #681 leftovers (small): delete the dead strip pipeline
-  (codegen_units_plan/strip/emit_one/codegen_units_emit); verify the
-  small-host formula on a real 8 GB machine; the serial loop re-copies
-  sema/intern per unit round (~1 s × K — optimize only if it shows).
+- #681 leftovers DONE 2026-07-18 (late session), each on its own green
+  battery: dead strip pipeline deleted (60dc5ec9, −221 lines); windowed
+  emit concurrency landed (0a14b07c). Verification finding that reshaped
+  it: peak is K-INDEPENDENT under full concurrency (15.3 GB @ K=5 / 13.2
+  @ K=8 / 14.4–15.5 @ K=16), so the old mem-cap-on-K never protected
+  small hosts — memory now bounds in-flight EMIT THREADS (join-oldest
+  window; W = (mem − 5 GiB) / (plan_cost × 36 KB / K); K = cores only).
+  Forced W=2: peak footprint 10.03 → 7.76 GB at +47 % wall; W=K big-host
+  behavior byte-identical (fixpoint green). Policy is a leaf module
+  `compiler.CodegenUnitsPolicy` with a 21-cell internals matrix — leaf
+  because test files cannot import Mir-adjacent modules (**#688**, new).
+  `WITH_CODEGEN_EMIT_WIDTH` overrides. #681 CLOSED; real-8GB-hardware
+  verification moves to the north star (needs #682/#685 frontend shrink —
+  the 4.9 GB frontend envelope dominates the small-host budget). Serial
+  per-unit sema/intern re-copy (~1 s × K) left as optimize-if-it-shows.
 
 **Next campaigns in order: #682 (prelude snapshot) → #683 (compiled build
-graph) → the 8 GB north star (remaining residency: frontend ~4 GB — #685
-arenas/slab-release + #682 both attack it).** Experiment log:
-docs/build_time_log.md (the full measured record of every kept and
-rejected change).
+graph) → the 8 GB north star (remaining residency: frontend 4.9 GB
+measured — #685 arenas/slab-release + #682 both attack it; the emit side
+is now windowed).** Experiment log: docs/build_time_log.md (the full
+measured record of every kept and rejected change).
 
 ## Build-performance campaign (2026-07-17 session, maintainer-directed)
 

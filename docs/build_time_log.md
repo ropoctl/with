@@ -26,6 +26,8 @@ from the executor's own instrumentation (`[times]` lines /
 | Stamp temp-sibling+rename (0efd2552) | robustness (self-overwrite crash window closed); 0 time |
 | #680 stage A: edge audit + 29 declared edges (76c6d969, 0262e1ed) | 0 direct; unblocks concurrency; audit self-reports regressions every graph load |
 | #680 stage B: allow_parallel worker pool (a2413f2e, 44ab0d26) | full chain 757.8 s → 684.2 s (~10%); object/IR tail now runs as cores/2-width waves; fixpoint stayed byte-identical |
+| #681 dead strip pipeline deleted (60dc5ec9) | −221 lines; codegen_units_plan/strip/emit_one/codegen_units_emit gone (superseded by per-unit generation) |
+| #681 windowed emit concurrency (0a14b07c) | memory K-cap removed — peaks are K-INDEPENDENT under full concurrency (15.3 GB @ K=5 / 13.2 @ K=8 / 14.4–15.5 @ K=16); emit threads join-oldest windowed, W = (mem − 5 GiB) / (plan_cost × 36 KB / K), calibrated plan_cost=289004 / frontend 4.9 GB; W=16 big-host baseline unchanged (149.1 s); forced W=2 footprint 10.03 → 7.76 GB at +47 % wall; 21-cell matrix pinned vs compiler.CodegenUnitsPolicy |
 
 Current state: compiler-change battery ≈ 25 min (build 684 s + fixpoint 312 s
 + max(audit, test) ≈ 8 min + evidence tails). Non-compiler commit ≈ 16 s
