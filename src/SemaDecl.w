@@ -1090,7 +1090,12 @@ impl Sema:
             return 0
         let owner_resolved = self.resolve_alias(self_type_id as TypeId)
         let owner_kind = self.get_type_kind(owner_resolved)
-        if owner_kind != TypeKind.TY_STRUCT and owner_kind != TypeKind.TY_GENERIC_INST and owner_kind != TypeKind.TY_ENUM:
+        // D12 (§9.5): the receiver MODE decides share-place, not the owner's
+        // type — scalar primitive owners included (#677). A non-`move` self on
+        // an i32 is a borrow of the caller's place, exactly as for a struct;
+        // `x.bump()` mutates `x`. str stays excluded (fat pointer, #678).
+        if owner_kind != TypeKind.TY_STRUCT and owner_kind != TypeKind.TY_GENERIC_INST and owner_kind != TypeKind.TY_ENUM and
+           owner_kind != TypeKind.TY_INT and owner_kind != TypeKind.TY_FLOAT and owner_kind != TypeKind.TY_BOOL:
             return 0
 
         let p_type_node = self.ast.fn_param_type(param_start, param_idx)

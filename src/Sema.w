@@ -5246,9 +5246,13 @@ impl Sema:
                 let ty = self.sig_param_type(si, pi)
                 let eff = self.sig_param_effect(si, pi)
                 let vra = self.sig_param_uses_value_ref_abi(si, pi)
+                // D12: the mode outranks Copy-ness — a share-place receiver on
+                // a Copy scalar is a borrow, not a copy; a consumed (move
+                // self / escaping) param is OWNED even when the type is Copy.
                 let cls =
-                    if self.is_copy(ty as TypeId) != 0: "COPY"
-                    else if vra != 0: "SHARE-PLACE"
+                    if vra != 0: "SHARE-PLACE"
+                    else if (eff & EFF_CONSUME) != 0 or (eff & EFF_ESCAPE_VALUE) != 0: "OWNED"
+                    else if self.is_copy(ty as TypeId) != 0: "COPY"
                     else: "OWNED"
                 out = out ++ f"  param[{pi}] ty={ty} eff=[" ++ sema_effect_bits_text(eff) ++ f"] value_ref_abi={vra} -> " ++ cls ++ "\n"
         out

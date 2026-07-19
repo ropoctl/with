@@ -234,6 +234,24 @@ impl Sema:
             return inner_tid
         tid
 
+    // D12 (#677): a `mut self` binding is mutable — bare-self assignment
+    // writes the caller's place — only for owners whose whole-place
+    // overwrite is drop-free: scalar primitives and distinct types over
+    // them. Heap-bearing owners wait for reassignment drop elaboration
+    // (#689: today even `v = w` on a local leaks the old contents).
+    fn d12_mut_self_binding_allowed(tid: i32) -> i32:
+        if tid == 0:
+            return 0
+        let k = self.get_type_kind(self.resolve_alias(tid as TypeId))
+        if k == TypeKind.TY_INT or k == TypeKind.TY_FLOAT or k == TypeKind.TY_BOOL:
+            return 1
+        let unwrapped = self.unwrap_builtin_arg_distinct(tid)
+        if unwrapped != tid:
+            let uk = self.get_type_kind(self.resolve_alias(unwrapped as TypeId))
+            if uk == TypeKind.TY_INT or uk == TypeKind.TY_FLOAT or uk == TypeKind.TY_BOOL:
+                return 1
+        0
+
     mut fn builtin_arg_type_compatible(expected: i32, actual: i32) -> i32:
         if expected == 0 or actual == 0:
             return 1
@@ -1602,7 +1620,14 @@ impl Sema:
             for pi in 0..param_count:
                 let p_name = self.ast.fn_param_name(param_start, pi)
                 let p_tid = self.sig_param_type(sig_idx, pi)
-                self.scope_put(p_name, p_tid, 0)
+                // D12: a `mut self` receiver IS the caller's place — bare-self
+                // assignment (`self += 1`, `self = Health(...)`) writes the
+                // place, so the binding is mutable. Scoped to drop-free owners
+                // (scalars, distinct-over-scalar) until place reassignment
+                // drops its old contents (#689 — today even `v = w` on a
+                // local leaks); heap-bearing owners keep the status quo.
+                let p_is_mut = if fn_param_is_mut_self(self.ast.fn_param_flags(param_start, pi)) != 0 and self.d12_mut_self_binding_allowed(p_tid) != 0: 1 else: 0
+                self.scope_put(p_name, p_tid, p_is_mut)
                 if fn_param_is_implicit(self.ast.fn_param_flags(param_start, pi)) != 0:
                     self.implicit_binding_types.push(p_tid)
                     self.implicit_binding_syms.push(p_name)
@@ -1925,7 +1950,10 @@ impl Sema:
         let param_count = self.trait_method_param_counts.get(method_idx as i64)
         for pi in 0..param_count:
             let p_name = self.ast.fn_param_name(param_start, pi)
-            self.scope_put(p_name, self.sig_param_type(sig_idx, pi), 0)
+            // D12: `mut self` binds mutable — see check_fn_body_with_sig_at.
+            let p_tid = self.sig_param_type(sig_idx, pi)
+            let p_is_mut = if fn_param_is_mut_self(self.ast.fn_param_flags(param_start, pi)) != 0 and self.d12_mut_self_binding_allowed(p_tid) != 0: 1 else: 0
+            self.scope_put(p_name, p_tid, p_is_mut)
 
         let ret_tid = self.sig_return_type(sig_idx)
         self.current_return_type = ret_tid as TypeId
@@ -17529,6 +17557,12 @@ impl Sema:
             return
         let pflags = self.ast.fn_param_flags(info.param_start, 0)
         if fn_param_is_mut_self(pflags) != 0:
+            // D12 scalar let-guard — same rule as the direct-method path.
+            let d12_recv_kind = self.get_type_kind(self.resolve_alias(self.check_expr(expr) as TypeId))
+            if (d12_recv_kind == TypeKind.TY_INT or d12_recv_kind == TypeKind.TY_FLOAT or d12_recv_kind == TypeKind.TY_BOOL) and self.ast.kind(expr) == NodeKind.NK_IDENT:
+                let d12_recv_sym = self.ast.get_data0(expr)
+                if self.scope_has(d12_recv_sym) != 0 and self.scope_lookup_mut(d12_recv_sym) == 0:
+                    self.emit_error("cannot mutate immutable binding `" ++ self.pool_resolve(d12_recv_sym) ++ "`", node)
             let recv_packed = self.classify_place(expr)
             let recv_kind = unpack_place_kind(recv_packed)
             let recv_mut_state = unpack_place_mut(recv_packed)
@@ -18174,6 +18208,15 @@ impl Sema:
             // handled above via the hardcoded list.
             if self.method_has_mut_self_flag(type_name_sym, field) != 0:
                 self.note_place_effect(expr, EFF_WRITE)
+                // D12 (§9.5): on a scalar owner every mut-fn write replaces the
+                // whole value, which on a `let` binding is exactly the
+                // forbidden rebinding — unlike content mutation of an
+                // aggregate (`let xs; xs.push(1)` stays OK, mutability.md).
+                let d12_recv_kind = self.get_type_kind(self.resolve_alias(self.check_expr(expr) as TypeId))
+                if (d12_recv_kind == TypeKind.TY_INT or d12_recv_kind == TypeKind.TY_FLOAT or d12_recv_kind == TypeKind.TY_BOOL) and self.ast.kind(expr) == NodeKind.NK_IDENT:
+                    let d12_recv_sym = self.ast.get_data0(expr)
+                    if self.scope_has(d12_recv_sym) != 0 and self.scope_lookup_mut(d12_recv_sym) == 0:
+                        self.emit_error("cannot mutate immutable binding `" ++ self.pool_resolve(d12_recv_sym) ++ "`", node)
                 let recv_packed = self.classify_place(expr)
                 let recv_kind = unpack_place_kind(recv_packed)
                 let recv_mut_state = unpack_place_mut(recv_packed)
