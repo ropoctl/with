@@ -19,6 +19,7 @@
 
 use compiler.LlvmBridge.*
 use compiler.Runtime
+use compiler.CodegenUnitsPolicy
 use Mir
 
 extern fn with_fs_remove_file(path: str) -> i32
@@ -41,31 +42,29 @@ type CodegenUnitsSysInfo {
 }
 extern fn with_sysinfo(out: *mut u8) -> i32
 
-// Default unit count for the build-to-binary path. Split only when the
+// Default unit count for the build-to-binary path: split only when the
 // module is large enough for per-unit generation to pay for itself, and
-// scale to cores. Under per-unit generation (#681) each thread parses a
-// ~1/K-size unit bitcode, so per-unit memory is small and roughly constant
-// in total; the memory guard models ~0.75 GB per in-flight unit on top of
-// a ~4 GB frontend. Measured on a 16-core/64 GB host: 16 units 149.2 s /
-// 15.5 GB vs 8 units ~162 s / 13.2 GB (old pipeline regressed at 16:
-// 170.9 s / 30.5 GB from K full-module parses).
+// scale to cores. Decision policy (and why memory never caps the count)
+// lives in compiler.CodegenUnitsPolicy.
 pub fn codegen_units_default_count(mir_body_count: i32) -> i32:
     if mir_body_count < 2000:
         return 1
     var info = CodegenUnitsSysInfo { cpu_cores: 1, memory_total: 0, page_size: 4096 }
     let _ = with_sysinfo(&info as *mut u8)
-    var k = if info.cpu_cores > 0: info.cpu_cores else: 1
-    if k > 16:
-        k = 16
-    let mem_gb = if info.memory_total > 0: info.memory_total / (1024 * 1024 * 1024) else: 8
-    let mem_cap = (((mem_gb - 4) * 4) / 3) as i32
-    if mem_cap < 2:
-        return 1
-    if k > mem_cap:
-        k = mem_cap
-    if k < 1:
-        k = 1
-    k
+    codegen_units_count_for(mir_body_count, info.cpu_cores)
+
+// Emit-phase concurrency width (#681 windowing) — policy in
+// compiler.CodegenUnitsPolicy; this wrapper reads the env override and
+// host sysinfo.
+pub fn codegen_units_emit_width(unit_count: i32, total_mir_cost: i64) -> i32:
+    let raw = runtime_getenv("WITH_CODEGEN_EMIT_WIDTH")
+    if raw.len() > 0:
+        let n = parse(raw)
+        return if n < 1: 1 else: if n > unit_count: unit_count else: n
+    var info = CodegenUnitsSysInfo { cpu_cores: 1, memory_total: 0, page_size: 4096 }
+    let _ = with_sysinfo(&info as *mut u8)
+    let mem_total = if info.memory_total > 0: info.memory_total else: 8 as i64 * 1024 * 1024 * 1024
+    codegen_units_emit_width_for(unit_count, total_mir_cost, mem_total)
 
 // Global ownership under the multi-unit pipeline (#681): unit 0 owns
 // non-private global definitions and appending-linkage arrays
@@ -105,12 +104,15 @@ pub type CodegenUnitAssign {
     unit_count: i32,
     fn_syms: Vec[i32],
     units: Vec[i32],
+    // Total statement cost across all bodies — the emit window's size input.
+    total_cost: i64,
 }
 
 pub fn codegen_units_assign_from_mir(mir_ptr: i64, unit_count: i32) -> CodegenUnitAssign:
     let fn_syms: Vec[i32] = Vec.new()
     let units: Vec[i32] = Vec.new()
     let bin_loads: Vec[i64] = Vec.new()
+    var total_cost: i64 = 0
     var pre = 0
     while pre < unit_count:
         bin_loads.push(0)
@@ -123,6 +125,7 @@ pub fn codegen_units_assign_from_mir(mir_ptr: i64, unit_count: i32) -> CodegenUn
             var cost: i64 = 1
             for b in 0..body.block_count():
                 cost = cost + body.bb_stmt_counts.get(b as i64) as i64
+            total_cost = total_cost + cost
             var best = 0
             var best_load = bin_loads.get(0)
             var k = 1
@@ -136,7 +139,7 @@ pub fn codegen_units_assign_from_mir(mir_ptr: i64, unit_count: i32) -> CodegenUn
             let best_bin = best as i64
             with bin_loads.slot(best_bin) as mut load_slot:
                 load_slot.set(best_load + cost)
-    CodegenUnitAssign { unit_count, fn_syms, units }
+    CodegenUnitAssign { unit_count, fn_syms, units, total_cost }
 
 // One GENERATED unit: parse its own small bitcode, optimize, emit. No strip
 // — bodies were filtered at generation time (#681).
@@ -185,11 +188,16 @@ unsafe fn codegen_unit_emit_thread_entry(arg: *mut u8) -> i32:
     (*job).rc = codegen_unit_emit_generated((*job).bc_path, (*job).obj_path, (*job).opt_level, (*job).unit_index, (*job).do_profile != 0)
     0
 
-// Optimize + emit every generated unit bitcode on its own thread; a failed
-// spawn degrades that unit to inline execution. Removes each unit bitcode
-// file on success.
-pub fn codegen_units_emit_generated_all(unit_bc_paths: &Vec[str], obj_path: str, opt_level: i32, do_profile: bool) -> i32:
+// Optimize + emit every generated unit bitcode on its own thread, at most
+// `window` in flight at once (join-oldest sliding window, the test-runner
+// pattern — memory admission per codegen_units_emit_width). A failed spawn
+// degrades that unit to inline execution. Removes each unit bitcode file
+// on success.
+pub fn codegen_units_emit_generated_all(unit_bc_paths: &Vec[str], obj_path: str, opt_level: i32, do_profile: bool, window: i32) -> i32:
     let unit_count = unit_bc_paths.len() as i32
+    var w = if window < 1: 1 else: window
+    if w > unit_count:
+        w = unit_count
     let jobs: Vec[CodegenUnitEmitJob] = Vec.new()
     var ji = 0
     while ji < unit_count:
@@ -203,6 +211,8 @@ pub fn codegen_units_emit_generated_all(unit_bc_paths: &Vec[str], obj_path: str,
         })
         ji = ji + 1
     let handles: Vec[i64] = Vec.new()
+    var join_rc = 0
+    var next_join = 0
     var k = 0
     while k < unit_count:
         unsafe:
@@ -212,14 +222,17 @@ pub fn codegen_units_emit_generated_all(unit_bc_paths: &Vec[str], obj_path: str,
                 (*job_ptr).rc = codegen_unit_emit_generated((*job_ptr).bc_path, obj_path, opt_level, k, do_profile)
             else:
                 handles.push(handle)
+                if handles.len() as i32 - next_join >= w:
+                    let rc = with_thread_join(handles.get(next_join as i64))
+                    if rc != 0 and join_rc == 0:
+                        join_rc = rc
+                    next_join = next_join + 1
         k = k + 1
-    var join_rc = 0
-    var hi = 0
-    while hi < handles.len() as i32:
-        let rc = with_thread_join(handles.get(hi as i64))
+    while next_join < handles.len() as i32:
+        let rc = with_thread_join(handles.get(next_join as i64))
         if rc != 0 and join_rc == 0:
             join_rc = rc
-        hi = hi + 1
+        next_join = next_join + 1
     var unit_rc = join_rc
     var ri = 0
     while ri < unit_count:

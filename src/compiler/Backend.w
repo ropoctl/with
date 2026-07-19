@@ -147,7 +147,10 @@ impl Zcu:
         if do_profile:
             let codegen_ns = runtime_clock_nanos() - t_codegen
             runtime_eprint(f"[profile] llvm.gen_units_serial  {codegen_ns / 1000000}.{(codegen_ns % 1000000) / 1000} ms")
-        let emit_rc = codegen_units_emit_generated_all(&unit_bcs, output_path, opt_level, do_profile)
+        let emit_window = codegen_units_emit_width(unit_count, assign.total_cost)
+        if do_profile:
+            runtime_eprint(f"[profile] llvm.units plan_cost={assign.total_cost} window={emit_window}/{unit_count}")
+        let emit_rc = codegen_units_emit_generated_all(&unit_bcs, output_path, opt_level, do_profile, emit_window)
         if emit_rc != 0:
             return 1
         if runtime_file_exists(output_path) == 0:
