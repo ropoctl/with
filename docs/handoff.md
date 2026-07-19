@@ -21,7 +21,17 @@ The single most important rule for the incoming agent:
 
 ## Active work — the two canonized-but-unimplemented rulings
 
-### D11 — `len()` is signed `Int` (i64), never `usize`, never `Option`  →  issue #630
+### D11 — IMPLEMENTED 2026-07-19 (a80c38c0, battery-green, reseeded ga80c38c0c)
+
+`len()` → `Int` (i64) landed exactly per the map below: the seven sema
+sites flipped (len/count/capacity → i64, position → Option[i64]);
+size/align stayed usize; compiler sources and lib/std needed ZERO changes
+(dual-compatible — the field-form `.len` was already i64). Fixtures:
+behav_len_signed.w (new), underflow panic re-pinned via pure u64, spec
+18.6 + two §10.3 tests updated to the Int surface. #630 CLOSED. The
+section below is the original implementation map, kept for provenance.
+
+### D11 (original map) — `len()` is signed `Int` (i64), never `usize`, never `Option`  →  issue #630
 
 **Ruling (decisions.md D11, canonized in ad6912c3):** `.len()` on every
 collection returns `Int` (i64). Never wrapped in `Option` (a held container
