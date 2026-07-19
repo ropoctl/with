@@ -75,7 +75,23 @@ The panic-message fix (f0c627ca) already landed on #630 and named the trap
 (`integer overflow: u64 subtraction wrapped below zero`); D11 removes the trap
 itself.
 
-### D12 — `mut fn` mutates in place on EVERY owner type  →  umbrella #644, impl #677 (scalar) + #678 (str)
+### D12 — SCALAR TIER IMPLEMENTED 2026-07-19 (566bc58b, battery-green, reseeded g566bc58ba)
+
+#677 CLOSED: scalar/distinct-over-scalar `mut fn` receivers lower via
+share-place (single D6 classifier; `--dump-abi` verdicts D12-aware);
+bare-self assignment legal for drop-free owners; `let` scalar receiver
+gets the spec's clean error. Two foundation bugs found and filed in the
+process: **#689** place reassignment never drops old contents (plain
+`v = w` on a local LEAKS on the shipped compiler — MIR assign lowering
+has no drop elaboration; blocks heap-owner bare-self and parts of #678)
+and **#690** param rebinding rejected despite mutability.md. The
+drop-audit skill (.claude/skills/drop-audit/) did NOT survive the
+machine switch and is not in the repo — copy it from the old machine or
+recommit it; this cycle substituted a --debug-alloc matrix. Remaining
+D12: #678 (str) — delicate, interacts with #689 + §22. Section below is
+the original map, kept for provenance.
+
+### D12 (original map) — `mut fn` mutates in place on EVERY owner type  →  umbrella #644, impl #677 (scalar) + #678 (str)
 
 **Ruling (decisions.md D12, canonized in 1a016f6a):** a `mut fn` receiver
 borrows and mutates the caller's place for every owner type — scalar primitives,
