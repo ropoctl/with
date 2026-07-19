@@ -1273,17 +1273,13 @@ type BuildGraphLoadResult {
 type BuildActionRunResult {
     rc: i32,
     effects: Vec[str],
-    cache_recorded: bool,
 }
 
 fn build_action_run_result(rc: i32) -> BuildActionRunResult:
-    BuildActionRunResult { rc: rc, effects: Vec.new(), cache_recorded: false }
+    BuildActionRunResult { rc: rc, effects: Vec.new() }
 
 fn build_action_run_result_with_effects(rc: i32, effects: Vec[str]) -> BuildActionRunResult:
-    BuildActionRunResult { rc: rc, effects: effects, cache_recorded: false }
-
-fn build_action_run_result_cache_recorded(rc: i32) -> BuildActionRunResult:
-    BuildActionRunResult { rc: rc, effects: Vec.new(), cache_recorded: rc == 0 }
+    BuildActionRunResult { rc: rc, effects: effects }
 
 fn build_action_safe_label(text: str) -> str:
     var out = ""
@@ -1318,16 +1314,6 @@ fn build_target_worker_argv(target: &BuildGraphTarget, options: &BuildCommandOpt
     if options.target_explicit:
         argv = build_graph_argv_append(argv, "--target=" ++ build_graph_target_name(options.target_kind))
     argv
-
-fn run_build_action_worker_process(target: &BuildGraphTarget, options: &BuildCommandOptions) -> BuildActionRunResult:
-    let old_worker = with_getenv_str("WITH_BUILD_ACTION_WORKER")
-    let old_force = with_getenv_str("WITH_BUILD_ACTION_FORCE")
-    let _set_worker = with_setenv_str("WITH_BUILD_ACTION_WORKER", target.name)
-    let _set_force = with_setenv_str("WITH_BUILD_ACTION_FORCE", "1")
-    let rc = with_exec_argv(build_target_worker_argv(target, options))
-    let _restore_worker = with_setenv_str("WITH_BUILD_ACTION_WORKER", old_worker)
-    let _restore_force = with_setenv_str("WITH_BUILD_ACTION_FORCE", old_force)
-    build_action_run_result_cache_recorded(rc)
 
 fn build_action_clear_worker_env_for_children():
     let _clear_worker = with_setenv_str("WITH_BUILD_ACTION_WORKER", "")
@@ -1371,7 +1357,7 @@ fn build_pool_width() -> i32:
     if cores / 2 > 16: 16 else: cores / 2
 
 // Spawn an allow_parallel action target's worker without blocking; the env
-// dance mirrors run_build_action_worker_process (single-threaded driver, so
+// dance mirrors run_build_test_worker_process (single-threaded driver, so
 // set-then-spawn-then-restore is race-free). Returns the child pid.
 fn build_pool_spawn(target: &BuildGraphTarget, options: &BuildCommandOptions, stdout_path: str, stderr_path: str) -> i32:
     let old_worker = with_getenv_str("WITH_BUILD_ACTION_WORKER")
@@ -1408,9 +1394,13 @@ fn build_pool_retire_oldest(pool_names: Vec[str], pool_pids: Vec[i32], pool_t0s:
     completed_targets.push(name)
     0
 
+// #683: serial actions run IN-PROCESS — this driver already holds the
+// evaluated graph and sema; the former worker child recompiled build.w
+// (~0.85 s measured) just to reach the identical eval below. Pooled
+// targets still spawn (build_pool_spawn) because processes are what buy
+// their parallelism; this fn is also the pooled worker child's own
+// execution path (worker env set).
 unsafe fn run_build_action_from_build_w(root: str, cfg: ProjectConfig, target: &BuildGraphTarget, sema_ptr: *mut Sema, options: &BuildCommandOptions) -> BuildActionRunResult:
-    if not build_action_worker_env_enabled():
-        return run_build_action_worker_process(target, options)
     build_action_clear_worker_env_for_children()
     if target.output.len() == 0:
         with_eprint("error: action target '" ++ target.name ++ "' requires a declared output")
@@ -1786,8 +1776,7 @@ unsafe fn run_build_graph(root: str, cfg: ProjectConfig, graph: &BuildGraph, act
                     survey_failed.push(target.name)
                     continue
                 return action_result.rc
-            if not action_result.cache_recorded:
-                build_cache_record(root, target, Vec.new(), action_result.effects)
+            build_cache_record(root, target, Vec.new(), action_result.effects)
             completed_targets.push(target.name)
             continue
         let source_path = resolve_join(root, target.entry)
