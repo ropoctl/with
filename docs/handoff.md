@@ -1,11 +1,14 @@
 # Handoff: current state
 
-Updated 2026-07-18 (late). HEAD = **57970cd7** on `main` + this doc commit.
-The battery-first directive for e6c770b9 is COMPLETE — see "GATED" section
-below. The prior #489 collection-await campaign is long closed. This handoff
-covers a session that drained most of the pre-v0.16.0 bug queue and,
-critically, **canonized two BDFL rulings (D11, D12) into the spec/decision-log
-that are NOT YET IMPLEMENTED** — those are the primary pending work.
+Updated 2026-07-19. HEAD = the latest `main` doc commit, pushed.
+**Both canonized rulings are now IMPLEMENTED: D11 (a80c38c0) and D12 in
+full — scalars (566bc58b), uniform bare-self (e101e7e7), str (e823026b);
+#630/#677/#678/#644 all closed, each battery-gated and reseeded.** The
+2026-07-19 sessions also completed #681 and #683 (both closed), designed
+#682, scheduled #691 (wide flip), and put the allocator lane in the
+standing battery. See the QUEUE section for what's next (#682-inc1 →
+#685 → #690 → #691). Historical sections below keep their original maps
+for provenance; DONE markers lead each one.
 
 The single most important rule for the incoming agent:
 
