@@ -23,7 +23,10 @@ fn consume(values: Vec[W]):
 
 fn run(s: *mut i32):
     var values = mkw(s)
-    consume(values)
+    // D5 (§3.8): consume() takes ownership, so the call site says `move`.
+    // (This fixture predated the share-place flip's consume enforcement
+    // and was un-compilable for two weeks — the lane ran in no battery.)
+    consume(move values)
     values = mkw(s)
     let _ = values.len()
 
