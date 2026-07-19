@@ -409,16 +409,21 @@ machine, Mac/Linux/Windows).
   the 4.9 GB frontend envelope dominates the small-host budget). Serial
   per-unit sema/intern re-copy (~1 s × K) left as optimize-if-it-shows.
 
+**D12 IS COMPLETE (2026-07-19): #678 DONE (e823026b, battery-green,
+reseeded ge823026b0 + asset), #644 umbrella CLOSED.** Str mut-receivers
+are share-place over the fat pointer; read/plain str self deliberately
+stays by-value (hot-path). §22's reject-shorter-lived-view cell is
+vacuous until #691 (noted there). Both canonized rulings (D11 + D12)
+are now law AND implementation.
+
 **QUEUE FOR NEXT SESSION (maintainer-stated 2026-07-19):**
-1. **#678** — D12 str receivers (the last D12 tier; fat-pointer
-   IndirectPlace + §22 ephemeral/view-origin rules; delicate, own cycle).
-2. **#682 increment 1** — prelude-first prefix ordering (design + full
+1. **#682 increment 1** — prelude-first prefix ordering (design + full
    increment plan in the issue's 2026-07-18 comment; the risky global
    decl-reordering step, land alone).
-3. **#685** — arenas/slab release (attacks the measured 4.9 GB frontend
+2. **#685** — arenas/slab release (attacks the measured 4.9 GB frontend
    envelope; explicitly sequenced BEFORE #691).
-4. **#690** — parameter rebinding per mutability.md.
-5. **#691** — the wide flip, next cycle's headline, after #685 (already
+3. **#690** — parameter rebinding per mutability.md.
+4. **#691** — the wide flip, next cycle's headline, after #685 (already
    filed and scheduled — not an open decision).
 Plus one manual maintainer task: **copy the drop-audit skill
 (.claude/skills/drop-audit/) from the old machine** or commit it to the
