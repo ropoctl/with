@@ -46,6 +46,13 @@ type Zcu {
     frontend_pool: InternPool,
     diagnostics: DiagnosticList,
     imported_paths: Vec[str],
+    // #682-inc1: pool decl count (and its non-use subset) of the pre-expanded
+    // prelude closure prefix — [use decl, closure decls...] parsed BEFORE the
+    // user source so the prefix's node/intern/file ids are deterministic for
+    // a given compiler fingerprint + prelude mode. 0 = no prefix (non-prelude
+    // modes and secondary frontend entries keep the legacy order).
+    prelude_prefix_decls: i32,
+    prelude_prefix_non_use: i32,
     decl_source_paths: Vec[str],
     decl_source_file_ids: Vec[i32],
     decl_is_c_import: Vec[i32],
@@ -110,6 +117,8 @@ fn Zcu.init -> Zcu:
         // local was consumed by Sema.placeholder above).
         diagnostics: sema_seed.diags,
         imported_paths: zcu_new_vec_str(),
+        prelude_prefix_decls: 0,
+        prelude_prefix_non_use: 0,
         decl_source_paths: zcu_new_vec_str(),
         decl_source_file_ids: Vec.new(),
         decl_is_c_import: Vec.new(),

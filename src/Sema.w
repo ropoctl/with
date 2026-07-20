@@ -3398,13 +3398,24 @@ impl Sema:
             return 0
         self.ensure_generic_inst_type(gi_base_sym, gi_args, gi_arg_count) as i32
 
+    // The inst accessors are kind-guarded: reading base/count/args from a
+    // NON-inst type returned whatever number lived in its d-slots — garbage
+    // that happened to be harmless under one type-table layout and a live
+    // type id under another (#682-inc1 bring-up: a pending unannotated
+    // `Vec.new()` receiver typed push literals as u7 through exactly this).
     fn get_generic_inst_base(tid: i32) -> i32:
+        if self.get_type_kind(tid as TypeId) != TypeKind.TY_GENERIC_INST:
+            return 0
         self.get_type_d0(tid)
 
     fn get_generic_inst_arg_count(tid: i32) -> i32:
+        if self.get_type_kind(tid as TypeId) != TypeKind.TY_GENERIC_INST:
+            return 0
         self.get_type_d2(tid)
 
     fn get_generic_inst_arg(tid: i32, index: i32) -> i32:
+        if self.get_type_kind(tid as TypeId) != TypeKind.TY_GENERIC_INST:
+            return 0
         let extra_start = self.get_type_d1(tid)
         self.type_extra.get((extra_start + index) as i64)
 

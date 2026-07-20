@@ -1330,50 +1330,42 @@ fn c_import_is_ident_char(ch: i32) -> bool:
     is_alpha or is_digit or ch == 95
 
 impl Zcu:
-    mut fn inject_prelude_frontend(pool: AstPool) -> AstPool:
-        if self.prelude_mode == PRELUDE_NONE():
-            return pool
-
-        let prelude_module = if self.prelude_mode == PRELUDE_CORE(): "std.prelude_core" else if self.prelude_mode == PRELUDE_ALLOC(): "std.prelude_alloc" else: "std.prelude"
-        let synthetic = "use " ++ prelude_module ++ "\n"
-
-        var lexer = Lexer.init(synthetic, 0)
-        let tokens = lexer.tokenize()
-        var parser = Parser.init_with_pool(tokens, synthetic, 0, self.pool, self.diagnostics, pool)
-        let merged_pool = parser.parse_module()
-        self.pool = parser.intern
-        self.diagnostics = parser.diags
+    // #682-inc1: expand the prelude USE (decl 0) and its transitive closure
+    // into the pool AHEAD of the user source. Dedup (imported_paths) and
+    // decl_source_paths bookkeeping match process_imports_frontend phase 1,
+    // which later sees these paths as already imported and skips re-parsing;
+    // its prelude tier is collected from the recorded prefix range instead.
+    mut fn expand_prelude_closure_frontend(pool: AstPool) -> AstPool:
+        var merged_pool = pool
+        if merged_pool.decl_count() == 0 or merged_pool.kind(merged_pool.get_decl(0)) != NodeKind.NK_USE_DECL:
+            return merged_pool
+        let first = merged_pool.get_decl(0)
+        let ps = merged_pool.get_data0(first)
+        let pc = merged_pool.get_data1(first)
+        if pc > 0:
+            let pname = self.use_path_name_frontend(merged_pool, ps, pc)
+            let fpath = self.resolve_module_path_frontend(pname, self.decl_source_dir_frontend(0))
+            if fpath.len() > 0 and self.has_imported_path(fpath) == 0:
+                self.add_imported_path(fpath)
+                merged_pool = self.parse_imported_file_frontend(fpath, merged_pool)
+            else if fpath.len() == 0:
+                self.emit_missing_import_frontend(merged_pool, first)
+        var pi = 1
+        while pi < merged_pool.decl_count():
+            let decl = merged_pool.get_decl(pi)
+            if merged_pool.kind(decl) == NodeKind.NK_USE_DECL:
+                let pps = merged_pool.get_data0(decl)
+                let ppc = merged_pool.get_data1(decl)
+                if ppc > 0 and not self.use_decl_is_local_type_selector_frontend(merged_pool, decl):
+                    let ppname = self.use_path_name_frontend(merged_pool, pps, ppc)
+                    let ppfpath = self.resolve_module_path_frontend(ppname, self.decl_source_dir_frontend(pi))
+                    if ppfpath.len() > 0 and self.has_imported_path(ppfpath) == 0:
+                        self.add_imported_path(ppfpath)
+                        merged_pool = self.parse_imported_file_frontend(ppfpath, merged_pool)
+                    else if ppfpath.len() == 0:
+                        self.emit_missing_import_frontend(merged_pool, decl)
+            pi = pi + 1
         merged_pool
-
-    // Parse the prelude USE declaration into a fresh pool, then parse the user
-    // source into the same pool so the prelude USE comes first in decl order.
-    // This ensures prelude-provided types (Vec, HashMap, etc.) are imported
-    // before any user modules that depend on them.
-    mut fn parse_with_prelude_first_mode(text: str, file_id: i32, implicit_main_mode: i32) -> AstPool:
-        let prelude_module = if self.prelude_mode == PRELUDE_CORE(): "std.prelude_core" else if self.prelude_mode == PRELUDE_ALLOC(): "std.prelude_alloc" else: "std.prelude"
-        let synthetic = "use " ++ prelude_module ++ "\n"
-
-        // Step 1: parse prelude USE into a fresh pool
-        var plexer = Lexer.init(synthetic, 0)
-        let ptokens = plexer.tokenize()
-        var pparser = Parser.init(ptokens, synthetic, 0, self.pool, self.diagnostics)
-        var pool = pparser.parse_module()
-        self.pool = pparser.intern
-        self.diagnostics = pparser.diags
-
-        // Step 2: parse user source into the same pool (appends after prelude USE)
-        var ulexer = Lexer.init(text, file_id)
-        let utokens = ulexer.tokenize()
-        var uparser = Parser.init_with_pool(utokens, text, file_id, self.pool, self.diagnostics, pool)
-        if implicit_main_mode != 0:
-            uparser.enable_implicit_main_mode()
-        pool = uparser.parse_module()
-        self.pool = uparser.intern
-        self.diagnostics = uparser.diags
-        pool
-
-    mut fn parse_with_prelude_first(text: str, file_id: i32) -> AstPool:
-        self.parse_with_prelude_first_mode(text, file_id, 0)
 
     mut fn compile_file_frontend(path: str) -> AstPool:
         self.compile_file_frontend_with_config(path, project_config_load_for_source(path))
@@ -1455,12 +1447,39 @@ impl Zcu:
         self.current_source_text = normalized_text
 
         // Phase 1+2: Lex + Parse.  When prelude is enabled, parse the prelude
-        // USE declaration first so it appears at decl position 0, ensuring
-        // prelude-provided types are imported before user modules.
+        // USE declaration first, then (#682-inc1) expand the prelude closure
+        // into the pool BEFORE the user source parses: the closure occupies a
+        // node/intern/file-id PREFIX that is byte-deterministic for a given
+        // compiler fingerprint + prelude mode — the snapshot boundary for
+        // #682's later increments. Final decl ORDER is unchanged: the
+        // three-tier import merge already emits prelude → user imports → root.
         let t_parse = runtime_clock_nanos()
         var pool: AstPool = AstPool.new()
+        self.prelude_prefix_decls = 0
+        self.prelude_prefix_non_use = 0
         if self.prelude_mode != PRELUDE_NONE():
-            pool = self.parse_with_prelude_first_mode(normalized_text, file_id, implicit_main_mode)
+            let prelude_module = if self.prelude_mode == PRELUDE_CORE(): "std.prelude_core" else if self.prelude_mode == PRELUDE_ALLOC(): "std.prelude_alloc" else: "std.prelude"
+            let synthetic = "use " ++ prelude_module ++ "\n"
+            var plexer = Lexer.init(synthetic, 0)
+            let ptokens = plexer.tokenize()
+            var pparser = Parser.init(ptokens, synthetic, 0, self.pool, self.diagnostics)
+            pool = pparser.parse_module()
+            self.pool = pparser.intern
+            self.diagnostics = pparser.diags
+            self.seed_decl_source_paths(pool, name, file_id)
+            pool = self.expand_prelude_closure_frontend(pool)
+            self.prelude_prefix_decls = pool.decl_count()
+            self.prelude_prefix_non_use = count_non_use_decls_frontend(pool)
+            let before_user = pool.decl_count()
+            var ulexer = Lexer.init(normalized_text, file_id)
+            let utokens = ulexer.tokenize()
+            var uparser = Parser.init_with_pool(utokens, normalized_text, file_id, self.pool, self.diagnostics, pool)
+            if implicit_main_mode != 0:
+                uparser.enable_implicit_main_mode()
+            pool = uparser.parse_module()
+            self.pool = uparser.intern
+            self.diagnostics = uparser.diags
+            self.append_decl_source_paths(pool.decl_count() - before_user, name, file_id)
         else:
             var lexer = Lexer.init(normalized_text, file_id)
             let tokens = lexer.tokenize()
@@ -1470,8 +1489,7 @@ impl Zcu:
             pool = parser.parse_module()
             self.pool = parser.intern
             self.diagnostics = parser.diags
-
-        self.seed_decl_source_paths(pool, name, file_id)
+            self.seed_decl_source_paths(pool, name, file_id)
         for extra_i in 0..self.extra_source_names.len() as i32:
             let extra_name = self.extra_source_names.get(extra_i as i64)
             let extra_text = frontend_normalize_source_text(self.extra_source_texts.get(extra_i as i64))
@@ -1490,7 +1508,9 @@ impl Zcu:
             let parse_ns = runtime_clock_nanos() - t_parse
             runtime_eprint(f"[profile] frontend.parse  {parse_ns / 1000000}.{(parse_ns % 1000000) / 1000} ms  decls={pool.decl_count()}")
 
-        let root_local_decl_count = count_non_use_decls_frontend(pool)
+        // #682-inc1: the pool now carries the prelude prefix ahead of user
+        // decls — the root file's own decl count excludes it.
+        let root_local_decl_count = count_non_use_decls_frontend(pool) - self.prelude_prefix_non_use
 
         if self.diagnostics.has_errors():
             self.render_all_diagnostics_frontend()
@@ -1502,7 +1522,7 @@ impl Zcu:
         // Wave 4: sidecar resolved artifact.
         let t_resolve = runtime_clock_nanos()
         var _sp_diag = self.diagnostics
-        let artifacts = resolve_from_root_pool(name, normalized_text, file_id, pool, self.pool, move _sp_diag, false)
+        let artifacts = resolve_from_root_pool_with_prefix(name, normalized_text, file_id, pool, self.pool, move _sp_diag, false, self.prelude_prefix_decls)
         if do_profile:
             let resolve_ns = runtime_clock_nanos() - t_resolve
             runtime_eprint(f"[profile] frontend.resolve  {resolve_ns / 1000000}.{(resolve_ns % 1000000) / 1000} ms")
@@ -1525,8 +1545,9 @@ impl Zcu:
         if zcu_debug_init_enabled() != 0:
             runtime_eprint("[frontend] compile_source:imports")
         // Build the sema/codegen pool via recursive syntactic import expansion.
-        // This still sees implicit prelude imports because `inject_prelude_frontend`
-        // materializes them as normal `use` declarations in the root pool.
+        // The prelude closure is already in the pool as the #682-inc1 prefix
+        // (its `use` decl sits at position 0); the merge collects that tier
+        // from the prefix range and expands only user imports.
         let t_imports = runtime_clock_nanos()
         pool = self.process_imports_frontend(pool)
         if do_profile:
@@ -1773,10 +1794,15 @@ impl Zcu:
                     merged_pool = self.parse_imported_file_frontend(fpath, merged_pool)
                 else if fpath.len() == 0:
                     self.emit_missing_import_frontend(merged_pool, first)
-            // Scan all decls added by prelude expansion (from initial_count onward).
-            // Nested USE decls get expanded transitively.
-            var pi = initial_count
-            while pi < merged_pool.decl_count():
+            // Scan the prelude-closure decls. #682-inc1: when the frontend
+            // pre-expanded the closure, it sits at the deterministic PREFIX
+            // [1..prelude_prefix_decls) ahead of the user decls (and the
+            // use-expansion above deduped to a no-op); otherwise (legacy
+            // entries) the closure was just appended from initial_count on.
+            // Nested USE decls get expanded transitively either way.
+            let prefix_decls = self.prelude_prefix_decls
+            var pi = if prefix_decls > 0: 1 else: initial_count
+            while (prefix_decls > 0 and pi < prefix_decls) or (prefix_decls == 0 and pi < merged_pool.decl_count()):
                 let decl = merged_pool.get_decl(pi)
                 let kind = merged_pool.kind(decl)
                 if kind != NodeKind.NK_USE_DECL:
@@ -1805,9 +1831,9 @@ impl Zcu:
                 pi = pi + 1
         let after_prelude = merged_pool.decl_count()
 
-        // Phase 2: Process root-file decls (positions 1..initial_count-1 if prelude,
-        // 0..initial_count-1 if no prelude). Expand user USE decls; collect non-USE decls.
-        let user_start = if has_prelude: 1 else: 0
+        // Phase 2: Process root-file decls. With the #682-inc1 prefix they
+        // start after it; legacy entries start right after the use decl.
+        let user_start = if self.prelude_prefix_decls > 0: self.prelude_prefix_decls else: if has_prelude: 1 else: 0
         for ui in user_start..initial_count:
             let decl = merged_pool.get_decl(ui)
             let kind = merged_pool.kind(decl)

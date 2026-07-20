@@ -150,6 +150,12 @@ type ResolveState {
 
     next_file_id: i32,
     emit_resolve_diags: bool,
+    // #682-inc1: when the frontend pre-expands the prelude closure into the
+    // root pool (a deterministic prefix ahead of user decls), root-module
+    // processing must skip pool decls [1..root_prefix_skip) — they belong to
+    // the prelude modules, which resolve discovers normally through the use
+    // decl at position 0. 0 = no prefix.
+    root_prefix_skip: i32,
 }
 
 fn resolve_normalize_source_text(text: str) -> str:
@@ -167,7 +173,11 @@ fn resolve_normalize_source_text(text: str) -> str:
     out.to_str()
 
 fn resolve_from_root_pool(root_path: str, root_text: str, root_file_id: i32, root_pool: AstPool, pool: InternPool, diags: DiagnosticList, emit_resolve_diags: bool) -> ResolveArtifacts:
+    resolve_from_root_pool_with_prefix(root_path, root_text, root_file_id, root_pool, pool, diags, emit_resolve_diags, 0)
+
+fn resolve_from_root_pool_with_prefix(root_path: str, root_text: str, root_file_id: i32, root_pool: AstPool, pool: InternPool, diags: DiagnosticList, emit_resolve_diags: bool, root_prefix_skip: i32) -> ResolveArtifacts:
     var state = ResolveState.init(pool, diags, emit_resolve_diags)
+    state.root_prefix_skip = root_prefix_skip
     let normalized_root_text = resolve_normalize_source_text(root_text)
     let root_dir = resolve_dirname(root_path)
     state.root_source_dir = root_dir
@@ -236,6 +246,7 @@ fn ResolveState.init(pool: InternPool, diags: DiagnosticList, emit_resolve_diags
         root_source_dir: ".",
         next_file_id: 1,
         emit_resolve_diags,
+        root_prefix_skip: 0,
     }
 
 fn resolve_node_valid(pool: AstPool, node: i32) -> bool:
@@ -295,7 +306,10 @@ impl ResolveState:
 
     mut fn process_module_with_pool(module_id: i32, source_text: str, pool: AstPool):
         self.module_processed.set_i32(module_id as i64, 1)
-        self.module_decl_counts.set_i32(module_id as i64, pool.decl_count())
+        // #682-inc1: root's own decl count excludes the prelude prefix
+        // (decl 0's use plus everything from the skip boundary on).
+        let owned_decls = if module_id == 0 and self.root_prefix_skip > 1: pool.decl_count() - (self.root_prefix_skip - 1) else: pool.decl_count()
+        self.module_decl_counts.set_i32(module_id as i64, owned_decls)
         self.module_import_starts.set_i32(module_id as i64, self.result.imports.len() as i32)
 
         let module_scope = self.add_scope(module_id, -1, -1, ScopeKind.SK_MODULE)
@@ -308,6 +322,10 @@ impl ResolveState:
 
         // Pass 1: reserve imports + top-level defs/bindings.
         for di in 0..pool.decl_count():
+            // #682-inc1: prelude-prefix decls in the root pool belong to the
+            // prelude modules (discovered via the use decl at 0) — skip them.
+            if module_id == 0 and self.root_prefix_skip > 0 and di >= 1 and di < self.root_prefix_skip:
+                continue
             let decl = pool.get_decl(di)
             let kind = pool.kind(decl)
             let start = pool.get_start(decl)

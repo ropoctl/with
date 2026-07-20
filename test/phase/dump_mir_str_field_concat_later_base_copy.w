@@ -1,7 +1,7 @@
 //! args: --dump-mir
-//! expect-check-stdout: _3 = binop(concat, copy _1.f4, copy _1.f6)
-//! expect-check-stdout: _1.f4 = copy _3
-//! expect-check-stdout-not: _1.f4 = str_concat_n([move _1.f4
+//! expect-check-stdout: _3 = binop(concat, copy _1.f87, copy _1.f339)
+//! expect-check-stdout: _1.f87 = copy _3
+//! expect-check-stdout-not: _1.f87 = str_concat_n([move _1.f87
 
 type Acc { buf: str, name: str }
 
