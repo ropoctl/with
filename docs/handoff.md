@@ -419,10 +419,29 @@ stays by-value (hot-path). §22's reject-shorter-lived-view cell is
 vacuous until #691 (noted there). Both canonized rulings (D11 + D12)
 are now law AND implementation.
 
+**#682 INCREMENT 1 LANDED (33b8517c, battery-green ×3 iterations,
+reseeded g33b8517cb + asset).** The prelude closure is a byte-deterministic
+node/intern/file-id PREFIX (218/221 AST facts identical across different
+programs; the 3 movers are post-parse trait-default synthesis, absent at
+the snapshot cut = right after expand_prelude_closure_frontend). Bring-up
+found and fixed layout-dependent garbage reads in the generic-inst
+accessors (now kind-guarded; audit blindness → #692) and re-pinned 4
+--dump-mir golden tests (intern-derived field tokens shifted; shapes
+verified identical). Increments 2-4 (serialize/mmap, sema capture, wire +
+measure) per the issue plan — fresh-session sized.
+
+**DISCOVERED 2026-07-19 (the new drop auditor's first run):**
+- **#693 SOUNDNESS: enum Drop-payload double-free at plain scope exit**
+  (shipped; post-#606 over-propagation; 8 control-flow shapes; discard
+  and match paths are clean, which is why the old lane never saw it).
+  Top of the discovered pile — pinned by the auditor's enum cells.
+- **#694**: inferless `.Some(x)` in a discard crashes codegen instead of
+  a clean sema error.
+- `tools/drop_audit.w` (landing next): the repo-committed, With-native
+  successor to the lost drop-audit skill — 60 cells (shape × op ×
+  receiver × flow), baseline-regression mode, POD cells pin #608.
+
 **QUEUE FOR NEXT SESSION (maintainer-stated 2026-07-19):**
-1. **#682 increment 1** — prelude-first prefix ordering (design + full
-   increment plan in the issue's 2026-07-18 comment; the risky global
-   decl-reordering step, land alone).
 2. **#685** — arenas/slab release (attacks the measured 4.9 GB frontend
    envelope; explicitly sequenced BEFORE #691).
 3. **#690** — parameter rebinding per mutability.md.
