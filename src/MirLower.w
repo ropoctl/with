@@ -2077,6 +2077,27 @@ impl MirBuilder:
                     let tk = self.sema.get_type_kind(resolved)
                     if tk == TypeKind.TY_PTR or tk == TypeKind.TY_REF:
                         return self.sema.get_type_d0(resolved)
+            // #687: the inverse of DEREF — `&x` / `&raw const/mut x` build a
+            // ref/ptr TO the operand's type. Missing here, `&(*(p as *const
+            // T))` fell through to void: the ref temp was void-typed and the
+            // fn's return slot got `const ()` instead of the reference, so the
+            // raw-to-ref reborrow returned garbage and segfaulted (the temp
+            // materialization is fine; only the type lookup was absent). The
+            // ref type already exists post-freeze (sema built the signature),
+            // so this is a pure frozen lookup.
+            if uop == UnaryOp.UOP_REF:
+                let inner_ty = self.expr_type(self.ast.get_data1(node))
+                if inner_ty != 0 and inner_ty != self.sema.ty_void as i32:
+                    let ref_ty = self.sema.find_exact_type(TypeKind.TY_REF, inner_ty, 0, 0) as i32
+                    if ref_ty != 0:
+                        return ref_ty
+            if uop == UnaryOp.UOP_RAW_REF_CONST or uop == UnaryOp.UOP_RAW_REF_MUT:
+                let inner_ty = self.expr_type(self.ast.get_data1(node))
+                if inner_ty != 0 and inner_ty != self.sema.ty_void as i32:
+                    let raw_mut = if uop == UnaryOp.UOP_RAW_REF_MUT: 1 else: 0
+                    let ptr_ty = self.sema.find_exact_type(TypeKind.TY_PTR, inner_ty, raw_mut, 0) as i32
+                    if ptr_ty != 0:
+                        return ptr_ty
         if kind == NodeKind.NK_VARIANT_SHORTHAND:
             var vs_sym = self.ast.get_data0(node)
             if self.sema.comp_resolved.contains(node):
