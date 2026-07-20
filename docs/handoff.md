@@ -446,8 +446,17 @@ in a discard crashes codegen instead of a clean sema error — small).
 `tools/drop_audit.w` + `:drop-audit` gate are LANDED (8d5248b0).
 
 **QUEUE FOR NEXT SESSION (maintainer-stated 2026-07-19):**
-2. **#685** — arenas/slab release (attacks the measured 4.9 GB frontend
-   envelope; explicitly sequenced BEFORE #691).
+2. **#685** — IN PROGRESS: attribution measured (the 2.9 GB pre-emit
+   holder was per-round Codegen tables, K-scaling-proven) and **inc-2
+   LANDED (8d51c2e3, reseeded g8d51c2e3b)**: consuming deinit disposes
+   all 148 table backings — envelope 4.4→3.6 GB, peak 14.7→13.8 GB,
+   zero wall cost. Boundary rules in the code: decl_source_paths is a
+   Zcu header copy (never free); Vec=inline struct vs HashMap=HANDLE
+   ABI asymmetry. Remaining (issue comments have the full plan): ~2 GB
+   residual per-round growth to attribute (K-scaling discriminator),
+   inc-1 per-phase committed-bytes instrumentation, inc-3 AST release
+   after last reader, inc-4 slab release (freelist nodes live IN pages
+   — needs per-slab restructure; sequenced last).
 3. **#690** — parameter rebinding per mutability.md.
 4. **#691** — the wide flip, next cycle's headline, after #685 (already
    filed and scheduled — not an open decision).
