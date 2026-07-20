@@ -4300,11 +4300,20 @@ impl Codegen:
         let dft = self.drop_fn_types.get(type_sym)
         if dfv.is_some() and dft.is_some():
             self.mir_emit_guarded_user_drop(ptr, ty, dfv.unwrap() as i64, dft.unwrap() as i64)
-        self.mir_emit_drop_fields_ptr(ptr, ty, type_sym, resolved)
+        // #693: an enum's payload cleanup belongs EXCLUSIVELY to the
+        // variant-switched drop below. USER-DECLARED enums are registered in
+        // the struct tables, so the struct-field glue also walked their
+        // tag+payload layout and freed the active payload a second time —
+        // every Drop-payload enum double-freed at plain scope exit.
+        // (Generic-inst enums like Option/Result miss the struct registry,
+        // which is why only user enums doubled.) Structs keep the field glue.
+        let enum_variants = self.mir_enum_variant_count(resolved)
+        if enum_variants == 0:
+            self.mir_emit_drop_fields_ptr(ptr, ty, type_sym, resolved)
         // #606: an enum (or generic enum like Option/Result) with no explicit Drop
         // impl drops the active variant's payloads. Skipped when an explicit drop
         // exists — that drop owns cleanup (no per-payload consumed tracking yet).
-        if dfv.is_none() and self.mir_enum_variant_count(resolved) > 0:
+        if dfv.is_none() and enum_variants > 0:
             self.mir_emit_drop_enum_ptr(ptr, ty, resolved)
 
     fn mir_channel_endpoint_kind(sema_ty: i32) -> i32:

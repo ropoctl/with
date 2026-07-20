@@ -8560,7 +8560,21 @@ impl MirBuilder:
         let tmp = self.new_temp(result_ty)
         let place = self.place_for_local(tmp)
         self.body.push_stmt(self.cur_bb, StmtKind.Assign, place, rv, self.ast.get_start(node))
-        self.body.new_operand(OperandKind.OK_COPY, place)
+        // #693 ROOT CAUSE: a payload moved into the variant aggregate must be
+        // CONSUMED (reset-on-move + ever-moved marking) like every other move
+        // — the drop-state PLAN skips the payload temp's scope-exit drop, but
+        // codegen's emission relies on the guard+blank that only
+        // consume_moved_operand arms. Without it the moved-out temp's drop
+        // ran unguarded on intact bytes: every Drop-payload enum double-freed
+        // at plain scope exit.
+        for cfi in 0..fields.len() as i32:
+            self.consume_moved_operand(fields.get(cfi as i64))
+        // #693 (secondary): the constructed variant is OWNED by this temp — a
+        // Drop-payload enum must MOVE into its destination; Copy stays for
+        // Copy enums only, matching every other result-operand site.
+        if self.sema.is_copy_frozen(result_ty) != 0:
+            return self.body.new_operand(OperandKind.OK_COPY, place)
+        self.body.new_operand(OperandKind.OK_MOVE, place)
 
     fn classify_intrinsic(recv_type: i32, method_name: str) -> MirIntrinsic:
         if recv_type == 0 or method_name.len() == 0:
@@ -9344,6 +9358,9 @@ impl MirBuilder:
         let tag = self.enum_variant_discriminant_for_type(result_ty, variant_sym)
         let rv = self.body.new_rvalue(RvalueKind.RK_AGGREGATE, 1, fid, tag)
         self.body.push_stmt(self.cur_bb, StmtKind.Assign, result_place, rv, span)
+        // #693: moved payload operands must be consumed (see the ctor twin).
+        for cfi in 0..fields.len() as i32:
+            self.consume_moved_operand(fields.get(cfi as i64))
 
     mut fn lower_context_error_operand(message_op: i32, source_op: i32, context_error_ty: i32, span: i32) -> i32:
         let fields: Vec[i32] = Vec.new()
