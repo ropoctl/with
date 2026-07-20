@@ -430,16 +430,20 @@ accessors (now kind-guarded; audit blindness → #692) and re-pinned 4
 verified identical). Increments 2-4 (serialize/mmap, sema capture, wire +
 measure) per the issue plan — fresh-session sized.
 
-**DISCOVERED 2026-07-19 (the new drop auditor's first run):**
-- **#693 SOUNDNESS: enum Drop-payload double-free at plain scope exit**
-  (shipped; post-#606 over-propagation; 8 control-flow shapes; discard
-  and match paths are clean, which is why the old lane never saw it).
-  Top of the discovered pile — pinned by the auditor's enum cells.
-- **#694**: inferless `.Some(x)` in a discard crashes codegen instead of
-  a clean sema error.
-- `tools/drop_audit.w` (landing next): the repo-committed, With-native
-  successor to the lost drop-audit skill — 60 cells (shape × op ×
-  receiver × flow), baseline-regression mode, POD cells pin #608.
+**#693 SQUASHED 2026-07-20 (4d429574, battery-green, reseeded
+g4d4295743 + asset):** two stacked doubles — the variant ctor never
+consumed its moved payload operands (unguarded scope-exit drop of the
+moved-out temp; the plan said skip, codegen's guard was never armed) AND
+struct-field glue also walked user-enums' layouts (they live in the
+struct tables; Option/Result miss them — why only user enums doubled).
+`with build :drop-audit` steady state: **60 cells / 0 non-PASS /
+0 regressions**; `da_enum_payload_scope_exit.w` pins it in every
+battery. Debug trail is in the issue close (IR call-site counting +
+instrumented Drop beat lldb).
+
+**Still open from the auditor's finds:** **#694** (inferless `.Some(x)`
+in a discard crashes codegen instead of a clean sema error — small).
+`tools/drop_audit.w` + `:drop-audit` gate are LANDED (8d5248b0).
 
 **QUEUE FOR NEXT SESSION (maintainer-stated 2026-07-19):**
 2. **#685** — arenas/slab release (attacks the measured 4.9 GB frontend
