@@ -137,6 +137,15 @@ enum SemaMagicIdentKind: i32:
     LINE = 2
     FN = 3
 
+// #695: a clone of the moved_field_* parallel arrays, for branch-merge of the
+// partial-move set (see save/restore/union in the checker).
+type MovedFieldSnap {
+    base: Vec[i32],
+    starts: Vec[i32],
+    counts: Vec[i32],
+    syms: Vec[i32],
+}
+
 type SemaBuiltinSymbols {
     task: i32,
     scoped_task: i32,
@@ -4217,6 +4226,52 @@ impl Sema:
         let count = snapshot.len() as i32
         for i in 0..count:
             self.bind_states.set_i32(i as i64, snapshot.get(i as i64))
+
+    // #695: partial (field/index) move state lives in the moved_field_* parallel
+    // arrays, SEPARATE from bind_states. check_if_expr / match / loop merge
+    // bind_states across branches with divergence handling, but not these — so a
+    // field moved on a divergent (returning) branch wrongly poisoned the
+    // fall-through. These mirror save/restore/merge for the field-move set.
+    fn save_moved_field_state() -> MovedFieldSnap:
+        MovedFieldSnap {
+            base: sema_clone_i32_vec(&self.moved_field_base_syms),
+            starts: sema_clone_i32_vec(&self.moved_field_path_starts),
+            counts: sema_clone_i32_vec(&self.moved_field_path_counts),
+            syms: sema_clone_i32_vec(&self.moved_field_path_syms),
+        }
+
+    mut fn restore_moved_field_state(snap: &MovedFieldSnap):
+        self.moved_field_base_syms = sema_clone_i32_vec(&snap.base)
+        self.moved_field_path_starts = sema_clone_i32_vec(&snap.starts)
+        self.moved_field_path_counts = sema_clone_i32_vec(&snap.counts)
+        self.moved_field_path_syms = sema_clone_i32_vec(&snap.syms)
+
+    // Set the live field-move set to the union of two branch-exit snapshots
+    // (a field is moved-after iff moved at some non-divergent exit). Concatenation
+    // realizes the union — duplicate (base,path) entries are harmless to the
+    // membership tests. path_starts from `b` are offset past `a`'s syms.
+    mut fn set_moved_field_union(a: &MovedFieldSnap, b: &MovedFieldSnap):
+        var base: Vec[i32] = Vec.new()
+        var starts: Vec[i32] = Vec.new()
+        var counts: Vec[i32] = Vec.new()
+        var syms: Vec[i32] = Vec.new()
+        for i in 0..a.base.len() as i32:
+            base.push(a.base.get(i as i64))
+            starts.push(a.starts.get(i as i64))
+            counts.push(a.counts.get(i as i64))
+        for i in 0..a.syms.len() as i32:
+            syms.push(a.syms.get(i as i64))
+        let a_syms_len = a.syms.len() as i32
+        for i in 0..b.base.len() as i32:
+            base.push(b.base.get(i as i64))
+            starts.push(b.starts.get(i as i64) + a_syms_len)
+            counts.push(b.counts.get(i as i64))
+        for i in 0..b.syms.len() as i32:
+            syms.push(b.syms.get(i as i64))
+        self.moved_field_base_syms = move base
+        self.moved_field_path_starts = move starts
+        self.moved_field_path_counts = move counts
+        self.moved_field_path_syms = move syms
 
     // Conservative union of move-state across two control-flow branches, for the
     // MaybeUninitialized use-checking half (see docs/branch-merge-soundness.md). A

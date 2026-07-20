@@ -8276,6 +8276,7 @@ impl Sema:
         // soundness). The old linear flow let an else-branch reinit silently overwrite a
         // then-branch move, and let the else branch see the then branch's moves.
         let entry_states = self.save_scope_states()
+        let entry_mf = self.save_moved_field_state()   // #695
         var pushed_regex_capture_scope = 0
         if self.ast.kind(cond) == NodeKind.NK_MATCH_OP:
             let rhs = self.ast.get_data1(cond)
@@ -8294,8 +8295,10 @@ impl Sema:
             self.pop_scope()
         let then_is_never = if self.get_type_kind(self.resolve_alias(then_type as TypeId)) == TypeKind.TY_NEVER: 1 else: 0
         let then_exit_states = self.save_scope_states()
+        let then_exit_mf = self.save_moved_field_state()   // #695
         // Re-analyze the else branch from the entry move-state, not the then residual.
         self.restore_scope_states(&entry_states)
+        self.restore_moved_field_state(&entry_mf)   // #695: else sees entry field-moves, not then's
 
         var result_type: TypeId = self.ty_void
         var else_is_never = 0
@@ -8349,6 +8352,17 @@ impl Sema:
         let else_exit_states = self.save_scope_states()
         let merged_states = self.merge_branch_move_states(&entry_states, &then_exit_states, then_is_never, &else_exit_states, else_is_never)
         self.restore_scope_states(&merged_states)
+        // #695: same divergence-aware merge for the partial-move set — a field
+        // moved on a diverging (returning) branch must not reach the join.
+        let else_exit_mf = self.save_moved_field_state()
+        if then_is_never != 0 and else_is_never != 0:
+            self.restore_moved_field_state(&entry_mf)
+        else if then_is_never != 0:
+            self.restore_moved_field_state(&else_exit_mf)
+        else if else_is_never != 0:
+            self.restore_moved_field_state(&then_exit_mf)
+        else:
+            self.set_moved_field_union(&then_exit_mf, &else_exit_mf)
         // §16.4: a union's last-written field is not known on all paths after a
         // branch — conservatively mark tracked unions unknown.
         self.union_clear_last_written()
