@@ -735,11 +735,13 @@ COPY` verdict. It is the direct answer to "is this parameter a borrow
 (share-place) or owned?" — do NOT infer that from MIR or reasoning; dump it.
 
 For drop-exactly-once correctness across (value shape × control flow × ownership
-op × receiver mode), run the `/drop-audit` skill
-(`.claude/skills/drop-audit/audit.py`) before and after ANY change to drop
-scheduling, ownership, or receiver lowering. One bad cell means the whole region
-is untested — audit it, don't spot-fix. The auditor classifies every failure
-against a baseline compiler so regressions self-identify.
+op × receiver mode), run `with build :drop-audit` (tools/drop_audit.w —
+candidate = the fresh release binary, baseline = the verified seed) before and
+after ANY change to drop scheduling, ownership, or receiver lowering. One bad
+cell means the whole region is untested — audit it, don't spot-fix. The auditor
+classifies every cell against the baseline compiler so regressions self-identify
+(a cell is red only when the verdicts DIFFER; known-shipped findings like #693's
+enum cells and the #608 POD-leak pins read as `same`).
 
 ### LLDB (preferred)
 ```
