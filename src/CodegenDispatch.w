@@ -4389,6 +4389,77 @@ impl Codegen:
 
         drop_fn
 
+    // #691/#679: outline a type's structural drop into a cached per-type
+    // function `__drop_struct_<sema_ty>(ptr)` instead of inlining the whole
+    // drop tree at every scope-exit site. Turns O(drop-sites × tree-size)
+    // generated IR into O(types + sites) — the wide flip made every
+    // Vec-bearing aggregate need drop, so inlining exploded compile memory
+    // past 32 GiB. The body runs UNGUARDED (the reset-on-move null guard is
+    // applied at the call site, per-local); recursion through nested types
+    // terminates because the function is declared before its body is built,
+    // so a self-referential type finds the existing declaration. Internal
+    // linkage: only ever called within its own codegen unit (#681).
+    // Returns 0 when the type should not be outlined (non-struct llvm shape /
+    // no drop) — caller falls back to inline.
+    mut fn ensure_structural_drop_fn(sema_ty: i32, llvm_ty: i64) -> i64:
+        if sema_ty <= 0 or llvm_ty == 0:
+            return 0
+        if wl_get_type_kind(llvm_ty) != wl_struct_type_kind():
+            return 0
+        if self.sema.type_needs_drop_frozen(sema_ty) == 0:
+            return 0
+        let fn_name = "__drop_struct_" ++ f"{sema_ty}"
+        let existing = wl_get_named_function(self.llmod, fn_name)
+        if existing != 0:
+            return existing
+
+        let ptr_ty = wl_ptr_type(self.context)
+        let params: Vec[i64] = Vec.new()
+        params.push(ptr_ty)
+        let fn_ty = wl_function_type(wl_void_type(self.context), vec_data_i64(&params), 1, 0)
+        let drop_fn = wl_add_function(self.llmod, fn_name, fn_ty)
+        wl_set_linkage(drop_fn, wl_internal_linkage())
+
+        let saved_fn = self.current_function
+        let saved_fn_name_sym = self.current_function_name_sym
+        let saved_fn_node = self.current_function_node
+        let saved_ret_ty = self.current_ret_type
+        let saved_bb = wl_get_insert_block(self.builder)
+        let saved_needs_guard = self.current_drop_needs_guard
+        let saved_origin_ptr = self.current_drop_origin_ptr
+        let saved_origin_len = self.current_drop_origin_len
+
+        self.current_function = drop_fn
+        self.current_function_name_sym = 0
+        self.current_function_node = 0
+        self.current_ret_type = wl_void_type(self.context)
+        // The fn body is the unconditional structural drop; the caller's guard
+        // already decided whether to run it.
+        self.current_drop_needs_guard = false
+        // A shared drop fn can't carry each call site's exact drop#N origin, but
+        // the debug allocator's origin tag must stay non-empty (double-free
+        // reports read first_drop=drop#…). Tag with a synthetic per-type origin.
+        let origin_text = "drop#struct " ++ fn_name
+        self.current_drop_origin_ptr = self.const_c_string_pointer(origin_text, wl_ptr_type(self.context))
+        self.current_drop_origin_len = wl_const_int(wl_i64_type(self.context), origin_text.len(), 0)
+
+        let entry = wl_append_bb(self.context, drop_fn, "entry")
+        wl_position_at_end(self.builder, entry)
+        self.mir_emit_drop_ptr_for_sema_type(wl_get_param(drop_fn, 0), llvm_ty, sema_ty)
+        let _ = wl_build_ret_void(self.builder)
+
+        self.current_function = saved_fn
+        self.current_function_name_sym = saved_fn_name_sym
+        self.current_function_node = saved_fn_node
+        self.current_ret_type = saved_ret_ty
+        self.current_drop_needs_guard = saved_needs_guard
+        self.current_drop_origin_ptr = saved_origin_ptr
+        self.current_drop_origin_len = saved_origin_len
+        if saved_bb != 0:
+            wl_position_at_end(self.builder, saved_bb)
+
+        drop_fn
+
     fn mir_sema_type_is_box(sema_ty: i32) -> bool:
         if sema_ty <= 0:
             return false
@@ -4535,7 +4606,15 @@ impl Codegen:
         if ptr != 0:
             if drop_ty != 0:
                 if drop_sema_ty > 0:
-                    self.mir_emit_drop_ptr_for_sema_type(ptr, drop_ty, drop_sema_ty)
+                    // #691/#679: outline the structural drop into a per-type
+                    // function and emit a guarded CALL here (the reset-on-move
+                    // null check stays per-site). Falls back to inline when the
+                    // type isn't outlinable (non-struct / no drop).
+                    let dfn = self.ensure_structural_drop_fn(drop_sema_ty, drop_ty)
+                    if dfn != 0:
+                        self.mir_emit_guarded_user_drop(ptr, drop_ty, dfn, wl_global_get_value_type(dfn))
+                    else:
+                        self.mir_emit_drop_ptr_for_sema_type(ptr, drop_ty, drop_sema_ty)
                 else:
                     self.mir_emit_drop_ptr(ptr, drop_ty)
         true
