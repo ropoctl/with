@@ -50,9 +50,12 @@ fn argv4(a: str, b: str, c: str, d: str) -> str:
 // double-free) and bumps *slot by its id on drop (value-level exactly-once).
 
 fn resource_prelude() -> str:
-    "extern fn with_alloc(size: i64) -> *mut u8\n" ++
-    "extern fn with_free(ptr: *mut u8) -> Unit\n" ++
-    "type R { id: i32, ptr: *mut u8, slot: *mut i32 }\n" ++
+    // *i8 spelling matches <embedded-std>/std/box.w and std/rc.w's extern
+    // declarations — Box/Rc shape cells pull those modules in, and a *mut u8
+    // redeclaration is a signature clash.
+    "extern fn with_alloc(size: i64) -> *i8\n" ++
+    "extern fn with_free(ptr: *i8) -> Unit\n" ++
+    "type R { id: i32, ptr: *i8, slot: *mut i32 }\n" ++
     "impl Drop for R:\n" ++
     "    fn drop(move self: Self):\n" ++
     "        unsafe:\n" ++
@@ -82,7 +85,11 @@ fn cell(name: str, decls: str, expect_sum: i32) -> Cell:
 
 fn shape_decls(shape: str) -> str:
     if shape == "field":
+        // Non-zero sibling: a blanked `r` must NOT make the whole S the reset
+        // sentinel, or the whole-value guard masks a missing member guard (#697).
         return "type S { r: R, tag: i32 }\n"
+    if shape == "boxfield":
+        return "type SB { b: Box[R], tag: i32 }\n"
     if shape == "enum":
         return "enum E:\n    Carry(R)\n    Empty\n"
     ""
@@ -93,11 +100,25 @@ fn shape_ann(shape: str) -> str:
 
 fn shape_mk(shape: str, id: str) -> str:
     if shape == "bare": return "mk(" ++ id ++ ", slot)"
-    if shape == "field": return "S { r: mk(" ++ id ++ ", slot), tag: 0 }"
+    if shape == "field": return "S { r: mk(" ++ id ++ ", slot), tag: 9 }"
+    if shape == "boxfield": return "SB { b: Box.new(mk(" ++ id ++ ", slot)), tag: 9 }"
+    if shape == "boxbare": return "Box.new(mk(" ++ id ++ ", slot))"
+    if shape == "rcbare": return "Rc.new(mk(" ++ id ++ ", slot))"
     if shape == "tuple": return "(mk(" ++ id ++ ", slot), 7)"
     if shape == "option": return ".Some(mk(" ++ id ++ ", slot))"
     if shape == "enum": return "E.Carry(mk(" ++ id ++ ", slot))"
     "mk(" ++ id ++ ", slot)"
+
+// The by-value type a consuming callee takes for each shape.
+fn shape_ty(shape: str) -> str:
+    if shape == "field": return "S"
+    if shape == "boxfield": return "SB"
+    if shape == "boxbare": return "Box[R]"
+    if shape == "rcbare": return "Rc[R]"
+    if shape == "tuple": return "(R, i32)"
+    if shape == "option": return "Option[R]"
+    if shape == "enum": return "E"
+    "R"
 
 // ── Scenario builders ────────────────────────────────────────────────────
 
@@ -144,12 +165,64 @@ fn sc_move_then_reassign(shape: str) -> str:
 
 fn sc_consume_call(shape: str) -> str:
     shape_decls(shape) ++
-    "fn eat(x: " ++ (if shape == "bare": "R" else: if shape == "field": "S" else: "R") ++ "):\n" ++
+    "fn eat(x: " ++ shape_ty(shape) ++ "):\n" ++
     "    let y = move x\n" ++
     "    let _k = 0\n" ++
     "fn go(slot: *mut i32):\n" ++
     "    let a" ++ shape_ann(shape) ++ " = " ++ shape_mk(shape, "1") ++ "\n" ++
     "    eat(move a)\n"
+
+// #697 (t9 class): CONDITIONAL consume with a statement after the branch, so
+// the paths merge and scope exit needs the guarded drop of a maybe-reset value.
+// Without the trailing statement drops resolve per-path and the cell is vacuous.
+fn sc_consume_cond(shape: str, taken: bool) -> str:
+    let flag = if taken: "true" else: "false"
+    shape_decls(shape) ++
+    "fn eat(x: " ++ shape_ty(shape) ++ "):\n" ++
+    "    let y = move x\n" ++
+    "    let _k = 0\n" ++
+    "fn go(slot: *mut i32):\n" ++
+    "    var a" ++ shape_ann(shape) ++ " = " ++ shape_mk(shape, "1") ++ "\n" ++
+    "    var flip = " ++ flag ++ "\n" ++
+    "    if flip:\n" ++
+    "        eat(move a)\n" ++
+    "    let _after = 0\n"
+
+// #697 (t4/t5 class): a mut-receiver method moves a field out via a temp local
+// (the only spelling today) and does not restore — the caller's scope-exit drop
+// runs where the static moved-field exclusion cannot reach, so the runtime
+// blank plus the member-level guard must make it exactly-once.
+fn sc_field_take(shape: str, restore: bool) -> str:
+    let holder = shape_ty(shape)
+    let member = if shape == "boxfield": "b" else: "r"
+    let refill = if restore:
+        "        self." ++ member ++ " = " ++ (if shape == "boxfield": "Box.new(mk(2, slot2))" else: "mk(2, slot2)") ++ "\n"
+    else:
+        ""
+    shape_decls(shape) ++
+    "fn eat(x: " ++ (if shape == "boxfield": "Box[R]" else: "R") ++ "):\n" ++
+    "    let y = move x\n" ++
+    "    let _k = 0\n" ++
+    "extend " ++ holder ++ ":\n" ++
+    "    mut fn feed(slot2: *mut i32):\n" ++
+    "        var tmp = self." ++ member ++ "\n" ++
+    "        eat(move tmp)\n" ++
+    refill ++
+    "fn go(slot: *mut i32):\n" ++
+    "    var h = " ++ shape_mk(shape, "1") ++ "\n" ++
+    "    h.feed(slot)\n" ++
+    "    let _after = h.tag\n"
+
+// Finding 2 (rvalue-uniform `move`): moving into a callee whose param only
+// reads (share-place). Exactly-once regardless of where the drop lands; the
+// end-of-statement TIMING is pinned by the da_ fixture, not this count.
+fn sc_move_into_borrow() -> str:
+    "fn peek(x: R):\n" ++
+    "    let _k = x.id\n" ++
+    "fn go(slot: *mut i32):\n" ++
+    "    var a = mk(1, slot)\n" ++
+    "    peek(move a)\n" ++
+    "    let _after = 0\n"
 
 fn sc_early_return(shape: str, early: bool) -> str:
     let flag = if early: "true" else: "false"
@@ -174,11 +247,15 @@ fn sc_match_consume() -> str:
     "    let _k = got\n"
 
 fn sc_partial_move() -> str:
+    // The callee must actually consume: a ()-body param infers no effects,
+    // becomes share-place, and `take(s.r)` would borrow — testing no move.
     shape_decls("field") ++
-    "fn take(r: R): ()\n" ++
+    "fn take(r: R):\n" ++
+    "    let sink = move r\n" ++
     "fn go(slot: *mut i32):\n" ++
-    "    var s = S { r: mk(1, slot), tag: 0 }\n" ++
-    "    take(s.r)\n" ++
+    "    var s = " ++ shape_mk("field", "1") ++ "\n" ++
+    "    var tmp = s.r\n" ++
+    "    take(move tmp)\n" ++
     "    let _k = s.tag\n"
 
 fn sc_recv_mut() -> str:
@@ -221,6 +298,9 @@ fn build_cells() -> Vec[Cell]:
     shapes.push("tuple")
     shapes.push("option")
     shapes.push("enum")
+    shapes.push("boxbare")
+    shapes.push("rcbare")
+    shapes.push("boxfield")
     for si in 0..shapes.len() as i32:
         let sh = shapes.get(si as i64)
         cells.push(cell("scope_exit/" ++ sh, sc_scope_exit(sh), 1))
@@ -233,10 +313,22 @@ fn build_cells() -> Vec[Cell]:
         cells.push(cell("early_return/" ++ sh, sc_early_return(sh, true), 1))
         cells.push(cell("normal_return/" ++ sh, sc_early_return(sh, false), 1))
         cells.push(cell("discard/" ++ sh, sc_discard(sh), 1))
+        // #697: conditional consume with a post-branch statement (merged drop).
+        cells.push(cell("consume_cond_taken/" ++ sh, sc_consume_cond(sh, true), 1))
+        cells.push(cell("consume_cond_untaken/" ++ sh, sc_consume_cond(sh, false), 1))
     cells.push(cell("consume_call/bare", sc_consume_call("bare"), 1))
     cells.push(cell("consume_call/field", sc_consume_call("field"), 1))
+    cells.push(cell("consume_call/boxbare", sc_consume_call("boxbare"), 1))
+    cells.push(cell("consume_call/rcbare", sc_consume_call("rcbare"), 1))
     cells.push(cell("match_consume/enum", sc_match_consume(), 1))
     cells.push(cell("partial_move/field", sc_partial_move(), 1))
+    // #697: share-place receiver field take (caller-side drop of the holder).
+    cells.push(cell("field_take/field", sc_field_take("field", false), 1))
+    cells.push(cell("field_take/boxfield", sc_field_take("boxfield", false), 1))
+    cells.push(cell("field_take_restore/field", sc_field_take("field", true), 3))
+    cells.push(cell("field_take_restore/boxfield", sc_field_take("boxfield", true), 3))
+    // Finding 2: move into a borrowing (share-place) callee — exactly-once.
+    cells.push(cell("move_into_borrow/bare", sc_move_into_borrow(), 1))
     cells.push(cell("recv_mut_borrow/bare", sc_recv_mut(), 1))
     cells.push(cell("recv_move_consume/bare", sc_recv_move(), 1))
     cells.push(cell("recv_bare_self_replace/bare", sc_recv_replace(), 3))
