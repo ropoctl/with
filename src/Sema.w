@@ -4385,6 +4385,18 @@ impl Sema:
             i = i + 1
         self.label_break_seen.set_i32(frame_idx as i64, 1)
 
+    // The ONE loop back-edge carried-move predicate. A binding is used moved on the
+    // next iteration iff it was LIVE at loop entry but MOVED at the back-edge, and
+    // its type needs drop (a moved-out POD value is a non-destructive copy today,
+    // #607, so only Drop/transitive-Drop moves are errors). Both back-edges — the
+    // fall-through (finalize_loop_move_state) and `continue`
+    // (check_loop_continue_carried_move) — MUST call this; re-inlining the condition
+    // per edge is exactly how #696 happened (the continue edge dropped the
+    // entry==LIVE guard). `needs_drop` is passed in (callers already compute it) so
+    // this stays a pure predicate. See docs/decisions.md.
+    fn is_loop_carried_move(entry_state: i32, cur_state: i32, needs_drop: i32) -> i32:
+        if entry_state == VarState.LIVE and cur_state == VarState.MOVED and needs_drop != 0: 1 else: 0
+
     // A `continue` jumps to the loop's back-edge: any outer binding moved (and not
     // reinitialized) at the continue would be used moved on the next iteration.
     mut fn check_loop_continue_carried_move(frame_idx: i32, node: i32):
@@ -4404,11 +4416,8 @@ impl Sema:
                 let nm = self.pool_resolve(self.bind_names.get(i as i64))
                 // old_verdict = the pre-#696 check (current-MOVED alone, ignores entry);
                 // new_verdict = the corrected check (LIVE at entry, MOVED at back-edge).
-                with_eprint(f"[trace-move]   #{i} `{nm}` entry={entry_state} at_continue={cur_state} needs_drop={nd} old_verdict={if cur_state == VarState.MOVED and nd != 0: 1 else: 0} new_verdict={if entry_state == VarState.LIVE and cur_state == VarState.MOVED and nd != 0: 1 else: 0}")
-            // A continue is a loop-carried move only if the binding was LIVE at loop
-            // entry but MOVED at the continue (moved within this iteration). A binding
-            // already MOVED at entry was moved before the loop — not carried (#696).
-            if entry_state == VarState.LIVE and cur_state == VarState.MOVED and nd != 0:
+                with_eprint(f"[trace-move]   #{i} `{nm}` entry={entry_state} at_continue={cur_state} needs_drop={nd} old_verdict={if cur_state == VarState.MOVED and nd != 0: 1 else: 0} new_verdict={self.is_loop_carried_move(entry_state, cur_state, nd)}")
+            if self.is_loop_carried_move(entry_state, cur_state, nd) != 0:
                 self.emit_loop_carried_move_error(i, node)
             i = i + 1
 
@@ -4440,8 +4449,8 @@ impl Sema:
                 let nd = self.type_needs_drop(self.bind_types.get(i as i64))
                 if trace_move and (e_state == VarState.MOVED or cur_state == VarState.MOVED):
                     let nm = self.pool_resolve(self.bind_names.get(i as i64))
-                    with_eprint(f"[trace-move]   #{i} `{nm}` entry={e_state} body_end={cur_state} needs_drop={nd} carried_move={if e_state == VarState.LIVE and cur_state == VarState.MOVED and nd != 0: 1 else: 0}")
-                if e_state == VarState.LIVE and i < self.bind_states.len() as i32 and cur_state == VarState.MOVED and nd != 0:
+                    with_eprint(f"[trace-move]   #{i} `{nm}` entry={e_state} body_end={cur_state} needs_drop={nd} carried_move={self.is_loop_carried_move(e_state, cur_state, nd)}")
+                if self.is_loop_carried_move(e_state, cur_state, nd) != 0:
                     self.emit_loop_carried_move_error(i, loop_node)
                 i = i + 1
         var post: Vec[i32] = if has_condition_exit != 0:
