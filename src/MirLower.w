@@ -657,21 +657,27 @@ impl MirBuilder:
         if self.place_field_projection_count(place) > 0:
             self.mark_place_field_moved(place)
             // Field-place niche (Slice E): blank a moved Drop-bearing field at the
-            // branch/statement boundary so the owner's guarded per-field drop (the
-            // existing rt_value_is_zero check) skips it. Mirrors the whole-local
-            // reset above; scoped via flush_pending_resets_since so a conditional
-            // field move resets only on the moving path.
+            // branch/statement boundary so the owner's member-level guarded drop
+            // (rt_value_is_zero) skips it. Mirrors the whole-local reset above;
+            // scoped via flush_pending_resets_since so a conditional field move
+            // resets only on the moving path.
+            // #697: the blank is equally required for an UNCONDITIONAL move when
+            // the base's value drop is not scheduled in this function (share-place
+            // param, borrowed receiver, stmt temp): the owner then drops in the
+            // CALLER, where the static moved-field exclusion cannot reach, so
+            // reset-on-move (§2.5.1) must hold at runtime. Only a base whose sole
+            // drop is in this function may elide the blank in favor of the static
+            // exclusion.
             let field_ty = self.place_local_type(place)
-            if self.field_move_in_branch > 0 and field_ty > 0 and self.sema.type_needs_drop_frozen(field_ty) != 0:
-                self.pending_reset_field_places.push(place)
-                self.pending_reset_field_types.push(field_ty)
-                // The owner's drop must keep its niche guard, so the per-field guarded
-                // drop runs and skips the blanked field. Mark the base local moved so
-                // the Stage-4 elision (§2.5.2) does not drop the owner — and with it
-                // the reset field — unconditionally (a null deref in the field's drop).
+            if field_ty > 0 and self.sema.type_needs_drop_frozen(field_ty) != 0:
                 let base_local = self.body.place_locals.get(place as i64)
-                if base_local >= 0:
-                    self.body.mark_local_ever_moved(base_local)
+                if self.field_move_in_branch > 0 or self.local_has_scheduled_value_drop(base_local) == 0:
+                    self.pending_reset_field_places.push(place)
+                    self.pending_reset_field_types.push(field_ty)
+                    // The base's drop — scope exit here, or drop-before-overwrite
+                    // of the blanked field — must keep its niche guard (§2.5.2).
+                    if base_local >= 0:
+                        self.body.mark_local_ever_moved(base_local)
 
     mut fn flush_stmt_temp_frame() -> Unit:
         if self.stmt_temp_starts.len() as i32 == 0:
