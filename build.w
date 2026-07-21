@@ -788,12 +788,52 @@ fn run_drop_audit_action(ctx: ActionCtx) -> i32:
     args.push("tools/drop_audit.w")
     args.push(candidate)
     args.push(baseline)
-    let aout = build_project_abs(root, build_project_join(out_dir, "audit.stdout"))
+    // read_text/write_text require a project-relative path (the capability
+    // sandbox rejects absolute paths); run_capture_cwd takes the absolute form.
+    let aout_rel = build_project_join(out_dir, "audit.stdout")
+    let aout = build_project_abs(root, aout_rel)
     let aerr = build_project_abs(root, build_project_join(out_dir, "audit.stderr"))
     let ar = ctx.process_runner().run_capture_cwd(args, aout, aerr, 600000, root)
-    let report = fs.read_text(aout)
+    let report = fs.read_text(aout_rel)
     if ar.rc != 0:
         ctx.diagnostics().error(f"drop-audit: regressions vs baseline (rc={ar.rc})\n" ++ report)
+        return 1
+    let _ = fs.write_text(build_project_join(out_dir, ".stamp"), "ok")
+    let _ = report
+    0
+
+// Move-checker verdict matrix (tools/move_audit.w — the compile-time analog of
+// drop-audit). Candidate = the freshly built release compiler; each cell has a
+// ground-truth expected verdict, so a drifted dataflow transfer function (the
+// #696 class: per-edge move checks that encode the rule differently) fails its
+// cell. The gate keys on vs-EXPECTED failures (rc), so it holds across reseeds;
+// the baseline (src/main) column just shows what moved. Run BEFORE and AFTER any
+// change to move/borrow checking, branch-merge, loop back-edge handling, or
+// type_needs_drop (CLAUDE.md gate): `with build :move-audit`.
+fn run_move_audit_action(ctx: ActionCtx) -> i32:
+    let fs = ctx.fs()
+    let out_dir = ctx.output()
+    if fs.mkdir_all(out_dir) != 0:
+        ctx.diagnostics().error("move-audit: could not create output dir: " ++ out_dir)
+        return 1
+    let root = ctx.project_info().project_root()
+    let candidate = build_project_abs(root, ctx.inputs().get(0))
+    let baseline = build_project_abs(root, "src/main")
+    var args: Vec[str] = Vec.new()
+    args.push(candidate)
+    args.push("run")
+    args.push("tools/move_audit.w")
+    args.push(candidate)
+    args.push(baseline)
+    // read_text/write_text require a project-relative path (the capability
+    // sandbox rejects absolute paths); run_capture_cwd takes the absolute form.
+    let aout_rel = build_project_join(out_dir, "audit.stdout")
+    let aout = build_project_abs(root, aout_rel)
+    let aerr = build_project_abs(root, build_project_join(out_dir, "audit.stderr"))
+    let ar = ctx.process_runner().run_capture_cwd(args, aout, aerr, 600000, root)
+    let report = fs.read_text(aout_rel)
+    if ar.rc != 0:
+        ctx.diagnostics().error(f"move-audit: cells disagree with ground truth (rc={ar.rc})\n" ++ report)
         return 1
     let _ = fs.write_text(build_project_join(out_dir, ".stamp"), "ok")
     let _ = report
@@ -1554,6 +1594,14 @@ pub fn build(ctx: BuildCtx) -> Build:
     drop_audit = drop_audit.dep("build")
     drop_audit = drop_audit.write_scope("out/drop-audit")
     out = out.add_target(drop_audit)
+    var move_audit = target_new(.Action, "move-audit", "").output("out/move-audit")
+    move_audit.action = run_move_audit_action
+    move_audit = move_audit.input(release_compiler_bin("with"))
+    move_audit = move_audit.input("tools/move_audit.w")
+    move_audit = move_audit.input("src/main")
+    move_audit = move_audit.dep("build")
+    move_audit = move_audit.write_scope("out/move-audit")
+    out = out.add_target(move_audit)
     debug_alloc_tests = debug_alloc_tests.dep("build")
     debug_alloc_tests = debug_alloc_tests.write_scope("out/debug-alloc-tests")
     out = out.add_target(debug_alloc_tests)
