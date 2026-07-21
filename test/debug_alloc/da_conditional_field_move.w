@@ -18,12 +18,16 @@ type Holder { r: Resource }
 fn new_resource(slot: *mut i32) -> Resource:
     unsafe { Resource { ptr: with_alloc(32), slot } }
 
-fn take(r: Resource): ()
+// The callee must actually CONSUME (an unused by-value param infers no
+// effects, becomes share-place, and the call tests no move at all — #697).
+fn take(r: Resource):
+    let sink = r
 
 fn run_field(cond: bool, slot: *mut i32):
-    let h = Holder { r: new_resource(slot) }
+    var h = Holder { r: new_resource(slot) }
     if cond:
-        take(h.r)
+        var tmp = h.r
+        take(move tmp)
 
 fn main:
     var drops = 0

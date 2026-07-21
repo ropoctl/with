@@ -3821,6 +3821,8 @@ impl Codegen:
             return
         let field_start = self.struct_field_starts.get(struct_idx as i64)
         let field_count = self.struct_field_counts.get(struct_idx as i64)
+        // #697: field drops are member drops — always sentinel-guarded.
+        self.member_drop_depth = self.member_drop_depth + 1
         var fi = field_count - 1
         while fi >= 0:
             let field_slot = field_start + fi
@@ -3839,6 +3841,7 @@ impl Codegen:
             else:
                 self.mir_emit_drop_ptr(field_ptr, field_ty)
             fi = fi - 1
+        self.member_drop_depth = self.member_drop_depth - 1
 
     fn mir_drop_origin_active() -> bool:
         self.current_drop_origin_ptr != 0 and self.current_drop_origin_len != 0
@@ -3903,10 +3906,12 @@ impl Codegen:
     // never a fault or double-free (all-zero ⇒ owns nothing ⇒ nothing to drop), so
     // a move-analysis bug can never become memory unsafety.
     mut fn mir_emit_guarded_user_drop(ptr: i64, ty: i64, drop_fn_val: i64, drop_fn_ty: i64) -> Unit:
-        if not self.current_drop_needs_guard:
+        if not self.current_drop_needs_guard and self.member_drop_depth == 0:
             // Stage 4 (§2.5.2): the move analysis proved the dropped local is never
             // moved, so it can never hold the reset sentinel — drop unconditionally
-            // (byte-for-byte the codegen a static-only model would emit).
+            // (byte-for-byte the codegen a static-only model would emit). Member
+            // drops (#697) never take this elision: a member can be blanked by a
+            // callee through a share-place pointer, invisible to this analysis.
             let u_args: Vec[i64] = Vec.new()
             if wl_get_type_kind(ty) == wl_struct_type_kind():
                 u_args.push(ptr)
@@ -3979,7 +3984,7 @@ impl Codegen:
         self.apply_c_abi_call_attrs(call, 0, 0, byval_mask, byval_types, 1, 0)
 
     mut fn mir_emit_guarded_concrete_drop(ptr: i64, ty: i64, concrete: ConcreteMirFunction):
-        if not self.current_drop_needs_guard:
+        if not self.current_drop_needs_guard and self.member_drop_depth == 0:
             self.mir_call_concrete_drop(ptr, ty, concrete)
             return
         let i64_ty = wl_i64_type(self.context)
@@ -4028,6 +4033,8 @@ impl Codegen:
         if ptr == 0 or ty == 0:
             return
         let elem_count = self.sema.get_type_d1(tuple_sema_ty as TypeId)
+        // #697: element drops are member drops — always sentinel-guarded.
+        self.member_drop_depth = self.member_drop_depth + 1
         var i = elem_count - 1
         while i >= 0:
             let elem_sema = self.mir_project_field_sema_type(tuple_sema_ty, i)
@@ -4036,6 +4043,7 @@ impl Codegen:
                 let elem_ptr = wl_build_struct_gep(self.builder, ty, ptr, i)
                 self.mir_emit_drop_ptr_for_sema_type(elem_ptr, elem_llvm, elem_sema)
             i = i - 1
+        self.member_drop_depth = self.member_drop_depth - 1
 
     // #606: drop each element of a fixed array in place (reverse order). Like tuples,
     // arrays have no named type, so the generic dispatcher cannot reach them via a
@@ -4048,6 +4056,8 @@ impl Codegen:
             return
         let elem_count = self.sema.get_type_d1(array_sema_ty as TypeId)
         let elem_llvm = wl_get_element_type(ty)
+        // #697: element drops are member drops — always sentinel-guarded.
+        self.member_drop_depth = self.member_drop_depth + 1
         var i = elem_count - 1
         while i >= 0:
             let gep_indices: Vec[i64] = Vec.new()
@@ -4056,6 +4066,7 @@ impl Codegen:
             let elem_ptr = wl_build_gep(self.builder, ty, ptr, vec_data_i64(&gep_indices), 2)
             self.mir_emit_drop_ptr_for_sema_type(elem_ptr, elem_llvm, elem_sema)
             i = i - 1
+        self.member_drop_depth = self.member_drop_depth - 1
 
     // #606: drop the active variant's payloads of an enum value (including generic
     // enums like Option/Result). The enum repr is a {tag, data} struct; load the tag
@@ -4089,6 +4100,10 @@ impl Codegen:
         let tag_ptr = wl_build_struct_gep(self.builder, ty, ptr, 0)
         let tag_val = wl_build_load(self.builder, tag_field_ty, tag_ptr)
         let data_ptr = wl_build_bitcast(self.builder, wl_build_struct_gep(self.builder, ty, ptr, 1), wl_ptr_type(self.context))
+        // #697: payload drops are member drops — always sentinel-guarded. A
+        // blanked enum reads tag 0 and lands in that variant's case with an
+        // all-zero payload; the guarded payload drop then skips it.
+        self.member_drop_depth = self.member_drop_depth + 1
         let merge_bb = wl_append_bb(self.context, self.current_function, "drop.enum.merge")
         var vi = 0
         while vi < variant_count:
@@ -4125,6 +4140,7 @@ impl Codegen:
             vi = vi + 1
         wl_build_br(self.builder, merge_bb)
         wl_position_at_end(self.builder, merge_bb)
+        self.member_drop_depth = self.member_drop_depth - 1
 
     // #606: recognize a std Vec[T] sema type (one type arg, base symbol == Vec),
     // using the MIR snapshot when available and falling back to live sema tables.
@@ -4208,7 +4224,11 @@ impl Codegen:
         get_args.push(ptr)
         get_args.push(idx_phi)
         let elem_ptr = wl_build_call(self.builder, get_ty, get_fn, vec_data_i64(&get_args), 2)
+        // #697: element drops are member drops — always sentinel-guarded (#605
+        // blanks a moved-out slot; the guard is what makes that skip real).
+        self.member_drop_depth = self.member_drop_depth + 1
         self.mir_emit_drop_ptr_for_sema_type(elem_ptr, elem_ty, elem_sema)
+        self.member_drop_depth = self.member_drop_depth - 1
         let one = wl_const_int(i64_ty, 1, 0)
         let next_idx = wl_build_add(self.builder, idx_phi, one)
         let more = wl_build_icmp(self.builder, wl_int_slt(), next_idx, len_val)
@@ -4369,11 +4389,15 @@ impl Codegen:
         let saved_fn_node = self.current_function_node
         let saved_ret_ty = self.current_ret_type
         let saved_bb = wl_get_insert_block(self.builder)
+        let saved_member_depth = self.member_drop_depth
 
         self.current_function = drop_fn
         self.current_function_name_sym = 0
         self.current_function_node = 0
         self.current_ret_type = wl_void_type(self.context)
+        // #697: fresh per-type body — do not inherit the triggering emission's
+        // member context (mirrors ensure_structural_drop_fn).
+        self.member_drop_depth = 0
 
         let entry = wl_append_bb(self.context, drop_fn, "entry")
         wl_position_at_end(self.builder, entry)
@@ -4384,6 +4408,7 @@ impl Codegen:
         self.current_function_name_sym = saved_fn_name_sym
         self.current_function_node = saved_fn_node
         self.current_ret_type = saved_ret_ty
+        self.member_drop_depth = saved_member_depth
         if saved_bb != 0:
             wl_position_at_end(self.builder, saved_bb)
 
@@ -4426,6 +4451,7 @@ impl Codegen:
         let saved_ret_ty = self.current_ret_type
         let saved_bb = wl_get_insert_block(self.builder)
         let saved_needs_guard = self.current_drop_needs_guard
+        let saved_member_depth = self.member_drop_depth
         let saved_origin_ptr = self.current_drop_origin_ptr
         let saved_origin_len = self.current_drop_origin_len
 
@@ -4433,9 +4459,13 @@ impl Codegen:
         self.current_function_name_sym = 0
         self.current_function_node = 0
         self.current_ret_type = wl_void_type(self.context)
-        // The fn body is the unconditional structural drop; the caller's guard
-        // already decided whether to run it.
+        // The fn body's TOP-LEVEL drop is unconditional; the caller's guard
+        // already decided whether to run it. Member depth resets to 0 (this is
+        // a fresh per-type body, not part of the triggering emission); the
+        // body's own member recursion re-raises it, so field drops inside stay
+        // sentinel-guarded (#697) even though the body itself is unguarded.
         self.current_drop_needs_guard = false
+        self.member_drop_depth = 0
         // A shared drop fn can't carry each call site's exact drop#N origin, but
         // the debug allocator's origin tag must stay non-empty (double-free
         // reports read first_drop=drop#…). Tag with a synthetic per-type origin.
@@ -4453,6 +4483,7 @@ impl Codegen:
         self.current_function_node = saved_fn_node
         self.current_ret_type = saved_ret_ty
         self.current_drop_needs_guard = saved_needs_guard
+        self.member_drop_depth = saved_member_depth
         self.current_drop_origin_ptr = saved_origin_ptr
         self.current_drop_origin_len = saved_origin_len
         if saved_bb != 0:
@@ -4527,6 +4558,16 @@ impl Codegen:
         if payload_ty == 0:
             return false
         let i64_ty = wl_i64_type(self.context)
+        // #697/§2.5.1: a reset-on-move Rc/Arc handle is null; the refcount
+        // decrement must not deref it. Same Stage-4 elision as the Box guard.
+        let needs_null_guard = self.current_drop_needs_guard or self.member_drop_depth > 0
+        var rc_skip_bb: i64 = 0
+        if needs_null_guard:
+            let live = wl_build_icmp(self.builder, wl_int_ne(), heap_ptr, wl_const_null(wl_type_of(heap_ptr)))
+            let live_bb = wl_append_bb(self.context, self.current_function, "refcount.drop.live")
+            rc_skip_bb = wl_append_bb(self.context, self.current_function, "refcount.drop.skip")
+            wl_build_cond_br(self.builder, live, live_bb, rc_skip_bb)
+            wl_position_at_end(self.builder, live_bb)
         let inner_fields: Vec[i64] = Vec.new()
         inner_fields.push(i64_ty)
         inner_fields.push(ptr_ty)
@@ -4553,6 +4594,9 @@ impl Codegen:
         self.mir_emit_with_free_ptr(heap_ptr)
         wl_build_br(self.builder, done_bb)
         wl_position_at_end(self.builder, done_bb)
+        if needs_null_guard:
+            wl_build_br(self.builder, rc_skip_bb)
+            wl_position_at_end(self.builder, rc_skip_bb)
         true
 
     mut fn mir_emit_box_drop_place(body: &MirBody, place_id: i32, sema_ty: i32) -> bool:
@@ -4579,9 +4623,24 @@ impl Codegen:
             heap_ptr = wl_build_extract_value(self.builder, value, 0)
         else:
             payload_ty = self.mir_sema_type_to_llvm(payload_sema_ty)
+        // #697/§2.5.1: a reset-on-move Box is null; the pointee drop must not
+        // deref it (a conditional whole-Box move crashed at scope exit). Same
+        // Stage-4 elision as the byte-scan guard: skip only when the analysis
+        // proved the value can never be the sentinel.
+        let needs_null_guard = self.current_drop_needs_guard or self.member_drop_depth > 0
+        var box_done_bb: i64 = 0
+        if needs_null_guard:
+            let live = wl_build_icmp(self.builder, wl_int_ne(), heap_ptr, wl_const_null(wl_type_of(heap_ptr)))
+            let live_bb = wl_append_bb(self.context, self.current_function, "drop.box.live")
+            box_done_bb = wl_append_bb(self.context, self.current_function, "drop.box.done")
+            wl_build_cond_br(self.builder, live, live_bb, box_done_bb)
+            wl_position_at_end(self.builder, live_bb)
         if payload_ty != 0:
             self.mir_emit_drop_ptr(heap_ptr, payload_ty)
         self.mir_emit_with_free_ptr(heap_ptr)
+        if needs_null_guard:
+            wl_build_br(self.builder, box_done_bb)
+            wl_position_at_end(self.builder, box_done_bb)
         true
 
     mut fn mir_emit_drop_place_current_origin(body: &MirBody, place_id: i32) -> bool:

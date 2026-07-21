@@ -114,6 +114,14 @@ type Codegen {
     // the dropped local is never moved, so emit an unconditional drop. Scoped
     // around each Drop statement; defaults to true (guard) everywhere else.
     current_drop_needs_guard: bool,
+    // #697: >0 while emitting member drops (struct fields, tuple/array elements,
+    // enum payloads, vec elements). A member can hold the reset sentinel from a
+    // field blank the dropping function's move analysis cannot see (a callee
+    // blanked it through a share-place pointer, or a conditional field move), so
+    // member-level drops are always guarded regardless of the per-site Stage-4
+    // elision. Reset to 0 inside outlined per-type drop bodies (their caller
+    // guards the whole value; their own member recursion re-raises it).
+    member_drop_depth: i32,
 
     // Pre-interned symbols for O(1) dispatch (avoid string comparisons)
     sym_vec: i32,
@@ -791,6 +799,7 @@ fn Codegen.init_with_opt(module_name: str, opt_level: i32) -> Codegen:
         current_drop_origin_ptr: 0,
         current_drop_origin_len: 0,
         current_drop_needs_guard: true,
+        member_drop_depth: 0,
         sym_vec: 0, sym_option: 0, sym_result: 0, sym_hashmap: 0,
         sym_hashset: 0, sym_btreemap: 0, sym_btreeset: 0, sym_handle: 0, sym_slotmap: 0, sym_slotmapslot: 0,
         sym_vecslot: 0, sym_vecrange: 0, sym_veciterref: 0, sym_veciterplace: 0,
