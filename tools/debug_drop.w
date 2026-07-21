@@ -40,16 +40,20 @@ fn argv4(a: str, b: str, c: str, d: str) -> str:
 fn argv5(a: str, b: str, c: str, d: str, e: str) -> str:
     a ++ "\0" ++ b ++ "\0" ++ c ++ "\0" ++ d ++ "\0" ++ e ++ "\0"
 
-// Run `<with-bin> run --debug-alloc <repro>`; return captured stderr+stdout text.
-fn run_under_debug_alloc(with_bin: str, repro: str, filter: str) -> str:
+// Run `<with-bin> run --debug-alloc <repro>`; return (exit code, captured
+// stderr+stdout text). The exit code is part of the verdict: a fixture that
+// expects a clean report must also exit 0, so an inline `assert(drops == N)`
+// abort or a SIGSEGV fails the lane even when the report line still matches
+// (#697: fixtures crashed AFTER printing the expected line and passed).
+fn run_under_debug_alloc(with_bin: str, repro: str, filter: str) -> (i32, str):
     let outp = "/tmp/debug_drop_out.txt"
     let errp = "/tmp/debug_drop_err.txt"
     let argv = if filter.len() > 0:
         argv5(with_bin, "run", "--debug-alloc", "--debug-alloc-filter=" ++ filter, repro)
     else:
         argv4(with_bin, "run", "--debug-alloc", repro)
-    let _ = exec_capture(argv, outp, errp, 60000)
-    read_file(errp) ++ "\n" ++ read_file(outp)
+    let rc = exec_capture(argv, outp, errp, 60000)
+    (rc, read_file(errp) ++ "\n" ++ read_file(outp))
 
 // Index of `sub` in `s`, or -1.
 fn find_sub(s: str, sub: str) -> i64:
@@ -96,8 +100,8 @@ fn main:
     if mode == "run":
         let repro = a.get(3)
         let filter = line_after_prefix(read_file(repro), "debug-alloc-filter:")
-        let report = run_under_debug_alloc(with_bin, repro, filter)
-        print("=== debug-alloc: " ++ repro ++ " ===")
+        let (rc, report) = run_under_debug_alloc(with_bin, repro, filter)
+        print("=== debug-alloc: " ++ repro ++ " (exit " ++ f"{rc}" ++ ") ===")
         if contains(report, "DOUBLE FREE"):
             print(line_after_prefix(report, "debug-alloc: DOUBLE FREE"))
             print("verdict: DOUBLE FREE (resolve sites with tools/debug_drop_sites.lldb)")
@@ -108,6 +112,15 @@ fn main:
             print("verdict: clean (no double-free, no leak)")
         exit_code(0)
 
+    // Fixture conventions (#697, learned the hard way):
+    //   - a consuming callee must actually consume (`let sink = x`); an unused
+    //     by-value param infers no effects, becomes share-place, and the call
+    //     tests no move at all
+    //   - structs whose field is moved need a NON-ZERO sibling field, or the
+    //     blank makes the whole value the reset sentinel and the whole-value
+    //     guard masks a missing member-level guard
+    //   - clean fixtures must exit 0 (enforced below); a fixture expecting a
+    //     failure report (DOUBLE FREE / first_drop=) may abort
     if mode == "check":
         var failed: i64 = 0
         var i: i64 = 3
@@ -115,11 +128,12 @@ fn main:
             let fx = a.get(i)
             let want = line_after_prefix(read_file(fx), "expect-debug-alloc:")
             let filter = line_after_prefix(read_file(fx), "debug-alloc-filter:")
-            let report = run_under_debug_alloc(with_bin, fx, filter)
-            if want.len() > 0 and contains(report, want):
+            let (rc, report) = run_under_debug_alloc(with_bin, fx, filter)
+            let expects_abort = contains(want, "DOUBLE FREE") or contains(want, "first_drop=")
+            if want.len() > 0 and contains(report, want) and (expects_abort or rc == 0):
                 print("PASS " ++ fx)
             else:
-                print("FAIL " ++ fx ++ "  (want: '" ++ want ++ "')")
+                print("FAIL " ++ fx ++ "  (want: '" ++ want ++ "', exit " ++ f"{rc}" ++ ")")
                 failed = failed + 1
             i = i + 1
         if failed > 0:
