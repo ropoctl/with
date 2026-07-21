@@ -60,6 +60,11 @@ type MirBuilder = ephemeral {
     // guarded per-field drop skips it — the field analogue of pending_reset_locals.
     pending_reset_field_places: Vec[i32],
     pending_reset_field_types: Vec[i32],
+    // D16 (rvalue-uniform `move`): temps holding a value moved into a
+    // share-place callee. Dropped at the same flush points as the pending
+    // resets (statement end, or branch-scoped on the moving path), AFTER the
+    // call — the end-of-enclosing-statement death §2.4 promises a temporary.
+    pending_move_temp_locals: Vec[i32],
     // >0 while lowering a branch body (if/match/loop). Only a field move inside a
     // branch needs the niche reset: an unconditional field move stays statically
     // moved and the owner's partial drop skips it without a reset.
@@ -149,6 +154,7 @@ fn MirBuilder.init(sema: &Sema, ast: AstPool, pool: InternPool, fn_sym: i32) -> 
         pending_reset_locals: Vec.new(),
         pending_reset_field_places: Vec.new(),
         pending_reset_field_types: Vec.new(),
+        pending_move_temp_locals: Vec.new(),
         field_move_in_branch: 0,
         with_cleanup_guard_locals: Vec.new(),
         with_cleanup_payload_locals: Vec.new(),
@@ -696,7 +702,7 @@ impl MirBuilder:
         self.flush_pending_resets()
 
     mut fn flush_pending_resets() -> Unit:
-        self.flush_pending_resets_since(0, 0)
+        self.flush_pending_resets_since(0, 0, 0)
 
     // Reset-on-move (spec §2.5.1): emit `local = <zero>` for each owned local moved
     // since `start`, AFTER the move read it, then truncate the pending list back to
@@ -705,7 +711,19 @@ impl MirBuilder:
     // local's later drops (drop-before-overwrite, scope-exit) free nothing.
     // `start` scopes the flush to a branch/statement so an outer-scope move's reset
     // is not emitted inside (and made conditional by) an inner branch.
-    mut fn flush_pending_resets_since(start: i32, field_start: i32) -> Unit:
+    mut fn flush_pending_resets_since(start: i32, field_start: i32, temp_start: i32) -> Unit:
+        // D16: drop the move-arg temporaries first (their values die at the end
+        // of the statement / on the moving path), then blank the moved-from
+        // sources. The drops are dominated by the temp's initialization — both
+        // land on the same path as the move — so they need no sentinel guard.
+        var ti = temp_start
+        while ti < self.pending_move_temp_locals.len() as i32:
+            let tl = self.pending_move_temp_locals.get(ti as i64)
+            let tl_place = self.place_for_local(tl)
+            self.emit_drop_stmt(tl_place, "move-arg-temp", 0)
+            ti = ti + 1
+        while self.pending_move_temp_locals.len() as i32 > temp_start:
+            self.pending_move_temp_locals.pop()
         var ri = start
         while ri < self.pending_reset_locals.len() as i32:
             let rl = self.pending_reset_locals.get(ri as i64)
@@ -5438,6 +5456,7 @@ impl MirBuilder:
         // by) this if.
         let pending_reset_start = self.pending_reset_locals.len() as i32
         let pending_reset_field_start = self.pending_reset_field_places.len() as i32
+        let pending_move_temp_start = self.pending_move_temp_locals.len() as i32
 
         let then_bb = self.new_block()
         let else_bb = self.new_block()
@@ -5471,7 +5490,7 @@ impl MirBuilder:
         // INSIDE the branch, before merging. A move in the branch's tail expression
         // has no per-statement flush; left pending it would be emitted after the if
         // on BOTH paths and blank a still-live value on the not-taken path.
-        self.flush_pending_resets_since(pending_reset_start, pending_reset_field_start)
+        self.flush_pending_resets_since(pending_reset_start, pending_reset_field_start, pending_move_temp_start)
         self.field_move_in_branch = self.field_move_in_branch - 1
         self.terminate(TermKind.TK_GOTO, join_bb, 0, 0, 0)
 
@@ -5486,7 +5505,7 @@ impl MirBuilder:
             self.unit_operand()
         if want_result != 0:
             self.assign_operand_to_place(result_place, else_op, self.ast.get_start(node))
-        self.flush_pending_resets_since(pending_reset_start, pending_reset_field_start)
+        self.flush_pending_resets_since(pending_reset_start, pending_reset_field_start, pending_move_temp_start)
         self.field_move_in_branch = self.field_move_in_branch - 1
         self.terminate(TermKind.TK_GOTO, join_bb, 0, 0, 0)
 
@@ -5574,11 +5593,12 @@ impl MirBuilder:
         self.switch_to(body_bb)
         let pending_reset_start = self.pending_reset_locals.len() as i32
         let pending_reset_field_start = self.pending_reset_field_places.len() as i32
+        let pending_move_temp_start = self.pending_move_temp_locals.len() as i32
         self.field_move_in_branch = self.field_move_in_branch + 1
         let _ = self.lower_expr_discard(body_expr)
         // Reset-on-move (spec §2.5.1): flush body-local resets before the back-edge,
         // so a move in the loop body's tail is reset inside the body (same as lower_if).
-        self.flush_pending_resets_since(pending_reset_start, pending_reset_field_start)
+        self.flush_pending_resets_since(pending_reset_start, pending_reset_field_start, pending_move_temp_start)
         self.field_move_in_branch = self.field_move_in_branch - 1
         // Back-edge when body does not diverge.
         self.terminate(TermKind.TK_GOTO, header_bb, 0, 0, 0)
@@ -5634,9 +5654,10 @@ impl MirBuilder:
             self.lower_regex_capture_bindings_from_option(regex_capture_node, regex_captures_opt_place)
         let pending_reset_start = self.pending_reset_locals.len() as i32
         let pending_reset_field_start = self.pending_reset_field_places.len() as i32
+        let pending_move_temp_start = self.pending_move_temp_locals.len() as i32
         self.field_move_in_branch = self.field_move_in_branch + 1
         let _ = self.lower_expr_discard(body_expr)
-        self.flush_pending_resets_since(pending_reset_start, pending_reset_field_start)
+        self.flush_pending_resets_since(pending_reset_start, pending_reset_field_start, pending_move_temp_start)
         self.field_move_in_branch = self.field_move_in_branch - 1
         self.terminate(TermKind.TK_GOTO, cond_bb, 0, 0, 0)
 
@@ -7851,6 +7872,7 @@ impl MirBuilder:
         let branch_moved_field_path_len = self.moved_field_path_kinds.len() as i32
         let pending_reset_start = self.pending_reset_locals.len() as i32
         let pending_reset_field_start = self.pending_reset_field_places.len() as i32
+        let pending_move_temp_start = self.pending_move_temp_locals.len() as i32
 
         var dispatch_bb = self.cur_bb
         for ai in 0..arms_count:
@@ -7906,7 +7928,7 @@ impl MirBuilder:
                 self.assign_operand_to_place(result_place, arm_value, self.ast.get_start(body_node))
             // Reset-on-move (spec §2.5.1): flush this arm's pending source-resets
             // inside the arm, before it merges to the join (same reason as lower_if).
-            self.flush_pending_resets_since(pending_reset_start, pending_reset_field_start)
+            self.flush_pending_resets_since(pending_reset_start, pending_reset_field_start, pending_move_temp_start)
             self.field_move_in_branch = self.field_move_in_branch - 1
             self.pop_scope_with_goto(join_bb)
             self.restore_moved_value_len(branch_moved_value_len)
@@ -8246,11 +8268,29 @@ impl MirBuilder:
         let arg_kind = self.ast.kind(arg_node)
         let arg_is_copy = arg_kind == NodeKind.NK_COPY_ARG
         let callee_share_place = sig_idx >= 0 and arg_i >= 0 and self.sema.sig_param_uses_value_ref_abi(sig_idx, arg_i) != 0
-        // A share-place (value_ref_abi) parameter BORROWS — it never owns the
-        // argument, so the caller keeps its drop for a plain OR a `move` argument
-        // (moving into a borrow is redundant but must not leak the value). Only an
-        // owned/extern param, or a `copy` (whose clone is a distinct owned temp),
-        // consumes the operand.
+        // D16 (rvalue-uniform `move`): `move x` always moves, callee-independent.
+        // Into a share-place callee, the moved value becomes a statement
+        // temporary — the callee borrows the temporary, the source is reset now
+        // (consume_moved_operand), and the temporary dies at the end of the
+        // enclosing statement (§2.4). Previously the caller kept the value until
+        // scope exit — a silent deferred drop contradicting mutability.md's
+        // "ownership is transferred to the function".
+        if callee_share_place and arg_kind == NodeKind.NK_MOVE_ARG and self.body.operand_kinds.get(lowered as i64) == OperandKind.OK_MOVE:
+            let mv_ty = self.operand_type(lowered)
+            let mv_tmp = self.new_temp(mv_ty)
+            let mv_tmp_place = self.place_for_local(mv_tmp)
+            let mv_rv = self.body.new_rvalue(RvalueKind.RK_USE, lowered, 0, 0)
+            self.body.push_stmt(self.cur_bb, StmtKind.Assign, mv_tmp_place, mv_rv, self.ast.get_start(arg_node))
+            self.consume_moved_operand(lowered)
+            // The temp dies with the pending-reset flush: after the call, at the
+            // statement boundary — or inside the branch on the moving path, so a
+            // conditionally-created temp is never dropped on the not-taken path.
+            self.pending_move_temp_locals.push(mv_tmp)
+            return self.body.new_operand(OperandKind.OK_COPY, mv_tmp_place)
+        // A share-place (value_ref_abi) parameter BORROWS — a PLAIN argument
+        // stays owned by the caller, which keeps its drop. Only an owned/extern
+        // param, or a `copy` (whose clone is a distinct owned temp), consumes
+        // the operand.
         if arg_is_copy or not callee_share_place:
             self.consume_moved_operand(lowered)
         // #606: a by-value `xs.push(a)` arg carries the receiver's buffer; cancel the

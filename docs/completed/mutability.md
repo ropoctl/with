@@ -229,6 +229,8 @@ print(n)          // ERROR — n has been moved (even though i32 is Copy)
 
 For Copy types, `move x` and `copy x` produce equivalent runtime behavior (both copy the value), but `move x` invalidates the source binding while `copy x` doesn't. The keyword reflects user intent: `move` declares ownership transfer; `copy` declares isolation while preserving the source.
 
+**`move x` is callee-independent (D16).** When the callee's parameter turns out to borrow (share-place), the move still happens: the value becomes a statement temporary — the callee borrows the temporary, the source binding is reset immediately, and the temporary is destroyed at the end of the enclosing statement. After any `f(move x)` statement, the binding is invalid and the value has been destroyed or transferred into the callee; a callee body change can never silently extend the value's lifetime.
+
 ### `Copy` vs Non-`Copy` Behavior at Call Sites
 
 For `Copy` types, the default `f(x)` copies the value. Mutations inside the callee are local; the caller is unaffected.
