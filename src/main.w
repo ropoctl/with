@@ -2088,7 +2088,17 @@ fn build_command_validate_target(options: &BuildCommandOptions, cfg: &ProjectCon
         return 1
     0
 
+// Always-on wall-clock report: every top-level `with build <target>` prints how
+// long it took, unconditionally (worker re-entries — WITH_BUILD_*_WORKER — stay
+// silent). The build measures itself; no external `time` wrapper is ever needed.
+fn build_report_wall(target_name: str, t0: i64):
+    if with_getenv_str("WITH_BUILD_ACTION_WORKER").len() > 0 or with_getenv_str("WITH_BUILD_TEST_WORKER").len() > 0:
+        return
+    let label = if target_name.len() > 0: ":" ++ target_name else: "(default)"
+    with_eprint("[build] " ++ label ++ " wall " ++ build_graph_time_fmt(with_clock_nanos() - t0))
+
 fn run_build_command(options: BuildCommandOptions, graph_options: BuildGraphCommandOptions) -> i32:
+    let cmd_t0 = with_clock_nanos()
     var actual_options = options
     var actual_source = actual_options.source_path
     if actual_source == "":
@@ -2136,6 +2146,7 @@ fn run_build_command(options: BuildCommandOptions, graph_options: BuildGraphComm
             let build_rc = unsafe { run_build_graph(root, cfg, selected_graph, &raw mut load_result.sema as *mut Sema, actual_options, graph_options.survey) }
             repo_lock_release()
             link_stage_cleanup_current_process_temp_archives()
+            build_report_wall(selected_target_name, cmd_t0)
             return build_rc
         let root_main = root ++ "/main.w"
         actual_source = if with_fs_file_exists(root_main) != 0: root_main else: root ++ "/src/main.w"
