@@ -707,6 +707,12 @@ type Sema {
     label_break_off: Vec[i32],
     label_break_seen: Vec[i32],
     loop_break_flat: Vec[i32],
+    // Parallel to loop_break_flat and sharing its per-frame offset (label_break_off):
+    // the loop-entry move-state snapshot, one region per active loop. It lets the
+    // `continue` back-edge check apply the SAME entry==LIVE guard that
+    // finalize_loop_move_state uses for the fall-through back-edge — without it, a
+    // value moved *before* the loop is wrongly flagged as moved *inside* it (#696).
+    loop_entry_flat: Vec[i32],
     fn_label_syms: Vec[i32],
     fn_label_nodes: Vec[i32],
     fn_label_paths: Vec[str],
@@ -1829,6 +1835,7 @@ fn sema_empty_state(pool: InternPool, diags: DiagnosticList, ast: AstPool) -> Se
         label_break_off: Vec.new(),
         label_break_seen: Vec.new(),
         loop_break_flat: Vec.new(),
+        loop_entry_flat: Vec.new(),
         fn_label_syms: Vec.new(),
         fn_label_nodes: Vec.new(),
         fn_label_paths: sema_new_vec_str(),
@@ -4250,24 +4257,51 @@ impl Sema:
     // (a field is moved-after iff moved at some non-divergent exit). Concatenation
     // realizes the union — duplicate (base,path) entries are harmless to the
     // membership tests. path_starts from `b` are offset past `a`'s syms.
+    // True iff snapshot entry (base_sym, path) is already present in the
+    // result arrays being built — so the union DEDUPS. Without this the union
+    // concatenated, and across N nested branches the moved-field set grew ~2^N
+    // (a field moved on both paths re-added every merge), detonating memory
+    // once the flip made Vec fields drop-tracked (#695 follow-up; the set must
+    // stay bounded by the distinct field-paths in the function).
+    fn moved_field_entry_present(base: &Vec[i32], starts: &Vec[i32], counts: &Vec[i32], syms: &Vec[i32], base_sym: i32, src_start: i32, src_count: i32, src_syms: &Vec[i32]) -> bool:
+        for i in 0..base.len() as i32:
+            if base.get(i as i64) != base_sym:
+                continue
+            if counts.get(i as i64) != src_count:
+                continue
+            let dst_start = starts.get(i as i64)
+            var same = true
+            for k in 0..src_count:
+                if syms.get((dst_start + k) as i64) != src_syms.get((src_start + k) as i64):
+                    same = false
+                    break
+            if same:
+                return true
+        false
+
     mut fn set_moved_field_union(a: &MovedFieldSnap, b: &MovedFieldSnap):
         var base: Vec[i32] = Vec.new()
         var starts: Vec[i32] = Vec.new()
         var counts: Vec[i32] = Vec.new()
         var syms: Vec[i32] = Vec.new()
         for i in 0..a.base.len() as i32:
-            base.push(a.base.get(i as i64))
-            starts.push(a.starts.get(i as i64))
+            starts.push(syms.len() as i32)
             counts.push(a.counts.get(i as i64))
-        for i in 0..a.syms.len() as i32:
-            syms.push(a.syms.get(i as i64))
-        let a_syms_len = a.syms.len() as i32
+            base.push(a.base.get(i as i64))
+            let s = a.starts.get(i as i64)
+            let c = a.counts.get(i as i64)
+            for k in 0..c:
+                syms.push(a.syms.get((s + k) as i64))
         for i in 0..b.base.len() as i32:
+            let bs = b.starts.get(i as i64)
+            let bc = b.counts.get(i as i64)
+            if self.moved_field_entry_present(&base, &starts, &counts, &syms, b.base.get(i as i64), bs, bc, &b.syms):
+                continue
+            starts.push(syms.len() as i32)
+            counts.push(bc)
             base.push(b.base.get(i as i64))
-            starts.push(b.starts.get(i as i64) + a_syms_len)
-            counts.push(b.counts.get(i as i64))
-        for i in 0..b.syms.len() as i32:
-            syms.push(b.syms.get(i as i64))
+            for k in 0..bc:
+                syms.push(b.syms.get((bs + k) as i64))
         self.moved_field_base_syms = move base
         self.moved_field_path_starts = move starts
         self.moved_field_path_counts = move counts
@@ -4326,6 +4360,12 @@ impl Sema:
         var i = 0
         while i < count:
             self.loop_break_flat.push(VarState.LIVE)
+            // Capture the loop-entry move-state (fresh push keeps loop_entry_flat in
+            // lockstep with loop_break_flat, so label_break_off indexes both). A
+            // binding already MOVED here was moved *before* the loop, not across a
+            // back-edge — the continue check must not flag it (#696).
+            let es = if i < self.bind_states.len() as i32: self.bind_states.get(i as i64) else: VarState.LIVE
+            self.loop_entry_flat.push(es)
             i = i + 1
 
     // At a `break`, union the current move-state of the target loop's outer bindings
@@ -4351,9 +4391,24 @@ impl Sema:
         if frame_idx < 0 or frame_idx >= self.label_loop_entry_binds.len() as i32:
             return
         let boundary = self.label_loop_entry_binds.get(frame_idx as i64)
+        let off = if frame_idx < self.label_break_off.len() as i32: self.label_break_off.get(frame_idx as i64) else: -1
+        let trace_move = runtime_getenv("WITH_TRACE_MOVE").len() > 0
+        if trace_move:
+            with_eprint(f"[trace-move] continue back-edge: frame={frame_idx} bindings={boundary}")
         var i = 0
         while i < boundary:
-            if i < self.bind_states.len() as i32 and self.bind_states.get(i as i64) == VarState.MOVED and self.type_needs_drop(self.bind_types.get(i as i64)) != 0:
+            let entry_state = if off >= 0 and (off + i) < self.loop_entry_flat.len() as i32: self.loop_entry_flat.get((off + i) as i64) else: VarState.LIVE
+            let cur_state = if i < self.bind_states.len() as i32: self.bind_states.get(i as i64) else: VarState.LIVE
+            let nd = self.type_needs_drop(self.bind_types.get(i as i64))
+            if trace_move and (entry_state == VarState.MOVED or cur_state == VarState.MOVED):
+                let nm = self.pool_resolve(self.bind_names.get(i as i64))
+                // old_verdict = the pre-#696 check (current-MOVED alone, ignores entry);
+                // new_verdict = the corrected check (LIVE at entry, MOVED at back-edge).
+                with_eprint(f"[trace-move]   #{i} `{nm}` entry={entry_state} at_continue={cur_state} needs_drop={nd} old_verdict={if cur_state == VarState.MOVED and nd != 0: 1 else: 0} new_verdict={if entry_state == VarState.LIVE and cur_state == VarState.MOVED and nd != 0: 1 else: 0}")
+            // A continue is a loop-carried move only if the binding was LIVE at loop
+            // entry but MOVED at the continue (moved within this iteration). A binding
+            // already MOVED at entry was moved before the loop — not carried (#696).
+            if entry_state == VarState.LIVE and cur_state == VarState.MOVED and nd != 0:
                 self.emit_loop_carried_move_error(i, node)
             i = i + 1
 
@@ -4366,6 +4421,13 @@ impl Sema:
     // break propagated out of the loop.
     mut fn finalize_loop_move_state(entry: &Vec[i32], frame_idx: i32, body_diverges: i32, has_condition_exit: i32, loop_node: i32):
         let entry_count = entry.len() as i32
+        // WITH_TRACE_MOVE: dump the loop back-edge move-check inputs per binding
+        // (the sema-phase analog of --trace-ownership). Prints name, entry-state,
+        // body-end-state, needs-drop, and the carried-move verdict — the direct
+        // answer to "why is X flagged moved-in-a-loop?".
+        let trace_move = runtime_getenv("WITH_TRACE_MOVE").len() > 0
+        if trace_move:
+            with_eprint(f"[trace-move] loop finalize: body_diverges={body_diverges} bindings={entry_count}")
         if body_diverges == 0:
             var i = 0
             while i < entry_count:
@@ -4373,7 +4435,13 @@ impl Sema:
                 // moved-out POD Vec is a non-destructive copy today (#607), and the
                 // codebase relies on that, so only Drop/transitive-Drop loop-carried
                 // moves are use-after-move errors here.
-                if entry.get(i as i64) == VarState.LIVE and i < self.bind_states.len() as i32 and self.bind_states.get(i as i64) == VarState.MOVED and self.type_needs_drop(self.bind_types.get(i as i64)) != 0:
+                let e_state = entry.get(i as i64)
+                let cur_state = if i < self.bind_states.len() as i32: self.bind_states.get(i as i64) else: VarState.LIVE
+                let nd = self.type_needs_drop(self.bind_types.get(i as i64))
+                if trace_move and (e_state == VarState.MOVED or cur_state == VarState.MOVED):
+                    let nm = self.pool_resolve(self.bind_names.get(i as i64))
+                    with_eprint(f"[trace-move]   #{i} `{nm}` entry={e_state} body_end={cur_state} needs_drop={nd} carried_move={if e_state == VarState.LIVE and cur_state == VarState.MOVED and nd != 0: 1 else: 0}")
+                if e_state == VarState.LIVE and i < self.bind_states.len() as i32 and cur_state == VarState.MOVED and nd != 0:
                     self.emit_loop_carried_move_error(i, loop_node)
                 i = i + 1
         var post: Vec[i32] = if has_condition_exit != 0:
@@ -4391,12 +4459,15 @@ impl Sema:
                     brk.push(v)
                     i = i + 1
                 post = self.union_move_states(&post, &brk)
-        // Free this loop's break-flag region (it is the top of the flat stack).
+        // Free this loop's break-flag and entry-state regions (both are the top of
+        // their flat stacks and share the same offset).
         if frame_idx >= 0 and frame_idx < self.label_break_off.len() as i32:
             let off = self.label_break_off.get(frame_idx as i64)
             if off >= 0:
                 while self.loop_break_flat.len() as i32 > off:
                     self.loop_break_flat.pop()
+                while self.loop_entry_flat.len() as i32 > off:
+                    self.loop_entry_flat.pop()
         self.restore_scope_states(&post)
 
     fn clear_binding_view_deps(sym: i32):
