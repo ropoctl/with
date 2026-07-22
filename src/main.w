@@ -2129,6 +2129,39 @@ fn build_report_wall(target_name: str, t0: i64):
     let label = if target_name.len() > 0: ":" ++ target_name else: "(default)"
     with_eprint("[build] " ++ label ++ " wall " ++ build_graph_time_fmt(with_clock_nanos() - t0))
 
+// #702: the reseed fast path. `:update-seed` / `:install-user` after a green
+// battery reduce to: verify out/release/bin/with is the exact binary
+// last-green blessed, copy it, set 0755. Same guarantee require-last-green
+// enforces, none of the graph machinery.
+fn cli_fast_install_blessed(root: str, target_name: str) -> i32:
+    let compiler_path = resolve_join(root, "out/release/bin/with")
+    if with_fs_file_exists(compiler_path) == 0:
+        with_eprint("error: missing " ++ compiler_path ++ "; run `with build` first")
+        return 1
+    let manifest = with_fs_read_file(resolve_join(root, "out/.build-state/last-green.json"))
+    if manifest.len() == 0:
+        with_eprint("error: missing last-green manifest; run `with build :last-green` after build/fixpoint/test")
+        return 1
+    let data = with_fs_read_file(compiler_path)
+    if data.len() == 0:
+        with_eprint("error: could not read " ++ compiler_path)
+        return 1
+    var digest: [32]u8 = [0 as u8; 32]
+    sha256_hash_str(data, &raw mut digest[0] as *mut u8)
+    let sha = sha256_hex(&digest[0] as *const u8)
+    if not manifest.contains("\"compiler_sha256\": \"" ++ sha ++ "\""):
+        with_eprint("error: " ++ compiler_path ++ " is not the compiler recorded by last-green; run `with build`, `with build :fixpoint`, `with build :test`, then `with build :last-green`")
+        return 1
+    let dest = if target_name == "update-seed": resolve_join(root, "src/main") else: with_getenv_str("HOME") ++ "/.local/bin/with"
+    if with_fs_write_file(dest, data) != 0:
+        with_eprint("error: could not write " ++ dest)
+        return 1
+    if with_fs_chmod(dest, 0o755) != 0:
+        with_eprint("error: could not chmod " ++ dest)
+        return 1
+    with_write("[" ++ target_name ++ "] " ++ dest ++ " <- out/release/bin/with (verified against last-green)\n")
+    0
+
 fn run_build_command(options: BuildCommandOptions, graph_options: BuildGraphCommandOptions) -> i32:
     let cmd_t0 = with_clock_nanos()
     var actual_options = options
@@ -2150,6 +2183,12 @@ fn run_build_command(options: BuildCommandOptions, graph_options: BuildGraphComm
             if actual_options.output_kind != BuildOutputKind.Binary:
                 with_eprint("error: build.w tool-mode only supports binary builds")
                 return 1
+            // #702: installing a blessed artifact must not re-enter the build
+            // system — the battery already proved everything and last-green
+            // already recorded the verified sha. Verify against the manifest
+            // and copy; no graph evaluation.
+            if graph_options.selected_target == "update-seed" or graph_options.selected_target == "install-user":
+                return cli_fast_install_blessed(root, graph_options.selected_target)
             var load_result = load_build_graph_from_build_w(root, &cfg, &actual_options)
             let graph = load_result.graph
             if not graph.ok:
