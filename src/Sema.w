@@ -457,7 +457,32 @@ type Sema {
     // `move`/`copy`. Recorded in pass 1, resolved post-fixpoint so the ownership
     // verdict uses COMPLETE effects (a forward-ref owned param must not slip
     // through as share-place — that would be a double-free).
+    // Stride-8 records: [arg_node, callee_sig, callee_pi, file_id, root_sym,
+    // use_seq, loop_depth, liveness] — liveness stamped at body end (0=unknown,
+    // 1=last-use, 2=live-after); backs the `move-sites` analysis request
+    // (docs/deep-debugging-tools.md).
     consume_call_sites: Vec[i32],
+    // move-sites: use sequencing. ONE persistent map per key kind, one owner —
+    // bodies are separated by an epoch packed into every value (epoch*2^32 +
+    // seq), never by swapping map headers (bit-copy map swaps are the #697
+    // aliasing class and corrupted Sema state via stale-header inserts).
+    binding_use_seq: i32,
+    binding_use_epoch: i32,
+    binding_epoch_counter: i32,
+    binding_last_use: HashMap[i32, i64],
+    // move-sites: last use per (root, first-field) path — the liveness key for
+    // FIELD-shaped transfer args, so `eat(move self.r)` followed by `self.tag`
+    // reads verdicts on the `.r` path, not the whole receiver. Key packs
+    // root_sym * 2^32 + field_sym; value packs epoch * 2^32 + seq.
+    field_last_use: HashMap[i64, i64],
+    // explain:effect provenance — first setter of each ownership-forcing bit.
+    // Key packs (sig, param, bit-index); value packs (kind, a, b): kind 1 =
+    // direct (a = AST node), kind 2 = effect-flow edge (a = callee sig,
+    // b = callee param).
+    effect_prov: HashMap[i64, i64],
+    // Origin node for the next note_param_effect call (set/cleared by the
+    // node-bearing noters; 0 = unknown source construct).
+    effect_note_origin_node: i32,
 
     // Extern fn names
     extern_fn_names: HashMap[i32, i32],
@@ -1337,6 +1362,23 @@ impl Sema:
 fn sema_pair_key(a: i32, b: i32) -> i64:
     (a as i64) * 4294967296 + (b as i64)
 
+fn sema_pair_hi(key: i64): (key / 4294967296) as i32
+fn sema_pair_lo(key: i64): (key % 4294967296) as i32
+
+// Effect-provenance packing (docs/deep-debugging-tools.md, explain:effect).
+// Key = (sig, pi, bit_idx) with pi < 2^16, bit_idx < 2^8; value = (kind, a, b)
+// with a, b < 2^28. These fns are the only place the field widths appear;
+// encode and decode both live here so they cannot drift apart.
+fn effect_prov_key(sig: i32, pi: i32, bit_idx: i32) -> i64:
+    (sig as i64) * 16777216 + (pi as i64) * 256 + bit_idx as i64
+
+fn effect_prov_val(kind: i64, a: i32, b: i32) -> i64:
+    kind * 72057594037927936 + (a as i64) * 268435456 + b as i64
+
+fn effect_prov_val_kind(v: i64): v / 72057594037927936
+fn effect_prov_val_a(v: i64): ((v / 268435456) % 268435456) as i32
+fn effect_prov_val_b(v: i64): (v % 268435456) as i32
+
 impl Sema:
     mut fn copy_module_graph_from(source: &Sema):
         let global_paths = sema_new_vec_str()
@@ -1667,6 +1709,13 @@ fn sema_empty_state(pool: InternPool, diags: DiagnosticList, ast: AstPool) -> Se
         effect_flow_edges: Vec.new(),
         effect_flow_projections: Vec.new(),
         consume_call_sites: Vec.new(),
+        binding_use_seq: 0,
+        binding_use_epoch: 0,
+        binding_epoch_counter: 0,
+        binding_last_use: HashMap.new(),
+        field_last_use: HashMap.new(),
+        effect_prov: HashMap.new(),
+        effect_note_origin_node: 0,
         extern_fn_names,
         retained_extern_params,
         fn_decl_nodes,
@@ -5066,10 +5115,42 @@ impl Sema:
         if pi >= 0:
             let cur = self.current_fn_param_effs.get(pi as i64)
             self.current_fn_param_effs.set_i32(pi as i64, cur | eff)
+            // explain:effect provenance — record the FIRST setter of each
+            // ownership-forcing bit. The origin node is carried in
+            // effect_note_origin_node (set by note_place_effect and the other
+            // node-bearing noters; 0 when unknown).
+            let new_bits = eff & (EFF_CONSUME | EFF_ESCAPE_VALUE | EFF_WRITE) & (2147483647 - cur)
+            if new_bits != 0:
+                self.record_effect_provenance_direct(self.current_fn_sig_idx, pi, new_bits, self.effect_note_origin_node)
             if self.recording_propagated_effect == 0:
                 let direct = self.current_fn_param_direct_effs.get(pi as i64)
                 self.current_fn_param_direct_effs.set_i32(pi as i64, direct | eff)
             return
+
+    // explain:effect provenance recording. Value packs kind*2^56 + a*2^28 + b:
+    // kind 1 = direct (a = AST node, b = file id); kind 2 = effect-flow edge
+    // (a = callee sig, b = callee param). First set wins.
+    fn record_effect_provenance_direct(sig: i32, pi: i32, bits: i32, node: i32):
+        if (bits & EFF_CONSUME) != 0:
+            self.record_effect_provenance_bit(sig, pi, 0, 1, node, self.local_file_id)
+        if (bits & EFF_ESCAPE_VALUE) != 0:
+            self.record_effect_provenance_bit(sig, pi, 1, 1, node, self.local_file_id)
+        if (bits & EFF_WRITE) != 0:
+            self.record_effect_provenance_bit(sig, pi, 2, 1, node, self.local_file_id)
+
+    fn record_effect_provenance_edge(sig: i32, pi: i32, bits: i32, callee_sig: i32, callee_pi: i32):
+        if (bits & EFF_CONSUME) != 0:
+            self.record_effect_provenance_bit(sig, pi, 0, 2, callee_sig, callee_pi)
+        if (bits & EFF_ESCAPE_VALUE) != 0:
+            self.record_effect_provenance_bit(sig, pi, 1, 2, callee_sig, callee_pi)
+        if (bits & EFF_WRITE) != 0:
+            self.record_effect_provenance_bit(sig, pi, 2, 2, callee_sig, callee_pi)
+
+    fn record_effect_provenance_bit(sig: i32, pi: i32, bit_idx: i32, kind: i64, a: i32, b: i32):
+        let key = effect_prov_key(sig, pi, bit_idx)
+        if self.effect_prov.contains(key):
+            return
+        self.effect_prov.insert(key, effect_prov_val(kind, a, b))
 
     fn note_param_view_origin(sym: i32, mask: i32, origin_node: i32):
         if self.current_fn_sig_idx < 0 or sym == 0 or mask == 0:
@@ -5082,15 +5163,17 @@ impl Sema:
                 self.current_fn_param_view_nodes.set_i32(pi as i64, origin_node)
             return
 
-    fn note_place_effect(expr_node: i32, eff: i32):
+    mut fn note_place_effect(expr_node: i32, eff: i32):
         if self.current_fn_sig_idx < 0:
             return
         let root = self.place_root_sym(expr_node)
         if root != 0:
+            self.effect_note_origin_node = expr_node
             self.note_param_effect(root, eff)
             let dep_sym = self.binding_effect_dep_sym(root)
             if dep_sym != 0:
                 self.note_param_effect(dep_sym, eff)
+            self.effect_note_origin_node = 0
 
     // D17: ownership-forcing effects do not cross a projection of a NON-COPY
     // field. A callee that consumes such a field blanks it (reset-on-move,
@@ -5198,6 +5281,8 @@ impl Sema:
                 let merged = caller_eff | trans
                 if merged != caller_eff:
                     self.set_sig_param_effect(caller_sig, caller_pi, merged)
+                    // explain:effect — the transitive hop that first set the bit.
+                    self.record_effect_provenance_edge(caller_sig, caller_pi, merged & (2147483647 - caller_eff), callee_sig, callee_pi)
                     changed = 1
 
     fn finalize_receiver_requirements():
@@ -5448,6 +5533,51 @@ impl Sema:
         self.consume_call_sites.push(callee_sig)
         self.consume_call_sites.push(callee_pi)
         self.consume_call_sites.push(self.local_file_id)
+        // move-sites: liveness inputs — the arg's uses have already been
+        // sequenced, so binding_use_seq here equals this arg's use position.
+        // A FIELD-shaped arg also records its first field symbol, keying
+        // liveness to the (root, field) path instead of the whole root.
+        self.consume_call_sites.push(self.place_root_sym(arg_node))
+        self.consume_call_sites.push(self.move_site_first_field_sym(arg_node))
+        self.consume_call_sites.push(self.binding_use_seq)
+        self.consume_call_sites.push(self.loop_depth)
+        self.consume_call_sites.push(0)
+
+    fn move_site_first_field_sym(arg_node: i32) -> i32:
+        var n = arg_node
+        while n > 0 and (self.ast.kind(n) == NodeKind.NK_GROUPED or self.ast.kind(n) == NodeKind.NK_NO_SUSPEND or self.ast.kind(n) == NodeKind.NK_MOVE_ARG or self.ast.kind(n) == NodeKind.NK_COPY_ARG):
+            n = self.ast.get_data0(n)
+        if n > 0 and self.ast.kind(n) == NodeKind.NK_FIELD_ACCESS:
+            return self.ast.get_data1(n)
+        0
+
+    // move-sites: stamp the liveness verdict for every site recorded during the
+    // body that just finished — once all of its uses have been sequenced. A
+    // nested body (closure) stamps its own sites first; already-stamped entries
+    // are never overwritten by the enclosing body's pass. Field-shaped args
+    // consult the (root, field) path map; whole-binding args the root map.
+    fn stamp_move_site_liveness(start: i32):
+        var i = start
+        while i + 8 < self.consume_call_sites.len() as i32:
+            if self.consume_call_sites.get((i + 8) as i64) == 0:
+                let root = self.consume_call_sites.get((i + 4) as i64)
+                let field = self.consume_call_sites.get((i + 5) as i64)
+                let site_seq = self.consume_call_sites.get((i + 6) as i64)
+                var last = 0
+                if root != 0 and field != 0:
+                    let path_key = sema_pair_key(root, field)
+                    if self.field_last_use.contains(path_key):
+                        let entry = self.field_last_use.get(path_key).unwrap()
+                        if sema_pair_hi(entry) == self.binding_use_epoch:
+                            last = sema_pair_lo(entry)
+                else: if root != 0 and self.binding_last_use.contains(root):
+                    let entry = self.binding_last_use.get(root).unwrap()
+                    if sema_pair_hi(entry) == self.binding_use_epoch:
+                        last = sema_pair_lo(entry)
+                if last != 0:
+                    let verdict = if last > site_seq: 2 else: 1
+                    self.consume_call_sites.set_i32((i + 8) as i64, verdict)
+            i = i + 9
 
     // #D5/P1: with effects + share-place ABI final, a plain non-Copy argument passed
     // to an OWNED parameter (consume/escape_value → not share-place) must be given up
@@ -5458,12 +5588,12 @@ impl Sema:
     mut fn finalize_call_site_ownership():
         let n = self.consume_call_sites.len() as i32
         var i = 0
-        while i + 3 < n:
+        while i + 8 < n:
             let arg_node = self.consume_call_sites.get(i as i64)
             let callee_sig = self.consume_call_sites.get((i + 1) as i64)
             let callee_pi = self.consume_call_sites.get((i + 2) as i64)
             let file_id = self.consume_call_sites.get((i + 3) as i64)
-            i = i + 4
+            i = i + 9
             // share-place param: the caller keeps ownership; no transfer needed.
             // (Only movable named bindings were recorded, so an owned param here is a
             // genuine ownership transfer that must be made explicit.)

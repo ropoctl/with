@@ -673,6 +673,8 @@ ordinary call path is a failure rather than a blind spot.
 ./out/stage/bin/with-stage2 analyze repro.w 'matrix:name~function_name'
 ./out/stage/bin/with-stage2 analyze repro.w 'select:stage=sema,kind=parameter,name~function_name'
 ./out/stage/bin/with-stage2 analyze repro.w 'explain:call:function_name'
+./out/stage/bin/with-stage2 analyze repro.w move-sites
+./out/stage/bin/with-stage2 analyze repro.w 'explain:effect:Type.method:self'
 ./out/stage/bin/with-stage2 analyze repro.w 'path:call:caller:callee'
 ./out/stage/bin/with-stage2 analyze repro.w 'closure:call:root_function'
 ./out/stage/bin/with-stage2 analyze repro.w 'lldb:kind=call,name~function_name'

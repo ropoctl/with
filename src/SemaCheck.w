@@ -1707,11 +1707,22 @@ impl Sema:
         let saved_drop_control_flow_depth = self.drop_control_flow_depth
         self.current_drop_type_sym = self.drop_owner_for_fn_symbol(fn_name)
         self.drop_control_flow_depth = 0
+        // move-sites (docs/deep-debugging-tools.md): per-body use sequencing for
+        // the transfer-site liveness verdict. Sites recorded during this body
+        // are stamped at body end, once every use has been seen. Bodies are
+        // separated by an epoch stamped into every entry — one persistent map,
+        // one owner, no per-body header swapping.
+        let saved_use_epoch = self.binding_use_epoch
+        self.binding_use_epoch = self.binding_epoch_counter + 1
+        self.binding_epoch_counter = self.binding_epoch_counter + 1
+        let body_site_start = self.consume_call_sites.len() as i32
         if body_expected_ret != 0 and body_expected_ret != self.ty_void:
             self.expected_expr_type = body_expected_ret
             self.has_expected_type = 1
             self.current_value_expr_root = body
         let body_ty = self.check_expr(body)
+        self.stamp_move_site_liveness(body_site_start)
+        self.binding_use_epoch = saved_use_epoch
         self.current_drop_type_sym = saved_drop_type_sym
         self.drop_control_flow_depth = saved_drop_control_flow_depth
         self.pop_label_frame()
@@ -4835,7 +4846,8 @@ impl Sema:
         // D17: returning a non-Copy FIELD as owned takes the field (blank +
         // partial-drop machinery) and writes the root — per returned leaf, so
         // each match arm / if branch weakens by its own projection shape.
-        self.note_place_effect(node, self.weaken_projection_owning_effects(node, effect))
+        let leaf_eff = self.weaken_projection_owning_effects(node, effect)
+        self.note_place_effect(node, leaf_eff)
 
     mut fn check_body_explicit_value_results(node: i32, value_path: i32, expected: i32, msg: str) -> i32:
         if node == 0:
@@ -5975,7 +5987,9 @@ impl Sema:
                     return ty
                 self.scope_set_state(sym, VarState.MOVED)
             // If the moved binding is a parameter, record EFF_CONSUME
+            self.effect_note_origin_node = node
             self.note_param_effect(sym, EFF_CONSUME)
+            self.effect_note_origin_node = 0
             self.typed_expr_types.insert(node, ty as i32)
             return ty
 
@@ -6260,6 +6274,10 @@ impl Sema:
                 return 0
             if self.scope_lookup_is_task(sym) != 0 and node != self.current_statement_expr_root:
                 self.scope_mark_task_used(sym)
+            // move-sites: sequence every checked use of a scoped binding; the
+            // epoch-stamped last-use map backs the transfer-site liveness verdict.
+            self.binding_use_seq = self.binding_use_seq + 1
+            self.binding_last_use.insert(sym, sema_pair_key(self.binding_use_epoch, self.binding_use_seq))
             let state = self.scope_lookup_state(sym)
             if state == VarState.MOVED and sym != self.assign_target_revive_sym:
                 if sema_debug_move_enabled() != 0:
@@ -9875,6 +9893,9 @@ impl Sema:
                 return self.ty_str as i32
 
         var obj_type = self.check_expr(expr)
+        // move-sites: sequence this use on its (root, field) path for the
+        // field-shaped transfer-site liveness verdict.
+        self.note_field_use(node, field)
         if self.union_in_assign_target == 0 and self.field_is_moved(node) != 0:
             self.emit_error_with_help("use of moved value", node, "a moved value cannot be used again; if it is moved on only some control-flow paths, reinitialize it on every path before this use, or clone it before the move")
         // §16.4: reading a union field other than the last-written one requires
@@ -12347,7 +12368,9 @@ impl Sema:
                     let cap_ty = self.bind_types.get(ci as i64)
                     if self.is_copy(cap_ty as TypeId) == 0:
                         self.scope_set_state(cap_sym, VarState.MOVED)
+                        self.effect_note_origin_node = node
                         self.note_param_effect(cap_sym, EFF_CONSUME)
+                        self.effect_note_origin_node = 0
                     if emitted_escape_warn == 0 and self.ast.is_move_closure(node) == 0 and self.ast.is_by_place_closure(node) == 0 and self.is_copy(cap_ty as TypeId) == 0 and self.expr_mutates_place(body, cap_sym) != 0:
                         self.emit_error("closure that mutates captured place cannot escape its defining scope (§15.9)", node)
                         emitted_escape_warn = 1
@@ -13182,7 +13205,9 @@ impl Sema:
                 let cap_eff = self.closure_capture_summary_eff(closure_node, ci)
                 let trans_bits = cap_eff & (EFF_CONSUME | EFF_ESCAPE_VALUE | EFF_ESCAPE_VIEW | EFF_RAW_PTR_VALIDITY)
                 if trans_bits != 0:
+                    self.effect_note_origin_node = closure_node
                     self.note_param_effect(cap_sym, trans_bits)
+                    self.effect_note_origin_node = 0
                 if (cap_eff & EFF_ESCAPE_VIEW) != 0:
                     let cap_pi = self.param_index_for_sym(cap_sym)
                     if cap_pi >= 0:
@@ -17598,7 +17623,9 @@ impl Sema:
                 let recv_sym = self.ast.get_data0(expr)
                 if self.scope_has(recv_sym) != 0:
                     self.scope_set_state(recv_sym, VarState.MOVED)
+                    self.effect_note_origin_node = node
                     self.note_param_effect(recv_sym, EFF_CONSUME)
+                    self.effect_note_origin_node = 0
 
     mut fn check_concrete_trait_method_call(recv_type: i32, method_sym: i32, arg_types: &Vec[i32], extra_start: i32, arg_count: i32, node: i32, expr: i32, has_resolved_args: i32) -> i32:
         if recv_type == 0:
@@ -18261,7 +18288,9 @@ impl Sema:
                     let recv_sym = self.ast.get_data0(expr)
                     if self.scope_has(recv_sym) != 0:
                         self.scope_set_state(recv_sym, VarState.MOVED)
+                        self.effect_note_origin_node = node
                         self.note_param_effect(recv_sym, EFF_CONSUME)
+                        self.effect_note_origin_node = 0
             else if type_name_sym != 0 and self.builtin_method_requires_mutable_receiver(type_name_sym, field) != 0:
                 // §15.6 — view-liveness for builtin mutating methods (push, pop,
                 // insert, etc.). The earlier hardcoded path already rejected
@@ -20368,6 +20397,14 @@ impl Sema:
         0
 
     // Get the root symbol of a place expression (ident, field access chain, index).
+    // move-sites: sequence a field-path use for the transfer-site liveness
+    // verdict. Outlined from check_field_access.
+    mut fn note_field_use(node: i32, field: i32):
+        let ms_root = self.place_root_sym(node)
+        if ms_root != 0 and self.scope_has(ms_root) != 0:
+            self.binding_use_seq = self.binding_use_seq + 1
+            self.field_last_use.insert(sema_pair_key(ms_root, field), sema_pair_key(self.binding_use_epoch, self.binding_use_seq))
+
     fn place_root_sym(node: i32) -> i32:
         if node == 0:
             return 0
@@ -20968,7 +21005,9 @@ impl Sema:
                             f"[move] sym={name} tid={tid} resolved={resolved as i32} kind={self.get_type_kind(resolved)}"
                         )
                     self.scope_set_state(sym, VarState.MOVED)
+                    self.effect_note_origin_node = node
                     self.note_param_effect(sym, EFF_CONSUME)
+                    self.effect_note_origin_node = 0
         if kind == NodeKind.NK_GROUPED or kind == NodeKind.NK_NO_SUSPEND:
             self.mark_moved_if_consumed(self.ast.get_data0(node))
         // copy: source remains valid — do not mark as consumed.

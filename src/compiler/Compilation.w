@@ -1296,6 +1296,7 @@ impl Compilation:
 fn analysis_request_is_semantic_snapshot(request: str) -> bool:
     if request == "audit:receivers" or request == "audit:receiver-surface" or request == "audit:effects" or request == "audit:storage": return true
     if request == "audit:methods": return true
+    if request == "move-sites": return true
     if request.starts_with("select:stage=ast") or request.starts_with("select:stage=sema") or request.starts_with("select:stage=diagnostic"): return true
     if request.starts_with("select:kind=declaration") or request.starts_with("select:kind=signature") or request.starts_with("select:kind=parameter"): return true
     if request.starts_with("select:kind=receiver") or request.starts_with("select:kind=effect-edge") or request.starts_with("select:kind=specialization"): return true

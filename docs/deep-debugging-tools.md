@@ -58,6 +58,61 @@ Use an analysis audit directly as a reduction predicate:
   ./out/stage/bin/with-stage2 analyze {file} audit:all
 ```
 
+## Ownership Transfer Classification
+
+`analyze <file> move-sites` classifies every call site where a plain non-Copy
+argument binds an OWNED (consume/escape_value) parameter — the sites the
+"takes ownership" diagnostic reports. It is a semantic-snapshot request: it
+runs from the live Sema state even when the check fails, which is its primary
+use (partitioning an error worklist, e.g. the #691 flip's, before deciding
+which sites get a `move` keyword and which need design work).
+
+```sh
+./out/stage/bin/with-stage2 analyze src/main.w move-sites
+```
+
+One TSV row per site:
+
+```
+file:line:col  root  shape  spellable  liveness  loop  callee  param
+```
+
+- `shape` — `ident` (bare binding), `field` (field-path place), or `other`.
+- `spellable` — whether `move <arg>` is expressible today (`ident` and
+  `field` are; `other` needs the temp-local dance or a spelling extension).
+- `liveness` — `last-use` when the call is the final use of the root in the
+  enclosing body (a `move` cannot introduce use-after-move), `live-after`
+  when later uses exist (a DESIGN site: adding `move` blanks a value the
+  flow still reads — Backend.w's take-and-return class), or `unknown`.
+- `loop` — `in-loop` when the call sits inside a loop body; such sites are
+  conservatively design-flagged regardless of textual liveness (a
+  next-iteration use is not textually "after").
+
+The verdicts come from the checker's own use tracking, not source scanning.
+`last-use` is proof the keyword is safe; `live-after` is a reading
+assignment, not a verdict that the design is wrong.
+
+## Effect Provenance
+
+`analyze <file> 'explain:effect:<fn>[:<param>]'` prints WHY a parameter
+carries each ownership-forcing effect (consume/escape_value/write), as a
+chain from the queried parameter down to the seed that first set the bit —
+either a direct source construct (a struct-literal move, a returned place, a
+call argument) or an effect-flow edge into a callee parameter, followed
+recursively until a direct seed is reached.
+
+```sh
+./out/stage/bin/with-stage2 analyze src/main.w 'explain:effect:Zcu.clear_stage_outputs:self'
+```
+
+Provenance is recorded at first-set during body checking and the effect
+fixpoint; the chain names each hop's source location. Use this instead of
+neutralize-bisection when a receiver demands a stronger mode than expected —
+the 57-method escalation cascade in #691 was exactly one misattributed seed
+plus transitive root edges, a one-query answer with provenance and an
+afternoon of bisection without it. Also a semantic-snapshot request: works
+on erroring inputs.
+
 ## Repro Reduction
 
 `with reduce` minimizes a single-file repro by deleting source lines while a

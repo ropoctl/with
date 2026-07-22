@@ -1256,6 +1256,146 @@ fn analysis_audit_phase(report: &AnalysisReport, sema: &Sema, mir_mod: &MirModul
             report.fail(f"specialization {si}: no prelowered MIR body for mono={mono}")
     analysis_audit_frozen_calls(report, sema, mir_mod)
 
+// move-sites (docs/deep-debugging-tools.md): classify every recorded
+// plain-arg-to-owned-param site from the live Sema state. Semantic-snapshot
+// request — its primary use is partitioning an ERROR worklist.
+fn analysis_move_site_file_name(sema: &Sema, file_id: i32, root_path: str) -> str:
+    for i in 0..sema.source_text_file_ids.len() as i32:
+        if sema.source_text_file_ids.get(i as i64) == file_id:
+            return sema.source_text_names.get(i as i64)
+    root_path
+
+fn analysis_move_site_shape(sema: &Sema, node: i32) -> str:
+    var n = node
+    while n > 0 and (sema.ast.kind(n) == NodeKind.NK_GROUPED or sema.ast.kind(n) == NodeKind.NK_NO_SUSPEND):
+        n = sema.ast.get_data0(n)
+    if n <= 0: return "other"
+    let k = sema.ast.kind(n)
+    if k == NodeKind.NK_IDENT: return "ident"
+    if k == NodeKind.NK_FIELD_ACCESS: return "field"
+    "other"
+
+fn analysis_move_sites(sema: &Sema, source_path: str) -> str:
+    var out = "file:line:col\troot\tshape\tspellable\tliveness\tloop\tcallee\tparam\n"
+    var total = 0
+    var design = 0
+    var keyword = 0
+    var unknown = 0
+    let n = sema.consume_call_sites.len() as i32
+    var i = 0
+    while i + 8 < n:
+        let arg_node = sema.consume_call_sites.get(i as i64)
+        let callee_sig = sema.consume_call_sites.get((i + 1) as i64)
+        let callee_pi = sema.consume_call_sites.get((i + 2) as i64)
+        let file_id = sema.consume_call_sites.get((i + 3) as i64)
+        let root_sym = sema.consume_call_sites.get((i + 4) as i64)
+        let loop_depth = sema.consume_call_sites.get((i + 7) as i64)
+        let liveness = sema.consume_call_sites.get((i + 8) as i64)
+        i = i + 9
+        // Mirror finalize_call_site_ownership: only OWNED params are transfer
+        // sites; share-place callees keep the caller's ownership.
+        if sema.sig_param_uses_value_ref_abi(callee_sig, callee_pi) != 0:
+            continue
+        total = total + 1
+        let file_name = analysis_move_site_file_name(sema, file_id, source_path)
+        let text = sema.source_text_for_file_id(file_id)
+        let start = sema.ast.get_start(arg_node)
+        let line = analysis_line_for_offset(text, start)
+        let col = analysis_column_for_offset(text, start)
+        let root = if root_sym != 0: sema.pool_resolve(root_sym) else: "<rvalue>"
+        let shape = analysis_move_site_shape(sema, arg_node)
+        let spellable = if shape == "ident" or shape == "field": "yes" else: "no"
+        // In-loop sites are design-flagged regardless of textual liveness: a
+        // next-iteration use is not textually "after" the call.
+        let live_text = if loop_depth > 0:
+            design = design + 1
+            "in-loop"
+        else: if liveness == 1:
+            keyword = keyword + 1
+            "last-use"
+        else: if liveness == 2:
+            design = design + 1
+            "live-after"
+        else:
+            unknown = unknown + 1
+            "unknown"
+        let loop_text = if loop_depth > 0: "in-loop" else: "-"
+        let callee = sema.pool_resolve(sema.sig_names.get(callee_sig as i64))
+        out = out ++ f"{file_name}:{line}:{col}\t{root}\t{shape}\t{spellable}\t{live_text}\t{loop_text}\t{callee}\t{callee_pi}\n"
+    out ++ f"move-sites: {total} owned-param sites — {keyword} last-use (keyword), {design} design (live-after/in-loop), {unknown} unknown\n"
+
+// explain:effect (docs/deep-debugging-tools.md): walk the first-setter
+// provenance chain for each ownership-forcing bit of a parameter, from the
+// queried signature down to the direct seed. Packing lives in Sema
+// (effect_prov_key / effect_prov_val_*) — the encoder and this decoder share
+// one definition.
+fn analysis_effect_bit_name(bit_idx: i32) -> str:
+    if bit_idx == 0: return "consume"
+    if bit_idx == 1: return "escape_value"
+    "write"
+
+fn analysis_explain_effect_chain(sema: &Sema, sig: i32, pi: i32, bit_idx: i32, source_path: str) -> str:
+    var out = ""
+    var cur_sig = sig
+    var cur_pi = pi
+    var depth = 0
+    while depth < 32:
+        depth = depth + 1
+        let key = effect_prov_key(cur_sig, cur_pi, bit_idx)
+        let prov = sema.effect_prov.get(key)
+        if not prov.is_some():
+            out = out ++ "    (no provenance recorded for this hop)\n"
+            return out
+        let packed = prov.unwrap()
+        let kind = effect_prov_val_kind(packed)
+        let a = effect_prov_val_a(packed)
+        let b = effect_prov_val_b(packed)
+        if kind == 1:
+            let text = sema.source_text_for_file_id(b)
+            let file_name = analysis_move_site_file_name(sema, b, source_path)
+            let start = if a > 0 and a < sema.ast.node_count(): sema.ast.get_start(a) else: 0
+            let line = analysis_line_for_offset(text, start)
+            out = out ++ f"    direct seed at {file_name}:{line} (node {a})\n"
+            return out
+        let callee = sema.pool_resolve(sema.sig_names.get(a as i64))
+        out = out ++ f"    via argument to {callee} param {b}\n"
+        cur_sig = a
+        cur_pi = b
+    out ++ "    (chain depth limit reached)\n"
+
+fn analysis_explain_effect(sema: &Sema, target: str, source_path: str) -> str:
+    var fn_name = target
+    var want_pi = 0 - 1
+    let colon = analysis_find_from(target, ":", 0)
+    if colon >= 0:
+        fn_name = analysis_slice(target, 0, colon)
+        let pi_text = analysis_slice(target, colon + 1, target.len() as i32)
+        if pi_text == "self":
+            want_pi = 0
+        else:
+            want_pi = analysis_parse_i32(pi_text)
+    var out = f"explain:effect {fn_name}\n"
+    var found = 0
+    for si in 0..sema.sig_names.len() as i32:
+        if sema.pool_resolve(sema.sig_names.get(si as i64)) != fn_name:
+            continue
+        found = found + 1
+        let pc = sema.sig_get_param_count(si)
+        for pi in 0..pc:
+            if want_pi >= 0 and pi != want_pi:
+                continue
+            let eff = sema.sig_param_effect(si, pi)
+            out = out ++ f"  sig={si} param[{pi}] eff=[" ++ sema_effect_bits_text(eff) ++ "]\n"
+            if (eff & EFF_CONSUME) != 0:
+                out = out ++ "  consume:\n" ++ analysis_explain_effect_chain(sema, si, pi, 0, source_path)
+            if (eff & EFF_ESCAPE_VALUE) != 0:
+                out = out ++ "  escape_value:\n" ++ analysis_explain_effect_chain(sema, si, pi, 1, source_path)
+            if (eff & EFF_WRITE) != 0:
+                out = out ++ "  write:\n" ++ analysis_explain_effect_chain(sema, si, pi, 2, source_path)
+    if found == 0:
+        out = out ++ "  (no signature matched; use the exact finalized name, e.g. Type.method)\n"
+    out
+
 fn analysis_fact_explain_query(kind: str, wanted: str) -> str:
     if kind == "call": return "kind=call,name~" ++ wanted
     if kind == "value": return "kind=place,detail~" ++ wanted
@@ -1449,6 +1589,11 @@ fn compiler_analysis_run(sema: &Sema, mir_mod: &MirModule, pool: &InternPool, so
     var needs_codegen = false
     var codegen_query = ""
 
+    if request == "move-sites":
+        return CompilerAnalysisResult { text: analysis_move_sites(sema, source_path), status: 0, needs_codegen: false, codegen_query: "", report }
+    if request.starts_with("explain:effect:"):
+        let ee_target = analysis_slice(request, 15, request.len() as i32)
+        return CompilerAnalysisResult { text: analysis_explain_effect(sema, ee_target, source_path), status: 0, needs_codegen: false, codegen_query: "", report }
     if request.starts_with("matrix:"):
         let query = analysis_slice(request, 7, request.len() as i32)
         if query.contains("name"):
