@@ -1475,6 +1475,20 @@ unsafe fn run_build_action_from_build_w(root: str, cfg: ProjectConfig, target: &
     build_action_run_result_with_effects(0, result.effect_records)
 
 fn load_build_graph_from_build_w(root: str, cfg: &ProjectConfig, options: &BuildCommandOptions) -> BuildGraphLoadResult:
+    // D19/#702: the evaluated graph is pure data; when the build sources,
+    // runner, with.toml, and graph-shaping options are unchanged, load the
+    // serialized graph (~0.2s) instead of re-evaluating build.w (~5s per
+    // invocation — including every worker spawn). Action workers are
+    // excluded: evaluating an action needs the live Sema only the real
+    // eval produces. Eval-time side effects (SDK materialization) persist
+    // on disk from the eval that wrote the cache; if their products are
+    // manually deleted, targets fail loudly on missing declared inputs —
+    // delete out/.build-state/build-graph.cache to force a re-eval.
+    let graph_cache_key = build_cache_graph_key(root, options.target_kind, if options.strict_effects: 1 else: 0)
+    if not build_action_worker_env_enabled():
+        let cached = build_cache_graph_try_read(root, graph_cache_key)
+        if cached.ok:
+            return BuildGraphLoadResult { graph: cached, sema: Sema.placeholder(InternPool.init(), DiagnosticList.init(), AstPool.new()) }
     var graph = empty_build_graph()
     let entry_path = resolve_join(root, "__with_build_eval.w")
     var comp = Compilation.init()
@@ -1502,6 +1516,7 @@ fn load_build_graph_from_build_w(root: str, cfg: &ProjectConfig, options: &Build
         return BuildGraphLoadResult { graph, sema }
     let materialized = materialize_build_graph_from_comptime(sema, eval_result.value, eval_result.extras)
     build_cache_record_build_effects(root, eval_result.effect_records)
+    build_cache_graph_write(root, graph_cache_key, &materialized.graph)
     BuildGraphLoadResult { graph: materialized.graph, sema: materialized.sema }
 
 fn build_graph_find_build_root(start_dir: str) -> str:

@@ -610,6 +610,50 @@ fn ret_require_test_green(ctx: &ActionCtx, compiler_sha: str) -> i32:
         return ret_fail(ctx, "test-green manifest is stale; run `with build :test`")
     0
 
+// D19: evidence is written once by the step that produces it and only read
+// thereafter. The fixpoint tier records what it verified — the fixpoint
+// object shas, bound to the exact release binary present at verification —
+// so the bless step never re-hashes or (worse) rebuilds fixpoint objects to
+// re-derive facts the fixpoint run already proved.
+pub fn run_fixpoint_evidence_action(ctx: ActionCtx) -> i32:
+    let fs = ctx.fs()
+    if fs.mkdir_all("out/.build-state") != 0:
+        return ret_fail(ctx, "could not create out/.build-state")
+    let compiler_path = ret_release_compiler_path()
+    if not fs.exists(compiler_path):
+        return ret_fail(ctx, "missing " ++ compiler_path ++ "; run `with build` first")
+    let compiler_sha = ret_sha256_file(ctx, "fixpoint-evidence-compiler", compiler_path)
+    if compiler_sha.len() == 0:
+        return ret_fail(ctx, "could not hash " ++ compiler_path)
+    let stage2_sha = ret_sha256_file(ctx, "fixpoint-evidence-stage2", ret_stage_fixpoint_path("with-stage2-fixpoint.o"))
+    let stage3_sha = ret_sha256_file(ctx, "fixpoint-evidence-stage3", ret_stage_fixpoint_path("with-stage3-fixpoint.o"))
+    if stage2_sha.len() == 0 or stage3_sha.len() == 0:
+        return ret_fail(ctx, "could not hash fixpoint objects")
+    let evidence =
+        "{\n" ++
+        "  \"compiler_sha256\": \"" ++ ret_json_escape(compiler_sha) ++ "\",\n" ++
+        "  \"stage2_fixpoint_sha256\": \"" ++ ret_json_escape(stage2_sha) ++ "\",\n" ++
+        "  \"stage3_fixpoint_sha256\": \"" ++ ret_json_escape(stage3_sha) ++ "\"\n" ++
+        "}\n"
+    if fs.write_text("out/.build-state/fixpoint-evidence.json", evidence) != 0:
+        return ret_fail(ctx, "could not write out/.build-state/fixpoint-evidence.json")
+    0
+
+// Extract a "key": "value" string field from a manifest written by our own
+// evidence writers (flat, escaped values never contain a quote).
+fn ret_json_field(manifest: str, key: str) -> str:
+    let marker = "\"" ++ key ++ "\": \""
+    let at = manifest.find(marker)
+    if at < 0:
+        return ""
+    let start = at + marker.len()
+    var end = start
+    while end < manifest.len() and manifest.byte_at(end) != 34:
+        end = end + 1
+    if end >= manifest.len():
+        return ""
+    manifest.slice(start, end)
+
 pub fn run_last_green_action(ctx: ActionCtx) -> i32:
     let fs = ctx.fs()
     if fs.mkdir_all("out/.build-state") != 0:
@@ -626,8 +670,17 @@ pub fn run_last_green_action(ctx: ActionCtx) -> i32:
         return ret_fail(ctx, "could not hash " ++ compiler_path)
     if ret_require_test_green(ctx, compiler_sha) != 0:
         return 1
-    let stage2_sha = ret_sha256_file(ctx, "stage2-fixpoint", ret_stage_fixpoint_path("with-stage2-fixpoint.o"))
-    let stage3_sha = ret_sha256_file(ctx, "stage3-fixpoint", ret_stage_fixpoint_path("with-stage3-fixpoint.o"))
+    // D19: read the fixpoint tier's recorded evidence; never re-hash (or
+    // rebuild) the objects here. Stale evidence fails loudly instead.
+    let fixpoint_evidence = fs.read_text("out/.build-state/fixpoint-evidence.json")
+    if fixpoint_evidence.len() == 0:
+        return ret_fail(ctx, "missing fixpoint evidence; run `with build :fixpoint`")
+    if ret_json_field(fixpoint_evidence, "compiler_sha256") != compiler_sha:
+        return ret_fail(ctx, "fixpoint evidence was recorded for a different compiler; run `with build :fixpoint`")
+    let stage2_sha = ret_json_field(fixpoint_evidence, "stage2_fixpoint_sha256")
+    let stage3_sha = ret_json_field(fixpoint_evidence, "stage3_fixpoint_sha256")
+    if stage2_sha.len() == 0 or stage3_sha.len() == 0:
+        return ret_fail(ctx, "fixpoint evidence is malformed; run `with build :fixpoint`")
     let commit = ret_git_commit(ctx)
     let commit_label = if commit.len() > 0: commit else: "unknown"
     if ret_archive_verified_seed(ctx, source_version, commit_label, compiler_sha) != 0:

@@ -1402,9 +1402,25 @@ pub fn build(ctx: BuildCtx) -> Build:
     bless_manifest = bless_manifest.dep("fixpoint-compare")
     out = out.add_target(bless_manifest)
 
+    // D19: the fixpoint tier records what it verified (object shas bound to
+    // the release binary) so bless steps read evidence instead of re-deriving.
+    var fixpoint_evidence = target_new(.Action, "fixpoint-evidence", "").output("out/.build-state/fixpoint-evidence.json")
+    fixpoint_evidence.action = run_fixpoint_evidence_action
+    fixpoint_evidence = fixpoint_evidence.input(host_bin("out/bin/with-sha256"))
+    fixpoint_evidence = fixpoint_evidence.input(stage_compiler_obj("with-stage2-fixpoint.o"))
+    fixpoint_evidence = fixpoint_evidence.input(stage_compiler_obj("with-stage3-fixpoint.o"))
+    fixpoint_evidence = fixpoint_evidence.input(release_compiler_bin("with"))
+    fixpoint_evidence = fixpoint_evidence.write_scope("out/.build-state")
+    fixpoint_evidence = fixpoint_evidence.write_scope("out/command/fixpoint-evidence")
+    fixpoint_evidence = fixpoint_evidence.dep("fixpoint-compare")
+    fixpoint_evidence = fixpoint_evidence.dep("with-sha256")
+    fixpoint_evidence = fixpoint_evidence.dep("build")
+    out = out.add_target(fixpoint_evidence)
+
     var fixpoint = target_new(.Group, "fixpoint", "")
     fixpoint = fixpoint.dep("fixpoint-compare")
     fixpoint = fixpoint.dep("bless-manifest")
+    fixpoint = fixpoint.dep("fixpoint-evidence")
     out = out.add_target(fixpoint)
 
     var fixpoint_diff = target_new(.Action, "fixpoint-diff", "").output("out/fixpoint-diff/report.txt")
@@ -1826,10 +1842,12 @@ pub fn build(ctx: BuildCtx) -> Build:
 
     var last_green = target_new(.Action, "last-green", "").output("out/.build-state/last-green.json")
     last_green.action = run_last_green_action
+    // D19: last-green is pure evidence assembly — it reads what test-green
+    // and fixpoint-evidence recorded and fails loudly when stale. It must
+    // never trigger rebuilds of the things it is blessing, so it carries no
+    // deps on the build/fixpoint targets.
     last_green = last_green.input(host_bin("out/bin/with-sha256"))
     last_green = last_green.input(release_compiler_bin("with"))
-    last_green = last_green.input(stage_compiler_obj("with-stage2-fixpoint.o"))
-    last_green = last_green.input(stage_compiler_obj("with-stage3-fixpoint.o"))
     last_green = last_green.input("out/.build-state/seed-input.json")
     last_green = last_green.input("src/version")
     last_green = last_green.extra_output("out/seed-archive")
@@ -1837,12 +1855,7 @@ pub fn build(ctx: BuildCtx) -> Build:
     last_green = last_green.write_scope("out/.build-state")
     last_green = last_green.write_scope("out/seed-archive")
     last_green = last_green.write_scope("out/command/last-green")
-    last_green = last_green.dep("fixpoint")
     last_green = last_green.dep("with-sha256")
-    last_green = last_green.dep("build")
-    last_green = last_green.dep("stage1")
-    last_green = last_green.dep("stage2-fixpoint-object")
-    last_green = last_green.dep("stage3-fixpoint-object")
     out = out.add_target(last_green)
 
     var require_last_green = target_new(.Action, "require-last-green", "").output("out/command/require-last-green/ok")

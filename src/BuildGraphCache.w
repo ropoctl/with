@@ -67,6 +67,11 @@ pub fn build_cache_is_cacheable(kind: i32) -> bool:
     if kind == 16: return true
     if kind == 17: return true
     if kind == 18: return true
+    // 19 (RunCorpusTest): the verdict is a function of the entry binary
+    // (hashed as an input) plus dep-rebuilt propagation — selfcheck re-runs
+    // when stage2 changed, not on every invocation that walks past it
+    // (#702: it was an 86s always-run tax on any dep chain touching it).
+    if kind == 19: return true
     if kind == 22: return true
     if kind == 23: return true
     false
@@ -750,3 +755,187 @@ pub fn build_cache_print_effects(root: str, graph: &BuildGraph, target_filter: s
             build_graph_rt_write("  reproducible: yes\n")
             build_graph_rt_write(effects)
     0
+
+// ── D19/#702: evaluated-graph cache ────────────────────────────────
+//
+// Every `with build` invocation comptime-evaluates build.w (~5s) before it
+// knows what was asked — including every worker spawn inside a battery. The
+// evaluated graph is pure data (targets, strings, generated sources), so it
+// serializes; the cache key is the build-source hash plus the runner's own
+// fingerprint plus the options that shape the graph. Action workers must
+// NOT load from this cache: evaluating an action needs the live Sema the
+// real load produces. Length-prefixed strings survive arbitrary bytes.
+
+fn build_cache_graph_path(root: str) -> str:
+    build_cache_state_dir(root) ++ "/build-graph.cache"
+
+pub fn build_cache_graph_key(root: str, target_kind: i32, strict_effects: i32) -> str:
+    build_cache_hash_build_graph_sources(root) ++ ":" ++ build_cache_current_compiler_fingerprint() ++ ":" ++ build_cache_fingerprint_file(root ++ "/with.toml") ++ f":{target_kind}:{strict_effects}"
+
+fn bcg_put_str(out: str, s: str) -> str:
+    out ++ f"s{s.len()}\n" ++ s ++ "\n"
+
+fn bcg_put_list(out: str, items: &Vec[str]) -> str:
+    var acc = out ++ f"l{items.len()}\n"
+    for i in 0..items.len() as i32:
+        acc = bcg_put_str(acc, items.get(i as i64))
+    acc
+
+pub fn build_cache_graph_write(root: str, key: str, graph: &BuildGraph) -> Unit:
+    if not graph.ok:
+        return
+    var out = "WGRAPH1\n"
+    out = bcg_put_str(out, key)
+    out = bcg_put_str(out, graph.package_name)
+    out = bcg_put_str(out, graph.package_version)
+    out = bcg_put_str(out, graph.default_target)
+    out = bcg_put_str(out, graph.raw_text)
+    out = out ++ f"t{graph.targets.len()}\n"
+    for i in 0..graph.targets.len() as i32:
+        let t = graph.targets.get(i as i64)
+        out = out ++ f"i {t.kind} {t.target_kind} {t.optimize_mode} {t.action_fn} {t.timeout_ms} {t.network} {t.parallel}\n"
+        out = bcg_put_str(out, t.name)
+        out = bcg_put_str(out, t.entry)
+        out = bcg_put_str(out, t.output)
+        out = bcg_put_str(out, t.cwd)
+        out = bcg_put_list(out, &t.system_libs)
+        out = bcg_put_list(out, &t.include_paths)
+        out = bcg_put_list(out, &t.defines)
+        out = bcg_put_list(out, &t.inputs)
+        out = bcg_put_list(out, &t.extra_outputs)
+        out = bcg_put_list(out, &t.write_scopes)
+        out = bcg_put_list(out, &t.deps)
+        out = bcg_put_list(out, &t.args)
+        out = bcg_put_list(out, &t.env)
+        out = bcg_put_list(out, &t.action_source_paths)
+    out = out ++ f"g{graph.generated_sources.len()}\n"
+    for i in 0..graph.generated_sources.len() as i32:
+        let g = graph.generated_sources.get(i as i64)
+        out = bcg_put_str(out, g.path)
+        out = bcg_put_str(out, g.contents)
+    let _mk = build_graph_rt_mkdir_p(build_cache_state_dir(root))
+    let _w = build_graph_rt_write_file(build_cache_graph_path(root), out)
+
+type BcgReader {
+    text: str,
+    pos: i64,
+    ok: bool,
+}
+
+fn bcg_parse_i64(s: str) -> i64:
+    var out: i64 = 0
+    var neg = false
+    var i: i64 = 0
+    if s.len() > 0 and s.byte_at(0) == 45:
+        neg = true
+        i = 1
+    while i < s.len():
+        let ch = s.byte_at(i)
+        if ch < 48 or ch > 57:
+            return if neg: -out else: out
+        out = out * 10 + (ch - 48) as i64
+        i = i + 1
+    if neg: -out else: out
+
+impl BcgReader:
+    mut fn read_line() -> str:
+        if not self.ok:
+            return ""
+        var end = self.pos
+        while end < self.text.len() and self.text.byte_at(end) != 10:
+            end = end + 1
+        if end >= self.text.len():
+            self.ok = false
+            return ""
+        let line = self.text.slice(self.pos, end)
+        self.pos = end + 1
+        line
+
+    mut fn read_str() -> str:
+        let header = self.read_line()
+        if not self.ok or header.len() == 0 or header.byte_at(0) != 115:
+            self.ok = false
+            return ""
+        let n = bcg_parse_i64(header.slice(1, header.len()))
+        if n < 0 or self.pos + n + 1 > self.text.len():
+            self.ok = false
+            return ""
+        let s = self.text.slice(self.pos, self.pos + n)
+        self.pos = self.pos + n + 1
+        s
+
+    mut fn read_list() -> Vec[str]:
+        var out: Vec[str] = Vec.new()
+        let header = self.read_line()
+        if not self.ok or header.len() == 0 or header.byte_at(0) != 108:
+            self.ok = false
+            return out
+        let n = bcg_parse_i64(header.slice(1, header.len()))
+        for i in 0..n as i32:
+            out.push(self.read_str())
+        out
+
+pub fn build_cache_graph_try_read(root: str, key: str) -> BuildGraph:
+    var graph = empty_build_graph()
+    let text = build_graph_rt_read_file(build_cache_graph_path(root))
+    if text.len() == 0:
+        return graph
+    var r = BcgReader { text: text, pos: 0, ok: true }
+    if r.read_line() != "WGRAPH1":
+        return graph
+    if r.read_str() != key or not r.ok:
+        return graph
+    graph.package_name = r.read_str()
+    graph.package_version = r.read_str()
+    graph.default_target = r.read_str()
+    graph.raw_text = r.read_str()
+    let theader = r.read_line()
+    if not r.ok or theader.len() == 0 or theader.byte_at(0) != 116:
+        return graph
+    let tcount = bcg_parse_i64(theader.slice(1, theader.len()))
+    for ti in 0..tcount as i32:
+        let iline = r.read_line()
+        if not r.ok or iline.len() < 2 or iline.byte_at(0) != 105:
+            return empty_build_graph()
+        let nums = iline.slice(2, iline.len()).split(" ")
+        if nums.len() != 7:
+            return empty_build_graph()
+        var t = empty_build_graph_target()
+        t.kind = bcg_parse_i64(nums.get(0)) as i32
+        t.target_kind = bcg_parse_i64(nums.get(1)) as i32
+        t.optimize_mode = bcg_parse_i64(nums.get(2)) as i32
+        t.action_fn = bcg_parse_i64(nums.get(3)) as i32
+        t.timeout_ms = bcg_parse_i64(nums.get(4)) as i32
+        t.network = bcg_parse_i64(nums.get(5)) as i32
+        t.parallel = bcg_parse_i64(nums.get(6)) as i32
+        t.name = r.read_str()
+        t.entry = r.read_str()
+        t.output = r.read_str()
+        t.cwd = r.read_str()
+        t.system_libs = r.read_list()
+        t.include_paths = r.read_list()
+        t.defines = r.read_list()
+        t.inputs = r.read_list()
+        t.extra_outputs = r.read_list()
+        t.write_scopes = r.read_list()
+        t.deps = r.read_list()
+        t.args = r.read_list()
+        t.env = r.read_list()
+        t.action_source_paths = r.read_list()
+        if not r.ok:
+            return empty_build_graph()
+        graph.targets.push(t)
+    let gheader = r.read_line()
+    if not r.ok or gheader.len() == 0 or gheader.byte_at(0) != 103:
+        return empty_build_graph()
+    let gcount = bcg_parse_i64(gheader.slice(1, gheader.len()))
+    for gi in 0..gcount as i32:
+        let path = r.read_str()
+        let contents = r.read_str()
+        if not r.ok:
+            return empty_build_graph()
+        graph.generated_sources.push(BuildGraphGeneratedSource { path: path, contents: contents })
+    if not r.ok:
+        return empty_build_graph()
+    graph.ok = true
+    graph
