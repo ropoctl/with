@@ -31,6 +31,15 @@ removing guardrails. Raw C stays explicit; modeled C becomes
 humane. The goal is native control, Rust-level safety, and
 C-level reach — with the suffering automated away.
 
+The language is named for the `with` scope: a resource lives in its
+scope and is released when the scope ends. Memory is the first
+resource, not an exception. Every allocation is owned from the moment
+it is made, and its owner's scope releases it — the compiler proves
+this the same way it proves safety. Here With is stricter than Rust:
+Rust calls leaking safe; With calls it a defect. Leaking memory must
+take deliberate, visible effort. If the creators of the language can
+leak by accident, the design is wrong, not the programmer.
+
 ---
 
 ## Core Principles
@@ -603,26 +612,30 @@ Never add an AI assistant, model, tool, or vendor as a commit author,
 co-author, trailer, or credit line. Do not use `Co-Authored-By` for AI
 assistance.
 
-### Rebuild and verify (tiered — see decisions.md D14)
+### Rebuild and verify (tiered — see decisions.md D14, D19)
 
-**Iterate tier** (while developing): `with check src/main.w` and/or
-`with build :dev` (seed → stage1, one self-compile) plus targeted test
-files. Do NOT run the full battery per edit.
+**Iterate tier — the only per-change requirement.** `with check src/main.w`
+and/or `with build :dev` (seed → stage1, one self-compile), plus the
+targeted tests for what you touched. Never run the full battery per edit.
 
-**Commit tier** (gates every commit batch):
+**Batch tier — the default.** Accumulate related commits; ONE battery
+blesses the whole batch:
 ```
 with build              # must pass
 with build :fixpoint    # must pass
 ```
-plus `audit:all`, `:test`, `:test-green`, `:last-green`. `audit:all` and
-`:test` may run concurrently (they share no outputs).
+plus `audit:all`, `:test`, `:test-green`, `:last-green` (`audit:all` and
+`:test` may run concurrently — they share no outputs), then reseed once.
+Batteries are expensive; batching them is the discipline, not a shortcut.
 
-**Batch rule:** independent, low-risk build-layer changes (build.w,
-build/*.w, docs, non-semantic executor changes) may share ONE battery and
-land as separate per-change commits. Anything touching language semantics,
-codegen, ownership/drop scheduling, or ABI keeps battery-per-change.
+**Isolation rule — blast radius, not ritual.** A change to ownership/drop
+scheduling, codegen determinism, or ABI must be ALONE in its batch (and
+adds `:move-audit`/`:drop-audit`), so a red battery indicts one change.
+Docs, build-layer, and tooling changes batch freely and skip the drop
+audits.
 
-If a gate fails, stop adding changes. Debug the failure.
+If a batch's battery fails: bisect within the batch using iterate-tier
+evidence. Do not add changes to a red batch.
 
 ### Re-read before editing
 

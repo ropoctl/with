@@ -31,6 +31,15 @@ removing guardrails. Raw C stays explicit; modeled C becomes
 humane. The goal is native control, Rust-level safety, and
 C-level reach — with the suffering automated away.
 
+The language is named for the `with` scope: a resource lives in its
+scope and is released when the scope ends. Memory is the first
+resource, not an exception. Every allocation is owned from the moment
+it is made, and its owner's scope releases it — the compiler proves
+this the same way it proves safety. Here With is stricter than Rust:
+Rust calls leaking safe; With calls it a defect. Leaking memory must
+take deliberate, visible effort. If the creators of the language can
+leak by accident, the design is wrong, not the programmer.
+
 ---
 
 ## Core Principles
@@ -57,7 +66,9 @@ when you can name the exact function, branch, and condition producing
 the wrong state, observed in `lldb` or the debug allocator. Output
 tables, run counts, raw `--dump-mir`/`--dump-drop-state` greps, and
 added trace prints are hypotheses, not proof. Do not propose a fix or
-deferral from a characterization alone.
+deferral from a characterization alone. Deferring a bug is valid only
+after locating it at the instruction level and showing the fix needs
+foundation work you can point to.
 
 **Self-check trip-wire.** If your last three actions were editing,
 compiling, and reading trace output, and you still cannot name the exact
@@ -76,8 +87,8 @@ MIR lowering, ownership, and codegen bugs, use `with check --trace-place`,
 adding temporary trace prints. For fixpoint failures, run
 `with build :fixpoint-diff` before inspecting generated objects by hand.
 
-**Workflow default for memory bugs.** Any drop, lifetime, double-free,
-use-after-free, or leak bug starts with the native debug allocator:
+**Workflow default for memory bugs.** Any drop/lifetime/double-free/
+use-after-free/leak bug starts with the native debug allocator:
 `--debug-alloc` or `WITH_DEBUG_ALLOC=1`; see `docs/debug-allocator.md`.
 Use `tools/debug_drop.w` and `tools/debug_drop*.lldb` to turn the
 allocator verdict into allocation/free sites, inspect `--dump-drop-state`,
@@ -116,6 +127,59 @@ this make the user state something the compiler already knows, can
 infer, or that has no consequence?* If yes, don't add it. A
 diagnostic earns its place only by catching a real mistake the
 compiler cannot otherwise resolve — not by enforcing ritual.
+
+**Vale, not Rust, is the closest reference for the ownership model.**
+We take the best parts of Vale (single ownership, consuming
+destructors / Higher RAII, generational references, regions) and
+ditch the worst parts. The mission's "exactly as safe as Rust" is a
+safety *bar*, not a design compass — we are allergic to Rust's
+tiresome syntax and the burden it puts on the dev-user. When a Rust
+idiom is adopted because we absolutely must, it is confined to the
+library-maintainer tier ("only library maintainers will ever have to
+do this, never app developers"). When weighing ownership/drop/
+lifetime semantics, check `.reference/Vale` first; reach for Rust
+only when Vale's answer cannot meet the safety bar.
+
+**The calling convention is SHARE-PLACE by default — this is
+load-bearing, canonical, and MUST NOT be reverted.** `docs/completed/
+mutability.md` is the authoritative, Eric-authored design for With's
+mutability and calling-convention model. A non-`Copy` value passed
+`f(x)` is an *ephemeral shared-place alias*: the callee mutates the
+**caller's** place, the caller keeps ownership, and the destructor runs
+in the caller's scope. `move`/`copy` are required **only** when the
+callee's inferred effect summary is `consume`/`escape_value`
+(`escape_view` is governed by view-origin tracking). This is With's
+calling card — the Python-shaped ergonomics (`bump(p)` just mutates `p`;
+no `&mut` tax) with static borrow-checked safety, unique among systems
+languages. It is NOT move-by-default; it is NOT copy-by-default.
+
+Past agents "simplified" this to move + callee-drop (the callee consumes
+and drops every non-Copy by-value param). **That is a regression, not a
+simplification, and it is forbidden.** If you find by-value non-Copy
+params being moved/consumed/callee-dropped by default, that is a bug to
+fix toward share-place, never a behavior to preserve or extend. Do not
+propose, implement, or rationalize move-by-default for non-Copy params.
+Before touching parameter passing, argument lowering, drop scheduling,
+or effect handling, re-read `mutability.md` in full and preserve the
+share-place model. The receiver modes (`&self`/`mut self`/`move self`)
+and the `Copy` opt-in for aggregates are part of the same model. See
+`docs/decisions.md` D5.
+
+**`FnAbi` is the single ABI source of truth — never re-derive call ABI
+per-path.** Every function signature has ONE ABI descriptor (`FnAbi`
+with a per-parameter `PassMode` — `Direct`/`Indirect`/`IndirectPlace`/
+`Fat`/`Ignore`), computed ONCE by `compute_fn_abi(sig)` and read by BOTH
+the callee prologue (`declare_function`) and every call site
+(`push_call_arg`). This is what Rust (`FnAbi`/`PassMode`), Go
+(`ABIParamResultInfo`), Zig (`fn_info`), and Clang/LLVM
+(`CGFunctionInfo`/`ABIArgInfo`) all do; it makes caller/callee/path
+divergence impossible. When adding a call-lowering path, a receiver
+shape, or a parameter kind, extend `compute_fn_abi`/`PassMode` in ONE
+place and read it — **never** write a fresh per-path "value vs address
+vs byval" decision. A per-path ABI derivation is the exact bug that
+produced the transparent `T*`/`T**` divergence; re-introducing one is a
+regression. Share-place (D5) is `PassMode::IndirectPlace`. See
+`docs/decisions.md` D6 and `docs/fn_abi_descriptor_design.md`.
 
 ---
 
@@ -248,8 +312,8 @@ to a warning, add an exemption, or route around it.
 
 **"Pre-existing" without evidence.** A failure is only
 pre-existing if you've verified it existed on the previous
-commit. Otherwise it's your failure and you've just renamed it.
-Never use `git stash` to answer this question; use `git worktree`
+commit. Otherwise it's your failure and you've just renamed
+it. Never use `git stash` to answer this question; use `git worktree`
 or a separate clone.
 
 **Silent fallbacks in generated output.** See "No Silent
@@ -267,8 +331,7 @@ reporting problem. The bar is correctness, not coverage.
 ## Runtime Architecture
 
 ```
-rt_core.o    (With)  = the future. All new runtime functions go here.
-helpers.o    (C)     = legacy. Functions migrate OUT, never in.
+rt_core.o    (With)  = core runtime. All runtime functions live here.
 ```
 
 Two link paths:
@@ -278,13 +341,10 @@ Two link paths:
 Linking rules:
 - Pure With programs (no c_import): `rt_core.o` only
 - User programs with c_import: `rt_core.o` first, then
-  `helpers.a` as archive (linker pulls only missing symbols)
-- Compiler build: `helpers.o` + `support_runtime.o` (no rt_core.o)
+  `cimport_stubs.o` as archive (linker pulls only missing symbols)
 
-**Direction is always: With replaces C. Never duplicate in C.**
 When compiler-owned runtime behavior is needed, implement it as ordinary
-With code behind normal module/private-function boundaries. Never add new
-code to `helpers.c`.
+With code behind normal module/private-function boundaries.
 
 ### `@[c_export]` is foreign ABI only
 
@@ -328,149 +388,75 @@ malformed. Users reach regex through `std.regex`, never through
 
 ## Self-Contained Toolchain (we build our own LLVM)
 
-**After bootstrap the seed depends on nothing external from LLVM.**
-This is a hard invariant, not an aspiration.
+**Not a single line of non-With code in this repo. We are 1000%
+self-hosted.** Inline/platform assembly (`.s`) is the only exception.
+No C, no C++, no glue files — external native libraries (libclang,
+LLVM) are reached through `extern fn` declarations in With, never
+through a shim written in another language. If a capability seems to
+require a C/C++ source file, the answer is a With-side implementation
+over the C API (or asm), or the capability waits.
 
-**All tooling is With too — even temporary, one-off, throwaway scripts.**
-The "1000% self-hosted, no non-With code" rule covers every tool you write:
-migrators, source rewriters, log/output scanners, ad-hoc analysis. Never reach
-for Python, bash, perl, or awk — a scratch script in another language is the same
-violation as C in the compiler. Delete it and rewrite it in With. There is no
-"just a quick script" exception; With IS a scripting language:
+**This includes ALL tooling — even temporary, one-off, throwaway scripts.**
+Migrators, source rewriters, log/output scanners, ad-hoc analysis: write them in
+With, never in Python, bash, perl, or awk. A Python/bash scratch script in this
+repo is the same violation as C in the compiler — delete it and rewrite it in
+With. With IS a scripting language; there is no "just a quick script" exception.
 
 - **One-liners** (perl/python `-e` style):
   - `with -e 'print_i32(6 * 7)'` — eval a snippet (implicit main)
-  - `... | with -n 'if line.starts_with("a"): print(line)'` — per stdin line,
-    `line` bound (grep-like)
+  - `... | with -n 'if line.starts_with("a"): print(line)'` — run the code per
+    stdin line with `line` bound (grep-like)
   - `... | with -p 'line = line ++ "!"'` — per-line transform, auto-printed
     (sed-like)
-- **No `sed`/`awk`/`cut`/`perl` for text transforms — use a `with` one-liner** (if
-  impossible as a one-liner, FILE A BUG): `sed 's/a/b/'` → `with -p 'line =
-  line.replace("a","b")'`; `grep pat` → `with -n 'if line.contains("pat"):
-  print(line)'`; `cut -f2` → `with -n 'print(line.split("\t").get(1))'`; complex
-  regex → `use std.regex` (`Regex.replace`) in a `with run` script.
-- **Implicit main** — a `.w` file needs no `fn main`; top-level statements are the
-  program and may sit alongside helper `fn` definitions:
+- **Never `sed`/`awk`/`cut`/`perl` for text transforms — use a `with` one-liner.**
+  If a transform is genuinely impossible as a one-liner, that is a BUG to file, not
+  a reason to reach for sed.
+  - `sed 's/old/new/'`  →  `... | with -p 'line = line.replace("old", "new")'`
+  - `grep pat`          →  `... | with -n 'if line.contains("pat"): print(line)'`
+    (also `.starts_with`/`.ends_with`)
+  - `cut -f2`           →  `... | with -n 'print(line.split("\t").get(1))'`
+  - complex regex       →  `use std.regex` in a `with run tool.w` script
+    (`Regex.replace(text, repl)`); prefer str `slice`/`split`/`replace` first.
+- **Implicit main** — a `.w` file needs no `fn main`; top-level statements ARE
+  the program, and may sit alongside helper `fn` definitions:
   ```
   use std.process
   fn shout(s: str): s ++ "!"        // return type inferred
-  let argv = args()
+  let argv = args()                      // std.process
   for i in 1..argv.len() as i32: print(shout(argv.get(i as i64)))
   ```
-- **Run without a build step**: `with run tool.w a b` compiles-and-runs, passing
-  `a b` as the program's argv. Reuse the compiler's modules (`use Lexer`,
-  `use Token`) for token-accurate source tooling rather than regex. See
-  `tools/migrate_receivers.w`. File I/O: `with_fs_read_file` / `with_fs_write_file`
-  (extern fns).
+- **Run without a build step**: `with run tool.w a b` compiles-and-runs and
+  forwards `a b` as the program's argv. Reuse the compiler's own modules
+  (`use Lexer`, `use Token`) for token-accurate source tooling — regex/text
+  hacks are not acceptable for self-host-critical rewrites. See
+  `tools/migrate_receivers.w`.
+- File I/O via `extern fn with_fs_read_file(path: str) -> str` /
+  `with_fs_write_file(path: str, data: str) -> i32`.
 
-*We* build the entire static LLVM/Clang/lld SDK from source. First-platform
-bootstrap may use the `tools/build-ninja.*`, `tools/build-cmake.*`, and
-`tools/build-static-llvm.*` scripts inside the bootstrap runbook boundary. After
-a seed exists, repeat SDK production is graph-owned through
-`with build :sdk-ninja`, `with build :sdk-cmake`, `with build :sdk-llvm`, and
-`with build :sdk`, installing into `.deps/llvm-<ver>-<host>` or the staged SDK
-prefix selected by the build graph. CMake and its generator backend are also
-With-owned SDK tools: build Ninja from source, then build CMake from source,
-installing both into the same SDK prefix before the LLVM build. That SDK
-produces every static resource the compiler needs:
+**After bootstrap the seed depends on nothing external from LLVM.** A
+hard invariant.
 
-- `lib/libclang.a`, `lib/libLLVM*.a`, `lib/liblld*.a` — the archives.
-- `lib/clang/<v>/include/` — clang's **builtin headers** (`stddef.h`,
-  `stdarg.h`, `stdint.h`, …) that `c_import` needs to parse any C header.
-- `bin/clang` and `bin/clang++` — the With-owned C/C++ drivers used by
-  emitted-C bootstrap. Bootstrap must not fall back to GCC or MSVC `cl.exe`.
-- `bin/cmake` — the With-owned CMake used for repeat SDK production.
-- `bin/ninja` — the With-owned CMake generator backend used for repeat SDK
-  production.
-- `bin/lld` plus driver symlinks, `bin/llvm-ml`/`bin/llvm-ml64`,
-  `bin/llvm-nm`, and `bin/llvm-strip` — linker, assembler, symbol, and
-  release packaging tools.
+*We* build the static LLVM/Clang/lld SDK from source via
+`tools/build-static-llvm.sh` into `.deps/llvm-<ver>-<host>`
+(`LLVM_PREFIX`). That build produces the archives (`libclang.a`,
+`libLLVM*.a`, `liblld*.a`) **and** clang's builtin headers
+(`lib/clang/<v>/include/`: `stddef.h`, `stdarg.h`, …) that `c_import`
+needs to parse C headers. The release binary **embeds** these — like it
+already embeds the stdlib and runtime objects — and links libclang
+statically; the final binary loads no LLVM/Clang dylib. `LLVM_PREFIX` /
+`WITH_LIBCLANG` are **build-time link inputs only**, never runtime deps.
 
-The release binary **embeds** these, the same way it already embeds the
-stdlib (`build/runtime.w` → `EmbeddedStdlibData.w`, served via the
-`<embedded-std>/` virtual FS) and the runtime objects (`.EmbedObjectFiles`
-→ `with_embedded_*` incbin'd into the binary). libclang is statically
-linked; the final binary loads **no** `libclang`/`libLLVM` dylib (the
-bootstrap runbook's Failure Policy enforces this). `LLVM_PREFIX` and
-`WITH_LIBCLANG` are **build-time link inputs only** — never a runtime
-dependency. The static SDK they point at is published per-platform per
-release and fetched with `with build :deps` (#313); LLVM is rebuilt from source
-through the bootstrap runbook or `with build :sdk` only when bringing up a new
-platform or bumping `COMPILER_LLVM_VERSION`. Never rebuild it or point at a
-system LLVM during a normal build.
-
-**Never trust a system-installed LLVM.** We didn't build it, so we don't
-trust it — and a system LLVM almost never ships the static `.a` we need
-anyway. Do **not** resolve any LLVM/Clang resource (archive *or* header)
-from an external path at runtime. If `c_import` can't find a builtin
-header (`'stddef.h' file not found`), the bug is that the resource is
-missing *from the binary* — fix the embedding. **Do not** "fix" it by
-pointing `WITH_CLANG_RESOURCE_DIR` / `LLVM_PREFIX` / `llvm-config` at a
-system or `.deps` LLVM; that re-introduces the external dependency this
-invariant exists to forbid, and a clean release host won't have it.
-
-> Clang's builtin headers ARE now embedded (#312): the build bakes
-> `lib/clang/<v>/include` into the binary
-> (`out/gen/compiler/EmbeddedClangResourceData.w`), and at first `c_import`
-> the compiler materializes them to `~/.cache/with/clang-resource/<v>/` and
-> points `-resource-dir` there. `get_clang_resource_dir()` no longer probes
-> `LLVM_PREFIX` / `llvm-config` / `/usr/local/llvm`; `WITH_CLANG_RESOURCE_DIR`
-> remains an explicit override-only escape hatch. Remaining #312 items are
-> about the *host's own* libc, not LLVM-we-built: `get_sdk_path()` shells to
-> `xcrun` for the macOS sysroot, and macro extraction shells to `cc`.
-
-### Clang is the only C compiler for bootstrap/release C
-
-All platform bootstrap and release flows that compile C use **Clang**:
-macOS, Linux, and Windows. Do not use GCC on Linux, and do not use MSVC
-`cl.exe` on Windows. This applies to emitted-C bootstrap compilers,
-emit-C fixpoint binaries, C smoke tests, generated bridge C, and release
-packaging checks that compile C.
-
-Reason: the emitted-C bootstrap is a compiler artifact, not a portable
-"try any C compiler" sample. It must be validated through one C frontend
-and one diagnostic/ABI model across all hosts. Mixing GCC, MSVC, and Clang
-turns compiler bootstrap failures into host-compiler dialect differences
-and hides real With codegen bugs.
-
-Allowed platform C drivers:
-
-- macOS: `clang` with the Apple SDK/sysroot and LLVM/lld inputs required by
-  the runbook.
-- Linux: `clang` with the With-owned static LLVM/lld SDK and host glibc CRT
-  inputs. If only `gcc` is installed, install/provision Clang; do not switch
-  the bootstrap to GCC.
-- Windows: `clang -target x86_64-pc-windows-msvc` plus `lld-link`; Visual
-  Studio Build Tools/Windows SDK may provide headers, libraries, and CRT
-  import/static libraries, but `cl.exe` is not the compiler.
-
-The static LLVM SDK itself must also be built with Clang:
-
-- Linux/macOS SDK CMake cache must name `clang` and `clang++`.
-- Windows SDK CMake cache must name `clang-cl`, not MSVC `cl.exe`.
-- Windows x64 SDK CMake cache must name SDK `llvm-ml64`, not external MSVC
-  `ml64`, for MASM assembly.
-- Linux/macOS SDK builds must link with lld (`-fuse-ld=lld`) where CMake drives
-  a linker.
-
-The first SDK build for a new platform may use an externally installed Clang as
-the bootstrap compiler, but that compiler is only used to build the pinned
-With-owned SDK from the exact LLVM source tag. Every later compiler/bootstrap/
-release artifact must use the Clang, lld, libclang, and LLVM archives from that
-SDK. Packaging scripts must reject SDKs whose CMake cache names GCC,
-`/usr/bin/cc`, `/usr/bin/c++`, MSVC `cl.exe`, or external MSVC `ml64`.
-
-The first SDK build may use external Python and an external CMake only to build
-the SDK's own `bin/ninja` and `bin/cmake`, because these tools bootstrap the SDK
-build system. After that point, repeat LLVM SDK production uses
-`LLVM_PREFIX/bin/cmake` and `LLVM_PREFIX/bin/ninja` through the graph-owned SDK
-targets; SDK packaging must reject archives that do not include both tools. Do
-not depend on a host Ninja, Make, MSBuild, or Visual Studio generator for repeat
-SDK production.
-
-Release binary size parity is a toolchain-parity check. Large `.text`
-differences between platforms are not harmless until explained; first verify
-the SDK compiler, linker folding/GC policy, and strip policy.
+**Never trust a system-installed LLVM** — we didn't build it, and it
+won't have the static `.a` we need. Do not resolve any LLVM/Clang
+resource (archive *or* header) from an external path at runtime. If
+`c_import` reports `'stddef.h' file not found`, the resource is missing
+*from the binary* — fix the embedding. **Never** point
+`WITH_CLANG_RESOURCE_DIR` / `LLVM_PREFIX` / `llvm-config` at a system or
+`.deps` LLVM to make it pass; that re-introduces the dependency this
+invariant forbids, and a clean release host won't have it. (Clang's builtin
+headers are now embedded in the binary and materialized to a cache at first
+`c_import` (#312); `get_clang_resource_dir()` no longer probes external LLVM,
+and `WITH_CLANG_RESOURCE_DIR` is an override-only escape hatch.)
 
 ---
 
@@ -478,13 +464,13 @@ the SDK compiler, linker folding/GC policy, and strip policy.
 
 ```
 with build              # full build (seed → stage1 → stage2 → final)
+with build :dev         # dev tier: seed → stage1 only (D14 iterate loop)
 with build :stage1      # seed → stage1
 with build :stage2      # stage1 → stage2
-with build :stage3      # stage2 → stage3
 with build :fixpoint    # verify stage2 == stage3 (byte-identical)
 with build :test        # run test suite
 with build :test-green  # verify/record current test evidence
-with build :prune       # report stale build artifacts
+with build :clean       # remove build artifacts
 ```
 
 Stage chain: `seed → stage1 → stage2 → stage3`
@@ -535,9 +521,9 @@ Resolution order: `WITH=<path>` → `with` on PATH → `src/main`
 `src/main` is not checked into git. It is the local seed path fetched
 from the `with-darwin-aarch64` GitHub release asset. Run `with build :seed`
 to fetch it. After `with build`, `with build :fixpoint`, and
-`with build :test` all pass, run `with build :test-green` and
-`with build :last-green`, then update the local bootstrap seed with
-`with build :update-seed` and the installed user compiler with
+`with build :test` pass, run `with build :test-green` and
+`with build :last-green`, then update `src/main` with
+`with build :update-seed` and the installed compiler with
 `with build :install-user`. `with build :test-green` records evidence from a
 completed test run; it is not a substitute for running `with build :test`.
 
@@ -576,6 +562,19 @@ not silently work around it. File an issue with:
 
 ---
 
+## Decision Log
+
+`docs/decisions.md` records non-obvious design/architecture decisions and
+**why** we made them (context, alternatives weighed, reasoning, and what would
+reopen the call). When you make or reverse a judgment call that a future
+maintainer or agent might re-litigate — an ownership/safety semantics ruling, a
+deviation from the reference implementations, a spec amendment that reverses an
+earlier one — append an entry (newest first) and cross-link superseded ones.
+Consult it before reopening a settled question. Keep it terse; it is reasoning,
+not a changelog.
+
+---
+
 ## Editing Protocol
 
 ### Before editing
@@ -585,28 +584,21 @@ conventions. When you can't find something, grep `examples/`,
 `src/`, and `docs/with-specification.md` before assuming it
 doesn't exist. Never rely on memory.
 
-Read `out/project-state.md` immediately after this file if it exists.
-This file is ignored local agent scratch, not repository documentation.
-Do not create it from scratch as routine agent bookkeeping; only create
-it if the maintainer explicitly asks. If it exists, keep it current
-when phase status, blockers, or the next work queue changes, and follow
-its retention policy: it is a short-lived checkpoint, not a history log.
-Prune stale completed entries while updating it, prefer GitHub issues
-for follow-ups and real docs/specs for durable design facts, and keep
-it concise.
-
 ### Code style — write the least ceremony
 
+Match the surrounding code, and follow the mission at the character level:
+
 - **Don't spell types the compiler can infer.** Omit a return type when the body
-  makes it obvious (`fn shout(s: str): s ++ "!"`, not `-> str`); omit a local's
-  type when the initializer gives it. Annotate only where inference needs it
-  (e.g. `var xs: Vec[i32] = Vec.new()`).
-- **Inline the colon when the body is very small.** `fn millis(ms: i32): ms`,
-  `fn get(): self.n` on one line — never break a one-expression body onto its
-  own indented line. Block bodies are for genuinely multi-statement/long bodies.
+  makes it obvious (`fn shout(s: str): s ++ "!"`, not `-> str`); omit a
+  local's type when the initializer gives it. Annotate only where inference
+  genuinely needs it (e.g. `var xs: Vec[i32] = Vec.new()`).
+- **Inline the colon when the body is very small.** `fn millis(ms: i32): ms`
+  and `fn get(): self.n` on one line — do NOT break a one-token/one-expression
+  body onto its own indented line. Use a block body only when the body is
+  actually multi-statement or long.
 - **Boy-scout the style: any time you touch an existing function, fix its style
   too** — drop inferable types, inline tiny bodies. Leave the whole function
-  least-ceremony, not just the lines you changed.
+  least-ceremony, not just the lines you came to change.
 
 ### One logical change at a time
 
@@ -620,92 +612,30 @@ Never add an AI assistant, model, tool, or vendor as a commit author,
 co-author, trailer, or credit line. Do not use `Co-Authored-By` for AI
 assistance.
 
-### String formatting
+### Rebuild and verify (tiered — see decisions.md D14, D19)
 
-Use f-strings when they make code shorter and simpler. Use `++`
-concatenation when it makes code shorter and simpler. Do not
-mechanically prefer one form over the other.
+**Iterate tier — the only per-change requirement.** `with check src/main.w`
+and/or `with build :dev` (seed → stage1, one self-compile), plus the
+targeted tests for what you touched. Never run the full battery per edit.
 
-### Write nice With code
-
-With source should be pleasant to read and worth keeping as an example
-of the language. Passing tests is not enough. Do not mechanically extend
-bad shapes such as giant condition chains, fixture dumps in unrelated
-modules, copy-pasted validation blocks, or awkward APIs that make the next
-change harder. If surrounding code is ugly, improve the shape locally as
-part of the change instead of preserving the ugliness. Prefer small named
-helpers, clear predicates, typed data, and readable control flow.
-
-Use the language ergonomics. Closed sets are enums, not integer constants
-or nullary functions. Enum variant names live under the enum namespace, so
-do not repeat the enum name in every variant (`CcCalleeHint.NONE`, not
-`CcCalleeHint.CC_CALLEE_HINT_NONE`). Omit redundant type annotations when
-the initializer already determines the type, especially `: i32` on integer
-values.
-
-Give tag enums an integer backing type (`enum Thing: i32:`). The backing
-type is load-bearing, not decoration: a backing-less `enum Thing:` is a
-non-Copy tagged ADT, while `enum Thing: i32:` is a Copy integer tag. Any
-enum that is passed by value, stored in a `Vec`/`HashMap`, compared, or used
-as a lightweight tag (like `TypeKind`, `NodeKind`, `MirIntrinsic`,
-`CcBuiltin`) must be `: i32`-backed, or the move-checker will reject ordinary
-by-value use. Only omit the backing type for true sum types whose variants
-carry payloads and are meant to be moved.
-
-Use semantic types at semantic boundaries. If a value represents a
-`MirIntrinsic`, `TypeKind`, `NodeKind`, `BinaryOp`, or local enum such as
-`CcBuiltin`, helper parameters and return types should use that enum type,
-not `i32`. Raw integers are acceptable only at real storage, wire-format,
-FFI, table-index, or bitfield boundaries. Convert at the boundary and keep
-the rest of the code typed.
-
-When cleaning a bad local pattern, clean the whole touched slice. Do not
-make the maintainer point out each leftover instance one by one. If you
-replace function-shaped constants with an enum, update the helper
-signatures, sentinel checks, variant names, and nearby callers in the same
-logical change. If you cannot complete that cleanup safely, stop and explain
-the exact boundary instead of leaving a half-modernized hybrid.
-
-Write With like With. Prefer `enum Thing: A B C` plus `Thing.A` over
-C-style prefixes, prefer `let x = value` over redundant annotations, and
-prefer small typed helpers over long chains of stringly or integerly
-conditionals. Existing bad style is context to improve, not precedent to
-copy.
-
-### Shell commands
-
-Compiler, migrator, runtime, and stdlib code must not assemble shell
-command strings to perform process or filesystem work. Prefer calling
-the internal functions directly; use fibers for concurrency inside the
-compiler instead of spawning compiler subprocesses. Shell command strings
-are acceptable only in Makefiles, scripts, and test harness glue where
-shell semantics such as redirection, globbing, or pipelines are the
-point.
-
-### Rebuild and verify
-
-Match verification to the change's actual blast radius.
-
-For compiler, runtime, stdlib, migrator, build-system, generated-source,
-or other changes that can affect compiler artifacts, run after each logical
-change:
+**Batch tier — the default.** Accumulate related commits; ONE battery
+blesses the whole batch:
 ```
 with build              # must pass
 with build :fixpoint    # must pass
 ```
+plus `audit:all`, `:test`, `:test-green`, `:last-green` (`audit:all` and
+`:test` may run concurrently — they share no outputs), then reseed once.
+Batteries are expensive; batching them is the discipline, not a shortcut.
 
-If either fails, stop adding changes. Debug the failure.
+**Isolation rule — blast radius, not ritual.** A change to ownership/drop
+scheduling, codegen determinism, or ABI must be ALONE in its batch (and
+adds `:move-audit`/`:drop-audit`), so a red battery indicts one change.
+Docs, build-layer, and tooling changes batch freely and skip the drop
+audits.
 
-For documentation-only changes (`docs/**`, `.reference/**`, and repository
-instruction files), do **not** run a compiler build or fixpoint merely because
-text changed. Use targeted verification instead: check the diff and links,
-validate formatting where tooling exists, and run any executable examples that
-were added or changed. Run the full build/fixpoint gates only when the user
-explicitly requests them or when the documentation change also modifies an
-input to the compiler/build artifact pipeline.
-
-For mixed documentation and compiler-affecting changes, use the full
-build/fixpoint gates.
+If a batch's battery fails: bisect within the batch using iterate-tier
+evidence. Do not add changes to a red batch.
 
 ### Re-read before editing
 
@@ -721,7 +651,6 @@ old_string doesn't match due to stale context.
 ### Quick repro
 ```
 time ./out/stage/bin/with-stage2 check src/main.w
-./out/stage/bin/with-stage2 check repro.w --dump-drop-state
 ```
 
 ### Deep compiler tools
@@ -734,6 +663,7 @@ fixpoint bugs:
 ./out/stage/bin/with-stage2 check repro.w --trace-ownership main:_1
 ./out/stage/bin/with-stage2 check repro.w --dump-drop-plan
 ./out/stage/bin/with-stage2 check repro.w --dump-place-map
+./out/stage/bin/with-stage2 check repro.w --dump-abi
 ./out/stage/bin/with-stage2 check repro.w --trace-cleanup-edge 'main:bb0->bb1'
 ./out/stage/bin/with-stage2 check repro.w --dump-drop-flags
 ./out/stage/bin/with-stage2 check repro.w --validate-all
@@ -756,6 +686,8 @@ ordinary call path is a failure rather than a blind spot.
 ./out/stage/bin/with-stage2 analyze repro.w 'matrix:name~function_name'
 ./out/stage/bin/with-stage2 analyze repro.w 'select:stage=sema,kind=parameter,name~function_name'
 ./out/stage/bin/with-stage2 analyze repro.w 'explain:call:function_name'
+./out/stage/bin/with-stage2 analyze repro.w move-sites
+./out/stage/bin/with-stage2 analyze repro.w 'explain:effect:Type.method:self'
 ./out/stage/bin/with-stage2 analyze repro.w 'path:call:caller:callee'
 ./out/stage/bin/with-stage2 analyze repro.w 'closure:call:root_function'
 ./out/stage/bin/with-stage2 analyze repro.w 'lldb:kind=call,name~function_name'
@@ -812,6 +744,20 @@ Use `select`, `matrix`, `path`, `closure`, `explain:node`, and the audits instea
 
 See `docs/deep-debugging-tools.md`.
 
+`--dump-abi` prints, per function signature, each parameter's ownership/ABI
+classification — effect flags, `value_ref_abi`, and the `SHARE-PLACE | OWNED |
+COPY` verdict. It is the direct answer to "is this parameter a borrow
+(share-place) or owned?" — do NOT infer that from MIR or reasoning; dump it.
+
+For drop-exactly-once correctness across (value shape × control flow × ownership
+op × receiver mode), run `with build :drop-audit` (tools/drop_audit.w —
+candidate = the fresh release binary, baseline = the verified seed) before and
+after ANY change to drop scheduling, ownership, or receiver lowering. One bad
+cell means the whole region is untested — audit it, don't spot-fix. The auditor
+classifies every cell against the baseline compiler so regressions self-identify
+(a cell is red only when the verdicts DIFFER; known-shipped findings like #693's
+enum cells and the #608 POD-leak pins read as `same`).
+
 ### LLDB (preferred)
 ```
 lldb -- ./out/stage/bin/with-stage2 check src/main.w
@@ -856,12 +802,11 @@ seed with a known-good binary.
 ```
 src/              compiler source (.w)
 lib/std/          standard library (.w)
-rt/               runtime interface + platform backends (.w, .s)
-runtime/          legacy C runtime (helpers.c — being migrated out)
+rt/               runtime source + platform backends (.w, .s)
+runtime/          platform assembly (fiber_asm_*.s)
 test/             test suite
-out/bootstrap/bin/ bootstrap stage binaries (build artifacts)
-out/stage/bin/   intermediate stage binaries (build artifacts)
-out/release/bin/ release compiler binary (build artifact)
+build.w           build system (with build entry point)
+out/bin/          compiler binaries (build artifacts)
 out/lib/          compiled runtime objects (build artifacts)
 docs/             specifications
 ```
@@ -925,10 +870,6 @@ with build :test-green  # current test evidence recorded
 
 If any step fails, continue debugging until it passes.
 
-After these steps pass, deploy the verified compiler to
-`~/.local/bin/with` with `with build :install-user`. Do not deploy a
-compiler that has not passed the full checklist.
-
 ---
 
 ## Bootstrap Rules
@@ -936,18 +877,17 @@ compiler that has not passed the full checklist.
 ### The seed compiler is frozen
 The installed compiler at ~/.local/bin/with has its own Link.w, its own
 embedded runtime objects, and its own codegen logic baked into the binary.
-You cannot change its behavior by editing source files. If the seed's
-Link.w expects helpers.o, no amount of editing Link.w on disk changes that.
-The seed will always look for helpers.o until you install a new seed.
+You cannot change its behavior by editing source files. The seed will
+keep using its baked-in behavior until you install a new seed.
 
-### Never run seed/install targets with uncommitted changes
-`with build :update-seed` updates `src/main`; `with build :install-user`
-updates `~/.local/bin/with`. A broken seed breaks future builds. Only run
-these targets after `with build :fixpoint` passes on committed code.
+### Never run `with build :install` with uncommitted changes
+`with build :install` updates the seed. A broken seed breaks all future
+builds. Only run install after `with build :fixpoint` passes on committed
+code.
 
 ### Never change Link.w and runtime files in the same commit
 Commit 1: Add new exports to rt_core.w (old link path still works)
-Commit 2: Change Link.w + strip helpers.c (new link path activates)
+Commit 2: Change Link.w (new link path activates)
 Each commit must independently pass `with build :fixpoint`.
 
 ### Bootstrap order for runtime migration
@@ -955,12 +895,8 @@ Each commit must independently pass `with build :fixpoint`.
 2. with build && with build :fixpoint (verify green baseline)
 3. Apply rt_core.w changes ONLY (new exports, ABI fixes)
 4. with build && with build :fixpoint (old link path, new symbols available)
-5. Apply Link.w + helpers.c + compat_runtime.w changes
+5. Apply Link.w changes
 6. Build stage1 with old seed (old link path)
 7. Stage1 has new Link.w — it builds stage2 with new link path
 8. with build :fixpoint (stage2 == stage3, new link path converges)
-9. with build :update-seed (local bootstrap seed is now updated)
-
-### If bootstrap is broken, don't guess
-Inspect `WITH`, `src/main`, `out/release/bin/with`, the stage binaries, and
-runtime objects directly before making changes.
+9. with build :install (seed is now updated)
