@@ -5092,6 +5092,28 @@ impl Sema:
             if dep_sym != 0:
                 self.note_param_effect(dep_sym, eff)
 
+    // D17: ownership-forcing effects do not cross a projection of a NON-COPY
+    // field. A callee that consumes such a field blanks it (reset-on-move,
+    // §2.5.1) and leaves the root's place valid-but-changed — a WRITE on the
+    // root, never a consume of it (the promotion audit_receiver_projection_
+    // origins already branded incorrect). A COPY field (raw pointer, handle)
+    // keeps the promotion: escaping it captures the root's content by aliasing
+    // (std/thread.w's transmuted worker), and nothing is blanked. escape_view
+    // is untouched: a view into a field IS a view into the root.
+    mut fn weaken_projection_owning_effects(arg_node: i32, eff: i32) -> i32:
+        let owning = eff & (EFF_CONSUME | EFF_ESCAPE_VALUE)
+        if owning == 0:
+            return eff
+        if self.effect_arg_is_projection(arg_node) == 0:
+            return eff
+        let fty_opt = self.typed_expr_types.get(arg_node)
+        if not fty_opt.is_some():
+            return eff
+        let fty = fty_opt.unwrap()
+        if fty == 0 or self.is_copy(fty as TypeId) != 0:
+            return eff
+        (eff - owning) | EFF_WRITE
+
     // #D5/P0: when the current function passes one of its own parameters as the
     // argument to `callee_pi` of `callee_sig`, record the effect-flow edge
     // [caller_sig, caller_pi, callee_sig, callee_pi]. `fixpoint_effect_flow` later
@@ -5133,7 +5155,7 @@ impl Sema:
     // own, so they never receive these bits (mirrors the flush-time clamp). This
     // only ADDS data; nothing consumes the completed bits until the P1 flip, so P0
     // is behavior-neutral.
-    fn fixpoint_effect_flow():
+    mut fn fixpoint_effect_flow():
         let n = self.effect_flow_edges.len() as i32
         if n < 4:
             return
@@ -5143,14 +5165,28 @@ impl Sema:
             changed = 0
             guard = guard + 1
             var i = 0
+            var edge_index = 0
             while i + 3 < n:
                 let caller_sig = self.effect_flow_edges.get(i as i64)
                 let caller_pi = self.effect_flow_edges.get((i + 1) as i64)
                 let callee_sig = self.effect_flow_edges.get((i + 2) as i64)
                 let callee_pi = self.effect_flow_edges.get((i + 3) as i64)
                 i = i + 4
+                let projection = if edge_index < self.effect_flow_projections.len() as i32: self.effect_flow_projections.get(edge_index as i64) else: 1
+                edge_index = edge_index + 1
                 let callee_eff = self.sig_param_effect(callee_sig, callee_pi)
-                let trans = callee_eff & (EFF_WRITE | EFF_CONSUME | EFF_ESCAPE_VALUE)
+                var trans = callee_eff & (EFF_WRITE | EFF_CONSUME | EFF_ESCAPE_VALUE)
+                // D17: ownership-forcing effects do not cross a NON-COPY
+                // projection edge — the callee consumes the FIELD, which blanks
+                // it and WRITES the caller's root place. Copy-typed projections
+                // keep the promotion (aliasing capture, nothing blanked).
+                // Mirrors weaken_projection_owning_effects on the direct path so
+                // the fixpoint cannot re-promote what direct noting demoted.
+                let e_owning = trans & (EFF_CONSUME | EFF_ESCAPE_VALUE)
+                if projection != 0 and e_owning != 0:
+                    let edge_arg_ty = self.sig_param_type(callee_sig, callee_pi)
+                    if edge_arg_ty > 0 and self.is_copy(edge_arg_ty as TypeId) == 0:
+                        trans = (trans - e_owning) | EFF_WRITE
                 if trans == 0:
                     continue
                 let p_tid = self.sig_param_type(caller_sig, caller_pi)

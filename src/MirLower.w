@@ -674,16 +674,27 @@ impl MirBuilder:
             // reset-on-move (§2.5.1) must hold at runtime. Only a base whose sole
             // drop is in this function may elide the blank in favor of the static
             // exclusion.
-            let field_ty = self.place_local_type(place)
-            if field_ty > 0 and self.sema.type_needs_drop_frozen(field_ty) != 0:
-                let base_local = self.body.place_locals.get(place as i64)
-                if self.field_move_in_branch > 0 or self.local_has_scheduled_value_drop(base_local) == 0:
-                    self.pending_reset_field_places.push(place)
-                    self.pending_reset_field_types.push(field_ty)
-                    // The base's drop — scope exit here, or drop-before-overwrite
-                    // of the blanked field — must keep its niche guard (§2.5.2).
-                    if base_local >= 0:
-                        self.body.mark_local_ever_moved(base_local)
+            self.queue_field_move_reset(place)
+
+    // #697/D17: blank a moved-out Drop-bearing field at the next pending-reset
+    // flush when (i) the move is conditional (branch-scoped flush) or (ii) the
+    // base's value drop is NOT scheduled in this function (share-place param,
+    // borrowed receiver, stmt temp) — the static moved-field exclusion then
+    // never reaches the real drop site (the caller drops the base), so
+    // reset-on-move (§2.5.1) must hold at runtime. Shared by call-argument
+    // field moves (consume_moved_operand) and returned-out field moves
+    // (cancel_scheduled_value_drop_for_receiver_expr).
+    mut fn queue_field_move_reset(place: i32) -> Unit:
+        let field_ty = self.place_local_type(place)
+        if field_ty > 0 and self.sema.type_needs_drop_frozen(field_ty) != 0:
+            let base_local = self.body.place_locals.get(place as i64)
+            if self.field_move_in_branch > 0 or self.local_has_scheduled_value_drop(base_local) == 0:
+                self.pending_reset_field_places.push(place)
+                self.pending_reset_field_types.push(field_ty)
+                // The base's drop — scope exit here, or drop-before-overwrite
+                // of the blanked field — must keep its niche guard (§2.5.2).
+                if base_local >= 0:
+                    self.body.mark_local_ever_moved(base_local)
 
     mut fn flush_stmt_temp_frame() -> Unit:
         if self.stmt_temp_starts.len() as i32 == 0:
@@ -7124,6 +7135,9 @@ impl MirBuilder:
         let scr_unit = self.unit_operand()
         self.terminate(TermKind.TK_CALL, scr_unit, scr_args_id, scr_place, after_scr)
         self.switch_to(after_scr)
+        // D17: same early-exit flush as the `?` error path — moves already
+        // executed must blank before the cancellation return.
+        self.flush_pending_resets()
         self.emit_defers_for_return()
         self.emit_drops_for_return()
         self.terminate(TermKind.TK_RETURN, 0, 0, 0, 0)
@@ -9360,6 +9374,11 @@ impl MirBuilder:
                 return
             let recv_place = self.lower_expr_place(expr)
             self.mark_place_field_moved(recv_place)
+            // #697/D17: a returned-out field of a base not dropped in this
+            // function (share-place param under the weakened effects) needs the
+            // runtime blank — it lands at the return flush, after the value is
+            // read into the return place.
+            self.queue_field_move_reset(recv_place)
             return
         if kind != NodeKind.NK_IDENT:
             return
@@ -9600,6 +9619,10 @@ impl MirBuilder:
             let fail_op = self.body.new_operand(OperandKind.OK_MOVE, value_place)
             self.assign_operand_to_place(ret_place, fail_op, self.ast.get_start(span_node))
         self.emit_cleanup_awaits_from(cleanup_task_ops, cleanup_start_idx, node)
+        // D17: moves already executed in this statement (field blanks, move-arg
+        // temps) must land before the early error return — the enclosing
+        // statement's flush is never reached on this path.
+        self.flush_pending_resets()
         self.emit_errdefers_for_return()
         self.emit_defers_for_return()
         self.emit_drops_for_return()
@@ -10966,6 +10989,10 @@ impl MirBuilder:
         let tmp = self.new_temp(ok_type_id)
         let place = self.place_for_local(tmp)
         self.body.push_stmt(self.cur_bb, StmtKind.Assign, place, rv, self.ast.get_start(expr))
+        // #605/#698: the wrapped Ok payload is moved into the aggregate —
+        // consume it so a registered payload temp is not also flush-dropped.
+        if self.sema.type_needs_drop_frozen(self.expr_type(expr)) != 0:
+            self.consume_moved_operand(op)
         self.body.new_operand(OperandKind.OK_COPY, place)
 
     mut fn lower_implicit_default_value(type_id: i32, span: i32) -> i32:
@@ -11783,13 +11810,25 @@ impl MirBuilder:
                     for vci in 0..vc_args_count:
                         let vc_arg = if vc_has_resolved != 0: self.sema.get_resolved_call_arg(node, vci) else: self.ast.get_extra(vc_args_start + vci)
                         let saved_expected = self.expected_type
+                        var vc_payload_ty = 0
                         if vci < vc_payload_tys.len() as i32:
-                            let payload_ty = vc_payload_tys.get(vci as i64)
-                            if payload_ty != 0:
-                                self.expected_type = payload_ty
-                        vc_fields.push(if vc_arg == 0: self.unit_operand() else: self.lower_expr(vc_arg))
+                            vc_payload_ty = vc_payload_tys.get(vci as i64)
+                            if vc_payload_ty != 0:
+                                self.expected_type = vc_payload_ty
+                        let vc_arg_op = if vc_arg == 0: self.unit_operand() else: self.lower_expr(vc_arg)
+                        vc_fields.push(vc_arg_op)
                         self.expected_type = saved_expected
                         vc_names.push(0)
+                        // #605/#606 (#698): move a Drop payload into the variant;
+                        // consume the source so it is not also dropped at its
+                        // scope/statement flush. This call-form constructor path
+                        // (`Some(x)` as NK_CALL) was the one aggregate builder
+                        // missing the consume — masked while tail-position temps
+                        // never registered; the fn-level frame exposed it.
+                        if vc_arg != 0:
+                            let vc_arg_drop_ty = if vc_payload_ty != 0: vc_payload_ty else: self.expr_type(vc_arg)
+                            if self.sema.type_needs_drop_frozen(vc_arg_drop_ty) != 0:
+                                self.consume_moved_operand(vc_arg_op)
                     let vc_fid = self.body.new_agg_fields(vc_fields, vc_names)
                     let vc_rv = self.body.new_rvalue(RvalueKind.RK_AGGREGATE, 1, vc_fid, vc_variant_idx)
                     let vc_tmp = self.new_temp(vc_result_ty)
@@ -12222,7 +12261,21 @@ impl MirBuilder:
             // old behavior for non-flagged moves) would skip the drop on a path
             // where a conditional move did NOT fire, leaking the still-live value
             // (da_drop_conditional_move_value / da_match_conditional_move_value).
-            return self.lower_expr(self.ast.get_data0(node))
+            let mv_inner = self.ast.get_data0(node)
+            // D17: a Drop-bearing field-place move lowers as an explicit OK_MOVE
+            // of the projected place, so consume_moved_operand records the
+            // field-path move and emits the reset-on-move blank through whatever
+            // pointer reaches the base (#697 machinery). A POD field has nothing
+            // to blank — `move w.f` is a plain copy and must not enter the move
+            // machinery (marking it moved would wrongly suppress a Drop owner's
+            // partial drop).
+            if self.ast.kind(mv_inner) == NodeKind.NK_FIELD_ACCESS:
+                let mv_fty = self.expr_type(mv_inner)
+                if mv_fty != 0 and self.sema.type_needs_drop_frozen(mv_fty) != 0:
+                    let mv_place = self.lower_expr_place(mv_inner)
+                    if mv_place >= 0:
+                        return self.body.new_operand(OperandKind.OK_MOVE, mv_place)
+            return self.lower_expr(mv_inner)
 
         if kind == NodeKind.NK_COPY_ARG:
             let inner = self.ast.get_data0(node)
@@ -12639,6 +12692,13 @@ fn lower_fn_with_sig(builder: MirBuilder, fn_node: i32, sig_idx: i32) -> MirBody
     builder.expected_type = ret_ty
 
     let ret_is_void = ret_ty == builder.sema.ty_void
+    // #697/D17: the body's TAIL expression lowers without a per-statement
+    // frame, so its call-result temps had nowhere to register — an rvalue
+    // argument to a share-place callee was dropped by NOBODY (the callee
+    // borrows; the caller never scheduled it). One fn-level frame catches
+    // every temp the inner statement frames don't; it flushes in the
+    // epilogue, after the return value is captured.
+    let body_frame = builder.push_stmt_temp_frame()
     var result = if ret_is_void:
         builder.lower_expr_discard(body_expr)
     else:
@@ -12675,6 +12735,13 @@ fn lower_fn_with_sig(builder: MirBuilder, fn_node: i32, sig_idx: i32) -> MirBody
         let ret_place = builder.place_for_local(0)
         builder.assign_operand_to_place(ret_place, result, builder.ast.get_end(fn_node))
 
+    // D16/D17: close the fn-level frame — tail-created temps drop and pending
+    // source-resets/move-arg temps land here, after the return value is
+    // captured, before the epilogue drops. Without this a tail
+    // `eat(move self.r)` never blanks the caller's field, and a tail
+    // `peek_h(mk(s))` leaks the rvalue temp (the share-place callee borrows;
+    // only the caller can drop it).
+    builder.finish_stmt_temp_frame(body_frame)
     builder.emit_defers_for_return()
     builder.pop_scope_inline()
     builder.terminate(TermKind.TK_RETURN, 0, 0, 0, 0)

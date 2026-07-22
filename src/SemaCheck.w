@@ -4809,7 +4809,7 @@ impl Sema:
     // Apply a return effect to every place-valued exit represented by an expression.
     // Function bodies and branch expressions are wrapper nodes, so probing only the
     // outer node loses the actual `self`/parameter root on implicit returns.
-    fn note_returned_place_effect(node: i32, effect: i32):
+    mut fn note_returned_place_effect(node: i32, effect: i32):
         if node == 0:
             return
         let kind = self.ast.kind(node)
@@ -4832,7 +4832,10 @@ impl Sema:
         if kind == NodeKind.NK_CAST:
             self.note_returned_place_effect(self.ast.get_data0(node), effect)
             return
-        self.note_place_effect(node, effect)
+        // D17: returning a non-Copy FIELD as owned takes the field (blank +
+        // partial-drop machinery) and writes the root — per returned leaf, so
+        // each match arm / if branch weakens by its own projection shape.
+        self.note_place_effect(node, self.weaken_projection_owning_effects(node, effect))
 
     mut fn check_body_explicit_value_results(node: i32, value_path: i32, expected: i32, msg: str) -> i32:
         if node == 0:
@@ -5941,8 +5944,26 @@ impl Sema:
 
         if kind == NodeKind.NK_MOVE_ARG:
             let inner = self.ast.get_data0(node)
+            // D17: `move` applies to a place — a binding identifier or a field
+            // path. A field move blanks the field (reset-on-move, §2.5.1) and
+            // contributes WRITE to the root: the root's place persists with
+            // changed contents, so a mut receiver / share-place root suffices —
+            // consuming a field never promotes to consuming the whole root.
+            // mark_moved_if_consumed carries the §2.4 rule (Drop-impl owners
+            // reject partial moves) and the field-path move state
+            // (use-after-move diagnostics; reassignment heals).
+            if self.ast.kind(inner) == NodeKind.NK_FIELD_ACCESS:
+                let fty = self.check_expr(inner)
+                self.mark_moved_if_consumed(inner)
+                // A POD field "move" is a plain copy — no blank, no write.
+                if fty != 0 and self.type_needs_drop(fty as i32) != 0:
+                    let froot = self.place_root_sym(inner)
+                    if froot != 0:
+                        self.note_param_effect(froot, EFF_WRITE)
+                self.typed_expr_types.insert(node, fty as i32)
+                return fty
             if self.ast.kind(inner) != NodeKind.NK_IDENT:
-                self.emit_error("'move' must be applied to a binding identifier", node)
+                self.emit_error("'move' must be applied to a binding identifier or field path", node)
                 return self.check_expr(inner)
             let ty = self.check_expr(inner)
             // Explicitly mark the inner binding as moved, even for Copy types.
@@ -8814,7 +8835,9 @@ impl Sema:
     mut fn propagate_call_param_effect(param_eff: i32, arg_node: i32):
         if param_eff == 0 or arg_node <= 0:
             return
-        let trans_bits = param_eff & (EFF_WRITE | EFF_CONSUME | EFF_ESCAPE_VALUE | EFF_ESCAPE_VIEW)
+        // D17: a consuming/escaping callee param fed a non-Copy FIELD projection
+        // writes the root (the field is blanked), it does not consume it.
+        let trans_bits = self.weaken_projection_owning_effects(arg_node, param_eff & (EFF_WRITE | EFF_CONSUME | EFF_ESCAPE_VALUE | EFF_ESCAPE_VIEW))
         if trans_bits != 0:
             self.recording_propagated_effect = self.recording_propagated_effect + 1
             self.note_place_effect(arg_node, trans_bits)

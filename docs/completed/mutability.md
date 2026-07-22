@@ -182,7 +182,7 @@ Effect contributions to the summary are:
 
 - **`field = value` or `place[i] = value` on the parameter or its components** — contributes `write`.
 - **Calling a `mut self` method on the parameter** — contributes `write`.
-- **Passing the parameter to a function whose effect summary requires consume/escape** — contributes that effect transitively.
+- **Passing the parameter to a function whose effect summary requires consume/escape** — contributes that effect transitively. When the argument is a non-Copy **field** of the parameter rather than the parameter itself, the contribution is `write` (D17): the callee consumes the field, which is blanked by reset-on-move — the parameter's place persists with changed contents. A Copy field (raw pointer, handle) passed to an escaping callee still contributes the escape to the root: nothing is blanked, and the copied field aliases the root's content. `move x.field` is the explicit spelling of a field move; a Drop-impl owner still rejects partial moves (§2.4), and a Copy-field "move" is a plain copy.
 - **Returning or storing the parameter as an owned value** — contributes `escape_value`.
 - **Internally consuming the parameter (moving it to another binding for use within the call)** — contributes `consume`.
 - **Returning or storing a reference into the parameter** — contributes `escape_view`.
