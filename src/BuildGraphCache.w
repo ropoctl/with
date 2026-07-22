@@ -6,6 +6,9 @@ use BuildGraphSupport
 use compiler.TrackedInputs
 use std.crypto.sha256
 
+extern fn with_alloc(size: i64) -> *mut u8
+extern fn with_free(ptr: *mut u8) -> Unit
+
 const BUILD_CACHE_S_IFMT: i32 = 61440
 const BUILD_CACHE_S_IFDIR: i32 = 16384
 const BUILD_CACHE_S_IFREG: i32 = 32768
@@ -13,6 +16,19 @@ const BUILD_CACHE_S_IFLNK: i32 = 40960
 
 var build_cache_compiler_fingerprint_ready: i32 = 0
 var build_cache_compiler_fingerprint: str = ""
+
+// #702: per-run file-fingerprint memo. Freshness verification re-fingerprints
+// each target's inputs, outputs, and dep outputs, so one battery run re-reads
+// the same ~100MB stage binaries dozens of times — pre-#691 every read buffer
+// is permanent, which alone walked the runner into the 32GiB ceiling. Files
+// only change when a target executes, so the memo is valid across any
+// execution-free window; build_cache_forget_fingerprints clears it whenever a
+// target actually runs (coarse, provably safe — fully-cached runs keep the
+// entire win).
+var build_cache_fp_memo: HashMap[str, str] = HashMap.new()
+
+pub fn build_cache_forget_fingerprints() -> Unit:
+    build_cache_fp_memo = HashMap.new()
 
 pub fn build_cache_state_dir(root: str) -> str:
     root ++ "/out/.build-state"
@@ -60,9 +76,32 @@ fn build_cache_sha256_text(data: str) -> str:
     sha256_hash_str(data, &raw mut digest[0] as *mut u8)
     sha256_hex(&digest[0] as *const u8)
 
+// Digest-identical to hashing framing ++ payload, but the payload (often a
+// 100MB binary) never enters a `++` chain — each intermediate of that chain
+// is a leaked copy of the whole payload pre-#691, and the battery hashes
+// these files once per target check. One explicit alloc/free instead;
+// implemented on sha256's single-shot API because compiler source compiles
+// against the seed's embedded stdlib and cannot use a same-change stdlib fn.
+fn build_cache_sha256_framed(framing: str, payload: str) -> str:
+    var digest: [32]u8 = [0 as u8; 32]
+    unsafe:
+        let total = framing.len() + payload.len()
+        let buf = with_alloc(total)
+        var i: i64 = 0
+        while i < framing.len():
+            *((buf as i64 + i) as *mut u8) = framing.byte_at(i) as u8
+            i = i + 1
+        var j: i64 = 0
+        while j < payload.len():
+            *((buf as i64 + framing.len() + j) as *mut u8) = payload.byte_at(j) as u8
+            j = j + 1
+        sha256_hash(buf as *const u8, total as i32, &raw mut digest[0] as *mut u8)
+        with_free(buf)
+    sha256_hex(&digest[0] as *const u8)
+
 fn build_cache_fingerprint_regular_file(path: str, mode: i32) -> str:
     let exec = if (mode & 0o111) != 0: "x" else: "-"
-    build_cache_sha256_text("file\nmode:" ++ f"{mode & 0o777}" ++ "\nexec:" ++ exec ++ "\ncontent:" ++ build_graph_rt_read_file(path))
+    build_cache_sha256_framed("file\nmode:" ++ f"{mode & 0o777}" ++ "\nexec:" ++ exec ++ "\ncontent:", build_graph_rt_read_file(path))
 
 fn build_cache_fingerprint_directory(path: str, mode: i32) -> str:
     let listing = build_graph_rt_list_files(path)
@@ -77,17 +116,24 @@ fn build_cache_fingerprint_symlink(path: str, mode: i32) -> str:
     build_cache_sha256_text("symlink\nmode:" ++ f"{mode & 0o777}" ++ "\ntarget:" ++ build_graph_rt_readlink(path))
 
 pub fn build_cache_fingerprint_file(path: str) -> str:
+    let memoized = build_cache_fp_memo.get(path)
+    if memoized.is_some():
+        return memoized.unwrap()
     let mode = build_graph_rt_file_mode(path)
     if mode < 0:
         return build_cache_sha256_text("absent\n")
     let kind = mode & BUILD_CACHE_S_IFMT
+    var fp = ""
     if kind == BUILD_CACHE_S_IFDIR:
-        return build_cache_fingerprint_directory(path, mode)
-    if kind == BUILD_CACHE_S_IFLNK:
-        return build_cache_fingerprint_symlink(path, mode)
-    if kind == BUILD_CACHE_S_IFREG:
-        return build_cache_fingerprint_regular_file(path, mode)
-    build_cache_sha256_text("other\nmode:" ++ f"{mode}" ++ "\n")
+        fp = build_cache_fingerprint_directory(path, mode)
+    else: if kind == BUILD_CACHE_S_IFLNK:
+        fp = build_cache_fingerprint_symlink(path, mode)
+    else: if kind == BUILD_CACHE_S_IFREG:
+        fp = build_cache_fingerprint_regular_file(path, mode)
+    else:
+        fp = build_cache_sha256_text("other\nmode:" ++ f"{mode}" ++ "\n")
+    build_cache_fp_memo.insert(path, fp)
+    fp
 
 fn build_cache_str_contains_byte(text: str, target: i32) -> bool:
     for i in 0..text.len() as i32:
@@ -319,7 +365,7 @@ fn build_cache_hash_build_graph_sources(root: str) -> str:
 // Plain content hash (no mode/exec framing) so external evidence checkers
 // (build/retention.w's sha256-tool flow) can reproduce manifest entries.
 pub fn build_cache_sha256_file_content(path: str) -> str:
-    build_cache_sha256_text(build_graph_rt_read_file(path))
+    build_cache_sha256_framed("", build_graph_rt_read_file(path))
 
 fn build_cache_test_success_manifest(root: str, target: &BuildGraphTarget, test_files: &Vec[str], test_compiler: str) -> str:
     // v2: the test compiler and every test file are keyed by CONTENT hash.
@@ -360,6 +406,7 @@ fn build_cache_test_success_manifest(root: str, target: &BuildGraphTarget, test_
     text
 
 pub fn build_cache_record_test_success(root: str, target: &BuildGraphTarget, test_files: &Vec[str], test_compiler: str) -> Unit:
+    build_cache_forget_fingerprints()
     let state_dir = build_cache_state_dir(root)
     let _mkdir = build_graph_rt_mkdir_p(state_dir)
     let marker_path = build_cache_test_success_path(root, target.name)
@@ -618,6 +665,7 @@ pub fn build_cache_check_fresh(root: str, target: &BuildGraphTarget, dep_rebuilt
     build_cache_freshness_reason(root, target, dep_rebuilt) == "fresh"
 
 pub fn build_cache_record(root: str, target: &BuildGraphTarget, discovered_deps: Vec[str], effects: Vec[str]) -> Unit:
+    build_cache_forget_fingerprints()
     let state_dir = build_cache_state_dir(root)
     let _ = build_graph_rt_mkdir_p(state_dir)
     let state_path = build_cache_state_path(root, target.name)

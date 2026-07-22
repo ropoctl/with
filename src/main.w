@@ -1336,6 +1336,22 @@ fn build_test_clear_worker_env_for_children():
     let _clear_worker = with_setenv_str("WITH_BUILD_TEST_WORKER", "")
     let _clear_force = with_setenv_str("WITH_BUILD_ACTION_FORCE", "")
 
+// #702: serial actions spawn a worker process like pooled actions and test
+// targets do. This partially reverses #683 (serial actions in-process to save
+// the child's ~0.85s build.w re-eval): pre-#691 the parent permanently
+// retains every action's comptime interpreter state, and one action can
+// spike gigabytes — the battery's parent must stay under the 8GB budget, so
+// the action's memory has to die with a child process. Revisit after #691.
+fn run_build_action_worker_process(target: &BuildGraphTarget, options: &BuildCommandOptions) -> i32:
+    let old_worker = with_getenv_str("WITH_BUILD_ACTION_WORKER")
+    let old_force = with_getenv_str("WITH_BUILD_ACTION_FORCE")
+    let _set_worker = with_setenv_str("WITH_BUILD_ACTION_WORKER", target.name)
+    let _set_force = with_setenv_str("WITH_BUILD_ACTION_FORCE", "1")
+    let rc = with_exec_argv(build_target_worker_argv(target, options))
+    let _restore_worker = with_setenv_str("WITH_BUILD_ACTION_WORKER", old_worker)
+    let _restore_force = with_setenv_str("WITH_BUILD_ACTION_FORCE", old_force)
+    rc
+
 fn build_pool_parse_jobs(value: str) -> i32:
     var out = 0
     for i in 0..value.len() as i32:
@@ -1391,6 +1407,7 @@ fn build_pool_retire_oldest(pool_names: Vec[str], pool_pids: Vec[i32], pool_t0s:
     if rc != 0:
         with_eprint("error: build.w target '" ++ name ++ f"' failed with exit code {rc}")
         return rc
+    build_cache_forget_fingerprints()
     completed_targets.push(name)
     0
 
@@ -1770,6 +1787,16 @@ unsafe fn run_build_graph(root: str, cfg: ProjectConfig, graph: &BuildGraph, act
             if survey and survey_failed.len() > 0 and (target.name == "test-green" or target.name == "last-green"):
                 with_eprint("survey: skipping evidence target '" ++ target.name ++ "' (earlier failures)")
                 continue
+            if not build_action_worker_env_enabled():
+                let worker_rc = run_build_action_worker_process(&target, options)
+                if worker_rc != 0:
+                    if survey:
+                        survey_failed.push(target.name)
+                        continue
+                    return worker_rc
+                build_cache_forget_fingerprints()
+                completed_targets.push(target.name)
+                continue
             let action_result = run_build_action_from_build_w(root, cfg, target, action_sema, options)
             if action_result.rc != 0:
                 if survey:
@@ -1806,6 +1833,7 @@ unsafe fn run_build_graph(root: str, cfg: ProjectConfig, graph: &BuildGraph, act
                             return test_worker_rc
                         survey_failed.push(target.name)
                         continue
+                    build_cache_forget_fingerprints()
                     completed_targets.push(target.name)
                     continue
                 build_test_clear_worker_env_for_children()

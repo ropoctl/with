@@ -152,6 +152,21 @@ pub fn sha256_hash_str(s: str, out: *mut u8) -> Unit:
         sha256_hash(bytes as *const u8, s.len() as i32, out)
         str_free_bytes(bytes)
 
+// Hash the concatenation a ++ b without materializing it. Digest-identical to
+// sha256_hash_str(a ++ b) — callers with a large payload use this so the
+// payload never enters a `++` chain.
+pub fn sha256_hash_str_pair(a: str, b: str, out: *mut u8) -> Unit:
+    var ctx = Sha256.new()
+    let p = &raw mut ctx as *mut Sha256
+    unsafe:
+        let ab = str_copy_bytes(a)
+        sha256_update(p, ab as *const u8, a.len() as i32)
+        str_free_bytes(ab)
+        let bb = str_copy_bytes(b)
+        sha256_update(p, bb as *const u8, b.len() as i32)
+        str_free_bytes(bb)
+        sha256_finish(p, out)
+
 // Format digest as hex string
 pub fn sha256_hex(digest: *const u8) -> str:
     let hex_chars = "0123456789abcdef"
