@@ -2551,8 +2551,19 @@ impl ComptimeEvaluator:
             let arg_signal = self.eval_expr(self.ast.get_extra(extra_start))
             if arg_signal.kind != ComptimeControlKind.CTL_VALUE:
                 return arg_signal
-            let new_start = self.copy_vec_snapshot(recv_value)
-            self.extra_values.push(arg_signal.value)
+            // When the receiver's slice ends the arena, append in place —
+            // amortized O(1) for the hot loop-push pattern instead of a full
+            // snapshot per push (#702: the per-push snapshot made interpreted
+            // push loops O(n^2) arena growth; the arena never reclaims). Any
+            // alias of this slice keeps its own (start, count) prefix view,
+            // which in-place appends never disturb; an aliased tail pusher
+            // fails this check after the first append and takes the copy.
+            var new_start = recv_value.extra_start
+            if recv_value.extra_start + recv_value.extra_count == self.extra_values.len() as i32:
+                self.extra_values.push(arg_signal.value)
+            else:
+                new_start = self.copy_vec_snapshot(recv_value)
+                self.extra_values.push(arg_signal.value)
             let updated = comptime_value_vec(recv_value.type_id, new_start, recv_value.extra_count + 1)
             return self.rebind_collection_receiver(recv_node, updated, node)
 
@@ -2598,8 +2609,9 @@ impl ComptimeEvaluator:
             if recv_value.extra_count <= 0:
                 return self.fail(node, "Vec.pop() on empty comptime vector")
             let removed = self.extra_values.get((recv_value.extra_start + recv_value.extra_count - 1) as i64)
-            let new_start = self.copy_extra_slice(recv_value.extra_start, recv_value.extra_count - 1)
-            let updated = comptime_value_vec(recv_value.type_id, new_start, recv_value.extra_count - 1)
+            // (start, count-1) is already a frozen prefix view of the existing
+            // slice — no copy needed; arena elements are immutable.
+            let updated = comptime_value_vec(recv_value.type_id, recv_value.extra_start, recv_value.extra_count - 1)
             let rebind = self.rebind_collection_receiver(recv_node, updated, node)
             if rebind.kind != ComptimeControlKind.CTL_VALUE:
                 return rebind
