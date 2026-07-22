@@ -82,7 +82,11 @@ enum PreludeMode: i32:
 
 const CLI_DEFAULT_DEBUG_OPT_LEVEL: i32 = 0
 const CLI_DEFAULT_BUILD_OPT_LEVEL: i32 = 1
-const CLI_DEFAULT_BUILD_MEMORY_LIMIT_BYTES: i64 = 34359738368
+// #702: 64 GiB while pre-#691 leak-by-design memory dominates the battery
+// runner (measured demand ~35-40GB, all of it #608-retained state). The bar
+// returns to 8GB as the flip's acceptance test; this ceiling still trips
+// genuine runaways.
+const CLI_DEFAULT_BUILD_MEMORY_LIMIT_BYTES: i64 = 68719476736
 
 type CliOptions {
     command: str,
@@ -3896,7 +3900,7 @@ fn print_build_usage:
     with_write("  --explain <name> Explain a build graph target\n")
     with_write("  --strict-effects Reject undeclared build-time effects\n")
     with_write("  :effects         Print recorded build effect ledgers\n")
-    with_write("  WITH_MEMORY_LIMIT_BYTES controls the build memory cap; default 34359738368 (32 GiB), 0 disables\n")
+    with_write("  WITH_MEMORY_LIMIT_BYTES controls the build memory cap; default 68719476736 (64 GiB), 0 disables\n")
     with_write("  --no-std         Disable standard library support\n")
     with_write("  --no-runtime     Disable the fiber runtime; async constructs are errors\n")
     with_write("  --no-prelude     Disable implicit prelude import\n")
@@ -4152,7 +4156,7 @@ fn cli_parse_nonnegative_i64(s: str) -> i64:
 fn cli_configure_build_memory_limit() -> i32:
     let raw = with_getenv_str("WITH_MEMORY_LIMIT_BYTES")
     var limit = CLI_DEFAULT_BUILD_MEMORY_LIMIT_BYTES
-    var limit_text = "34359738368"
+    var limit_text = "68719476736"
     if raw.len() > 0:
         let parsed = cli_parse_nonnegative_i64(raw)
         if parsed < 0:
