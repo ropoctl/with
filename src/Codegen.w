@@ -493,6 +493,16 @@ type LoopState {
 fn Codegen.init(module_name: str) -> Codegen:
     Codegen.init_with_opt(module_name, 0)
 
+// D17/#697 phase take-and-return (the lower_module pattern): codegen OWNS the
+// Sema during emission — the caller's binding is blank in between, never
+// aliased — and hands it back via take_sema. The swap leaves a placeholder so
+// every cg teardown path (explicit deinit or scope exit) stays untouched.
+extend Codegen:
+    mut fn take_sema() -> Sema:
+        var s = self.sema
+        self.sema = Sema.placeholder(InternPool.init(), DiagnosticList.init(), AstPool.new())
+        s
+
 fn Codegen.init_with_opt_and_intern(module_name: str, opt_level: i32, intern: InternPool, sema: Sema) -> Codegen:
     var cg = Codegen.init_with_opt(module_name, opt_level)
     let overflow_mode = sema.overflow_mode

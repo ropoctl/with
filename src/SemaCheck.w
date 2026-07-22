@@ -18363,6 +18363,16 @@ impl Sema:
                 return opt_ty
 
         let is_static_receiver = if static_type_sym != 0 and self.static_receiver_type_is_known(expr) != 0: 1 else: 0
+        // D17/#697: ONE computation of the static-vs-instance contract pairing.
+        // Type checking, effect propagation, and view-origin recording must all
+        // consult the same offset (mutability.md: "static method calls have no
+        // receiver parameter"). Independent recomputations of this offset are
+        // how the effect loops diverged from the type-check loop and paired
+        // every static call's arguments with the wrong parameters' contracts.
+        // (The arg-RESOLUTION offset above uses a deliberately looser
+        // static predicate and is not unified here.)
+        let call_param_offset = if is_static_receiver != 0: 0 else: 1
+        let call_effect_recv = if is_static_receiver != 0: 0 else: expr
         if type_name_sym != 0:
             let generic_method_fn = self.lookup_generic_method_fn(type_name_sym, field)
             if generic_method_fn != 0:
@@ -18420,7 +18430,7 @@ impl Sema:
                     // miscompiled. Mirror check_call's known-function loop.
                     let mc_plain_name = self.pool_resolve(type_name_sym) ++ "." ++ self.pool_resolve(field)
                     let mc_plain_pc = self.sig_get_param_count(sig_idx)
-                    let mc_plain_poff = if is_static_receiver != 0: 0 else: 1
+                    let mc_plain_poff = call_param_offset
                     for mc_pai in 0..mc_resolved_arg_count:
                         let mc_plain_pi = mc_pai + mc_plain_poff
                         if mc_plain_pi >= mc_plain_pc:
@@ -18467,11 +18477,19 @@ impl Sema:
                     self.generic_subst_type_ids = saved_mc_subst_tys
                     let mc_subst_ret = self.substitute_method_return_for_generic_inst(recv_type, type_name_sym, field, method_fn_sym, mc_ret)
                     if mc_subst_ret != 0:
-                        self.propagate_method_call_param_effects(node, sig_idx, 1, expr, extra_start, mc_resolved_arg_count, mc_has_resolved_args)
-                        self.record_call_view_origins(node, sig_idx, 1, expr, extra_start, mc_resolved_arg_count, mc_has_resolved_args)
+                        self.propagate_method_call_param_effects(node, sig_idx, call_param_offset, call_effect_recv, extra_start, mc_resolved_arg_count, mc_has_resolved_args)
+                        self.record_call_view_origins(node, sig_idx, call_param_offset, call_effect_recv, extra_start, mc_resolved_arg_count, mc_has_resolved_args)
                         return mc_subst_ret
-                self.propagate_method_call_param_effects(node, sig_idx, 1, expr, extra_start, mc_resolved_arg_count, mc_has_resolved_args)
-                self.record_call_view_origins(node, sig_idx, 1, expr, extra_start, mc_resolved_arg_count, mc_has_resolved_args)
+                // A STATIC call has no receiver param: args pair with params from
+                // index 0 and there is no receiver node to absorb param0's
+                // effects. The hardcoded (1, expr) paired arg_i with param_{i+1}
+                // — a Copy pool arg inherited the diags param's consume verdict,
+                // the promotion escalated the caller's receiver, and 57 methods
+                // demanded `move fn` under the #691 flip. Pre-existing (provable
+                // on the shipped seed with a Drop-payload static constructor);
+                // mirrors mc_plain_poff in the #567 type-check loop above.
+                self.propagate_method_call_param_effects(node, sig_idx, call_param_offset, call_effect_recv, extra_start, mc_resolved_arg_count, mc_has_resolved_args)
+                self.record_call_view_origins(node, sig_idx, call_param_offset, call_effect_recv, extra_start, mc_resolved_arg_count, mc_has_resolved_args)
                 return mc_ret
 
         let concrete_trait_method_ret = self.check_concrete_trait_method_call(recv_type as i32, field, arg_types, extra_start, mc_resolved_arg_count, node, expr, mc_has_resolved_args)

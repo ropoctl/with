@@ -334,6 +334,13 @@ xs.into_bytes()  // move self method; consumes xs
 
 **No additional `move xs` annotation is needed at the call site for `move self` methods.** The method's receiver mode is part of its signature; invoking the method is sufficient to apply that mode to the receiver. Writing `move xs.into_bytes()` would be redundant.
 
+**Static method calls have no receiver parameter.** In `Type.method(a, b)`,
+argument `i` pairs with parameter `i` — for type checking, effect
+satisfaction, and view-origin tracking alike. There is no implicit receiver
+offset, and no argument may inherit a neighboring parameter's contract.
+(Instance calls pair argument `i` with parameter `i + 1`; the receiver is
+parameter 0.)
+
 This is consistent with the parameter-passing model: the call mode is determined by the function's API. For methods, the API is the receiver mode, visible in the signature. For free functions, the API is the effect summary, derived from the body.
 
 ```with
