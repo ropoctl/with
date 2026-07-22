@@ -17,6 +17,8 @@ extern fn rt_close(fd: i32) -> i32
 extern fn rt_seek(fd: i32, offset: i64, whence: i32) -> i64
 extern fn rt_mmap(size: u64) -> *mut u8
 extern fn rt_munmap(ptr: *mut u8, size: u64)
+extern fn malloc(size: i64) -> *mut u8
+extern fn free(ptr: *mut u8) -> Unit
 extern fn rt_exit(code: i32)
 extern fn rt_clock_ns() -> i64
 extern fn rt_wall_clock_sec() -> i64
@@ -557,9 +559,32 @@ fn rt_payload_start_is_owned(ptr: *const u8) -> i32:
     0
 
 fn rt_payload_start_can_be_owned(ptr: *const u8) -> i32:
+    if alloc_system_on() != 0:
+        return 1
     if rt_payload_start_is_owned(ptr) != 0:
         return 1
     if rt_slab_ranges_complete == 0 or rt_large_ranges_complete == 0:
+        return 1
+    0
+
+var alloc_system_state: i32 = 0     // DIAGNOSTIC: 0=unread,1=off,2=on
+
+// DIAGNOSTIC: WITH_ALLOC_SYSTEM=1 routes every allocation through libSystem
+// malloc/free (same 16-byte header, payload still zeroed) so the With heap is
+// visible to the macOS memory tools — `leaks` reachability scanning,
+// MallocStackLogging/malloc_history allocation stacks, and Instruments. The
+// production freelist over rt_mmap is invisible to all of them (they enumerate
+// malloc zones only). Committed-bytes accounting and the memory ceiling still
+// apply; the freelist ownership tables are not maintained in this mode, so the
+// payload-start check stands down and the system tools own heap validation.
+fn alloc_system_on() -> i32:
+    if alloc_system_state == 0:
+        let v = rt_getenv(c"WITH_ALLOC_SYSTEM".ptr)
+        if v as i64 != 0 and (unsafe *v) != 0:
+            alloc_system_state = 2
+        else:
+            alloc_system_state = 1
+    if alloc_system_state == 2:
         return 1
     0
 
@@ -1010,6 +1035,18 @@ pub fn with_debug_alloc_mark_root(ptr: *mut u8, reason: *const u8, reason_len: i
 fn rt_alloc_unlocked(size_arg: i64) -> *mut u8:
     let size = alloc_align_size(size_arg)
 
+    if alloc_system_on() != 0:
+        let total = size + RT_ALLOC_HEADER_SIZE
+        rt_alloc_reserve_mmap_bytes(total)
+        let p = malloc(total)
+        if p as i64 == 0:
+            rt_alloc_release_mmap_bytes(total)
+            rt_exit(99)
+        unsafe *(p as *mut i64) = size
+        let payload = (p as i64 + RT_ALLOC_HEADER_SIZE) as *mut u8
+        rt_memset(payload, 0, size)
+        return payload
+
     if size > RT_LARGE_THRESHOLD:
         // Large allocation: direct rt_mmap with 16-byte header storing size
         let total = size + RT_ALLOC_HEADER_SIZE
@@ -1090,6 +1127,10 @@ fn rt_free_unlocked_with_drop_origin(ptr: *mut u8, drop_origin_ptr: i64, drop_or
         with_panic_core(make_str("invalid free: pointer is not an allocated payload start" as *const u8, 55), make_str("" as *const u8, 0), 0)
     let block = alloc_header_ptr(ptr as *const u8) as i64
     let size = unsafe *(block as *const i64)
+    if alloc_system_on() != 0:
+        rt_alloc_release_mmap_bytes(size + RT_ALLOC_HEADER_SIZE)
+        free(block as *mut u8)
+        return
     if size > RT_LARGE_THRESHOLD:
         let total = size + RT_ALLOC_HEADER_SIZE
         rt_forget_large_range(block)
