@@ -1,5 +1,10 @@
 # With for AI — Compact Project Primer
 
+> **D22 status (2026-07-23): A new decision has been made, but implementation
+> is still in progress.** This primer teaches the normative D22 map-view,
+> contextual-Copy, and transparent-origin rules. Do not infer contrary language
+> semantics from current compiler behavior.
+
 **Purpose:** Give an AI assistant enough context to read, write, review, and modify With code meaningfully without loading the full language specification.
 
 This is not the full spec. It is the operational 90%: syntax, safety model, idioms, common patterns, and mistakes to avoid.
@@ -424,6 +429,35 @@ let r = &x
 print(r)     // last use of r
 x = 10       // OK
 ```
+
+### Map reads and contextual Copy (D22)
+
+Owning keyed maps have one uniform observational API:
+
+```with
+let found: Option[&Job] = jobs.get(id)
+let removed: Option[Job] = jobs.remove(id)
+```
+
+`HashMap.get` and `BTreeMap.get` return `Option[&V]` for every `V`. Copy-ness
+does not alter the method signature. An inferred binding preserves the view;
+an established owned-value context may materialize a `Copy` pointee:
+
+```with
+let inferred = counts.get("api").unwrap()  // &i32
+let snapshot: i32 = counts.get("api") ?? 0 // independent i32
+```
+
+Patterns are structural projection, not owned demand. `Some(v)` on
+`Option[&V]` binds `v: &V` in every generic instantiation. The view origin
+survives `Option`, `Result`, patterns, `?`, `??`, and eliminators until
+contextual Copy, explicit clone, or consuming removal creates an independent
+owned value. Consequently a map cannot be mutated while a surviving view into
+it will be used later; a copied snapshot remains valid.
+
+**Implementation note:** these rules are normative but currently
+NON-COMPLIANT. AI-generated code must target the rules, not work around their
+unfinished implementation.
 
 ### Auto-ref and auto-deref
 

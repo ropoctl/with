@@ -351,6 +351,38 @@ let bytes = xs.into_bytes() // xs is now invalid
 print(xs.len())            // ERROR — xs has been moved
 ```
 
+### Receiver Returns and Pipelines (D21)
+
+A mutating receiver is a share-place borrow: the caller retains the receiver
+place. A `mut self` method therefore may not return the non-Copy receiver itself
+or duplicate ownership of storage the receiver still owns. Receiver-returning
+fluency is a consuming contract and uses `move self`. This does not ban useful
+returns: Copy values, returned views with origin tracking, fresh independent
+owned values, and ownership moved out of a reset projection under D17 are all
+valid.
+
+In a pipeline, a stage whose resolved callee is a `mut self` method with
+resolved concrete return type `Unit` performs the ordinary call and continues
+with the same receiver place. Resolution includes return inference and generic
+substitution. Any non-Unit result becomes the next pipeline value:
+
+```with
+var xs: Vec[i32] = Vec.new()
+xs |> push(1) |> push(2)       // both Unit stages keep carrying xs
+
+let item = xs
+    |> push(3)                 // Unit: still xs
+    |> pop()                   // Option[i32]: pipeline switches to the Option
+    |> unwrap()
+```
+
+An rvalue root is materialized as an ordinary statement temporary. It moves out
+only when it remains the pipeline's final value and the surrounding context
+moves it; if a non-Unit stage switches the pipeline to another value, the
+receiver temporary drops at statement end. Pipeline calls use the ordinary
+argument-order, exclusivity, aliasing, view-liveness, and move/drop rules; there
+is no second mutation regime. See specification §9.6.
+
 ## Effect Summaries
 
 The compiler computes a per-function effect summary tracking how each parameter is used. Effects form a *set* per parameter — a function can have multiple effects on the same parameter. The effect categories are:

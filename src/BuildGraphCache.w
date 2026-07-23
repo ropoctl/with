@@ -924,7 +924,7 @@ pub fn build_cache_graph_try_read(root: str, key: str) -> BuildGraph:
         t.action_source_paths = r.read_list()
         if not r.ok:
             return empty_build_graph()
-        graph.targets.push(t)
+        graph.targets.push(move t)
     let gheader = r.read_line()
     if not r.ok or gheader.len() == 0 or gheader.byte_at(0) != 103:
         return empty_build_graph()

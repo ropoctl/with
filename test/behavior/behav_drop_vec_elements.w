@@ -32,7 +32,7 @@ fn remove_drop(slot: *mut i32):
 fn pop_moves(slot: *mut i32):
     let xs: Vec[W] = Vec.new()
     xs.push(W { slot: slot })
-    let popped = xs.pop()
+    let popped = xs.pop().unwrap()
 
 fn moved_into_struct(slot: *mut i32):
     let xs: Vec[W] = Vec.new()

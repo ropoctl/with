@@ -363,7 +363,9 @@ fn format_source_styled(source: str, style: i32) -> str:
             out = out ++ "}"
             inline_close_count = inline_close_count - 1
         while close_stack.len() > 0:
-            let top = close_stack.pop()
+            // Bootstrap bridge: remove(last) returns T under both the D21 seed
+            // and the new pop() -> Option[T] compiler.
+            let top = close_stack.remove(close_stack.len() - 1)
             out = out ++ emit_indent(top) ++ "}\n"
 
     // Ensure file ends with exactly one newline

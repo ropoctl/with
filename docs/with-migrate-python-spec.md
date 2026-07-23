@@ -2,6 +2,13 @@
 
 **Near-complete migration from Python to With.**
 
+> **D22 status (2026-07-23): A new decision has been made, but implementation
+> is still in progress.** Generated owning-map reads must target the uniform
+> `Option[&V]` contract. Contextual Copy materialization preserves Python-shaped
+> scalar use; non-Copy ownership requires an explicit clone or consuming
+> removal. Do not infer translator behavior from the currently non-compliant
+> compiler.
+
 Python and With share more surface syntax than any other language pair
 in this family of specs: indentation-based blocks, `and`/`or`/`not`,
 f-strings, `for x in iter`, `while cond`, `print()`. Well-typed Python
@@ -430,8 +437,8 @@ Negative indexing is flagged when not the common `-1` pattern.
 
 | Python | With |
 |---|---|
-| `.get(k)` | `.get(k)` (returns `Option[V]`) |
-| `.get(k, default)` | `.get_or(k, default)` |
+| `.get(k)` | `.get(k)` (uniformly returns `Option[&V]`) |
+| `.get(k, default)` | `.get(k) ?? default` (Copy value or matching borrowed default; clone explicitly for an owned non-Copy result) |
 | `.keys()` | `.keys()` |
 | `.values()` | `.values()` |
 | `.items()` | `.entries()` |
@@ -442,6 +449,13 @@ Negative indexing is flagged when not the common `-1` pattern.
 | `.setdefault(k, v)` | `.get_or_insert(k, v)` |
 | `k in d` | `d.contains_key(k)` |
 | `del d[k]` | `d.remove(k)` |
+
+D22 keeps lookup observational and removal consuming. A scalar destination such
+as `let count: i32 = d.get(k).unwrap()` receives an independent copy by
+contextual materialization. An inferred binding remains a view. For a non-Copy
+value, generated code must choose honestly between retaining `&V`, calling
+`.cloned()` when cloning is intended, and `remove(k)` when ownership transfer is
+intended; the migrator must never silently copy a map-owned buffer.
 
 #### Set methods
 

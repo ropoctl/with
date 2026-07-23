@@ -90,7 +90,7 @@ impl Sema:
         let help = self.argument_literal_default_help(arg_node, expr_text, expected_ty, actual_ty)
         if help.len() > 0:
             diag.add_help(help)
-        self.diags.emit(diag)
+        self.diags.emit(move diag)
 
     fn unknown_type_message(sym: i32) -> str:
         let name = self.pool_resolve(sym)
@@ -120,7 +120,7 @@ impl Sema:
         let end = self.ast.get_end(node)
         var diag = Diagnostic.err(msg, Span { file: self.local_file_id, start: start, end: end })
         diag.set_origin(origin_file, origin_fn, origin_line as i32, node)
-        self.diags.emit(diag)
+        self.diags.emit(move diag)
 
     mut fn emit_error_code(msg: str, node: i32, code: str, origin_file: str = __FILE__, origin_line: u32 = __LINE__, origin_fn: str = __FN__):
         if self.suppress_errors != 0:
@@ -130,7 +130,7 @@ impl Sema:
         var diag = Diagnostic.err(msg, Span { file: self.local_file_id, start: start, end: end })
         diag.set_code(code)
         diag.set_origin(origin_file, origin_fn, origin_line as i32, node)
-        self.diags.emit(diag)
+        self.diags.emit(move diag)
 
     mut fn emit_error_with_help(msg: str, node: i32, help: str, origin_file: str = __FILE__, origin_line: u32 = __LINE__, origin_fn: str = __FN__):
         if self.suppress_errors != 0:
@@ -141,14 +141,14 @@ impl Sema:
         diag.set_origin(origin_file, origin_fn, origin_line as i32, node)
         if help.len() > 0:
             diag.add_help(help)
-        self.diags.emit(diag)
+        self.diags.emit(move diag)
 
     mut fn emit_warning(msg: str, node: i32, origin_file: str = __FILE__, origin_line: u32 = __LINE__, origin_fn: str = __FN__):
         let start = self.ast.get_start(node)
         let end = self.ast.get_end(node)
         var diag = Diagnostic.warn(msg, Span { file: self.local_file_id, start: start, end: end })
         diag.set_origin(origin_file, origin_fn, origin_line as i32, node)
-        self.diags.emit(diag)
+        self.diags.emit(move diag)
 
     mut fn emit_warning_code(msg: str, node: i32, code: str, origin_file: str = __FILE__, origin_line: u32 = __LINE__, origin_fn: str = __FN__):
         let start = self.ast.get_start(node)
@@ -156,7 +156,7 @@ impl Sema:
         var diag = Diagnostic.warn(msg, Span { file: self.local_file_id, start: start, end: end })
         diag.set_code(code)
         diag.set_origin(origin_file, origin_fn, origin_line as i32, node)
-        self.diags.emit(diag)
+        self.diags.emit(move diag)
 
 // ── Typed dump rendering ────────────────────────────────────────
 

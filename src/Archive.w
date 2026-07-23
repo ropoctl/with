@@ -133,7 +133,7 @@ fn ar_sort_symbols(items: Vec[ArSymbol]) -> Vec[ArSymbol]:
             tail.push(result.get(j as i64))
         while result.len() as i32 > pos:
             result.pop()
-        result.push(item)
+        result.push(move item)
         for j in 0..tail.len() as i32:
             result.push(tail.get(j as i64))
     result
@@ -323,7 +323,7 @@ pub fn create_static_archive(output_path: str, member_paths: Vec[str]) -> i32:
             extract_macho_symbols(data)
         for si in 0..syms.len() as i32:
             let sym = ArSymbol { name: syms.get(si as i64), member_index: i }
-            all_symbols.push(sym)
+            all_symbols.push(move sym)
     let sorted = ar_sort_symbols(all_symbols)
     if saw_elf:
         return create_gnu_indexed_archive(output_path, member_names, member_data, sorted)

@@ -389,7 +389,7 @@ impl Zcu:
             let before = out.decl_count()
             var lexer = Lexer.init(synthetic, 0)
             let tokens = lexer.tokenize()
-            var parser = Parser.init_with_pool(tokens, synthetic, 0, self.pool, self.diagnostics, out)
+            var parser = Parser.init_with_pool(move tokens, synthetic, 0, self.pool, move self.diagnostics, out)
             out = parser.parse_module()
             self.pool = parser.intern
             self.diagnostics = parser.diags
@@ -1462,7 +1462,7 @@ impl Zcu:
             let synthetic = "use " ++ prelude_module ++ "\n"
             var plexer = Lexer.init(synthetic, 0)
             let ptokens = plexer.tokenize()
-            var pparser = Parser.init(ptokens, synthetic, 0, self.pool, self.diagnostics)
+            var pparser = Parser.init(move ptokens, synthetic, 0, self.pool, move self.diagnostics)
             pool = pparser.parse_module()
             self.pool = pparser.intern
             self.diagnostics = pparser.diags
@@ -1473,7 +1473,7 @@ impl Zcu:
             let before_user = pool.decl_count()
             var ulexer = Lexer.init(normalized_text, file_id)
             let utokens = ulexer.tokenize()
-            var uparser = Parser.init_with_pool(utokens, normalized_text, file_id, self.pool, self.diagnostics, pool)
+            var uparser = Parser.init_with_pool(move utokens, normalized_text, file_id, self.pool, move self.diagnostics, pool)
             if implicit_main_mode != 0:
                 uparser.enable_implicit_main_mode()
             pool = uparser.parse_module()
@@ -1483,7 +1483,7 @@ impl Zcu:
         else:
             var lexer = Lexer.init(normalized_text, file_id)
             let tokens = lexer.tokenize()
-            var parser = Parser.init(tokens, normalized_text, file_id, self.pool, self.diagnostics)
+            var parser = Parser.init(move tokens, normalized_text, file_id, self.pool, move self.diagnostics)
             if implicit_main_mode != 0:
                 parser.enable_implicit_main_mode()
             pool = parser.parse_module()
@@ -1499,7 +1499,7 @@ impl Zcu:
             let before = pool.decl_count()
             var extra_lexer = Lexer.init(extra_text, extra_file_id)
             let extra_tokens = extra_lexer.tokenize()
-            var extra_parser = Parser.init_with_pool(extra_tokens, extra_text, extra_file_id, self.pool, self.diagnostics, pool)
+            var extra_parser = Parser.init_with_pool(move extra_tokens, extra_text, extra_file_id, self.pool, move self.diagnostics, pool)
             pool = extra_parser.parse_module()
             self.pool = extra_parser.intern
             self.diagnostics = extra_parser.diags
@@ -1574,7 +1574,7 @@ impl Zcu:
         if pool.has_comptime_nodes() or pool.has_type_derives():
             if zcu_debug_init_enabled() != 0:
                 runtime_eprint("[frontend] compile_source:comptime-transform")
-            var pre_sema = self.configure_tracked_input_sema(Sema.init(self.pool, self.diagnostics, pool))
+            var pre_sema = self.configure_tracked_input_sema(Sema.init(self.pool, move self.diagnostics, pool))
             pre_sema.source_text = text
             pre_sema.decl_source_paths = sema_clone_str_vec(&self.decl_source_paths)
             pre_sema.decl_source_file_ids = sema_clone_i32_vec(&self.decl_source_file_ids)
@@ -1629,7 +1629,7 @@ impl Zcu:
         if zcu_debug_init_enabled() != 0:
             runtime_eprint("[frontend] compile_source:sema")
         let t_sema = runtime_clock_nanos()
-        var sema = self.configure_tracked_input_sema(Sema.init(self.pool, self.diagnostics, pool))
+        var sema = self.configure_tracked_input_sema(Sema.init(self.pool, move self.diagnostics, pool))
         sema.source_text = text
         sema.decl_source_paths = sema_clone_str_vec(&self.decl_source_paths)
         sema.decl_source_file_ids = sema_clone_i32_vec(&self.decl_source_file_ids)
@@ -1656,6 +1656,7 @@ impl Zcu:
         if do_profile:
             let sema_ns = runtime_clock_nanos() - t_sema
             runtime_eprint(f"[profile] frontend.sema  {sema_ns / 1000000}.{(sema_ns % 1000000) / 1000} ms  decls={pool.decl_count()}")
+        self.diagnostics = move sema.diags
         self.sync_from_sema(move sema)
         frontend_dump_type_decl_names("post-sema", self.last_sema.ast, self.last_sema.pool)
         self.last_typed_dump = ""
@@ -1712,7 +1713,7 @@ impl Zcu:
             var lexer = Lexer.init(text, mod.file_id)
             let tokens = lexer.tokenize()
             let before = merged_pool.decl_count()
-            var parser = Parser.init_with_pool(tokens, text, mod.file_id, self.pool, self.diagnostics, merged_pool)
+            var parser = Parser.init_with_pool(move tokens, text, mod.file_id, self.pool, move self.diagnostics, merged_pool)
             merged_pool = parser.parse_module()
             self.pool = parser.intern
             self.diagnostics = parser.diags
@@ -2342,7 +2343,7 @@ impl Zcu:
         var lexer = Lexer.init(text, file_id)
         let tokens = lexer.tokenize()
 
-        var parser = Parser.init_with_pool(tokens, text, file_id, self.pool, self.diagnostics, target_pool)
+        var parser = Parser.init_with_pool(move tokens, text, file_id, self.pool, move self.diagnostics, target_pool)
         let merged_pool = parser.parse_module()
         self.pool = parser.intern
         self.diagnostics = parser.diags

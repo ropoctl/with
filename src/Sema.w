@@ -807,8 +807,12 @@ type Sema {
     comp_resolved: HashMap[i32, i32],
     // Surviving generic comptime-if wrapper node → selected branch node.
     comptime_selected_branches: HashMap[i32, i32],
-    // Pipeline method calls: NK_PIPELINE node → method-name symbol.
+    // Pipeline method calls: NK_PIPELINE node → method-name symbol. D21 keeps
+    // the ordinary call result separate from the value carried to the next
+    // stage: carrier kind 1 threads the receiver place, 0 threads the result.
     pipeline_method_calls: HashMap[i32, i32],
+    pipeline_call_return_types: HashMap[i32, i32],
+    pipeline_carrier_kinds: HashMap[i32, i32],
     // Operator method calls: NK_BINARY node -> resolved function symbol, plus
     // node -> 1 when the right operand is the receiver.
     operator_method_calls: HashMap[i32, i32],
@@ -837,6 +841,10 @@ type Sema {
     slice_coerce_args: HashMap[i32, i32],
     // Shared-reference call argument node -> checked reference type when its
     // Copy pointee is passed by value.
+    // TODO(D22): this call-only sidecar is the old implementation boundary.
+    // Contextual Copy materialization is now a general owned-demand rule; the
+    // approved implementation design must represent every demand context
+    // uniformly without changing inference or pattern-projected types.
     auto_copy_ref_args: HashMap[i32, i32],
     // #604 stage 1: >0 while resolving a function-signature parameter type —
     // the only position where `[]mut T` is legal in this release.
@@ -1938,6 +1946,8 @@ fn sema_empty_state(pool: InternPool, diags: DiagnosticList, ast: AstPool) -> Se
         comp_resolved: sema_new_map_i32_i32(),
         comptime_selected_branches: sema_new_map_i32_i32(),
         pipeline_method_calls: sema_new_map_i32_i32(),
+        pipeline_call_return_types: sema_new_map_i32_i32(),
+        pipeline_carrier_kinds: sema_new_map_i32_i32(),
         operator_method_calls: sema_new_map_i32_i32(),
         operator_method_reversed: sema_new_map_i32_i32(),
         try_continue_tys: sema_new_map_i32_i32(),
@@ -2112,7 +2122,7 @@ fn sema_empty_state(pool: InternPool, diags: DiagnosticList, ast: AstPool) -> Se
     return s
 
 fn Sema.placeholder(pool: InternPool, diags: DiagnosticList, ast: AstPool) -> Sema:
-    return sema_empty_state(pool, diags, ast)
+    return sema_empty_state(pool, move diags, ast)
 
 // #602: mark param `idx` of extern/c_import fn `name_sym` as retaining its ptr.
 impl Sema:
@@ -2199,7 +2209,7 @@ impl Sema:
             self.register_retains_entry(self.ast.get_extra(ep + i))
 
 fn Sema.init(pool: InternPool, diags: DiagnosticList, ast: AstPool) -> Sema:
-    var s = sema_empty_state(pool, diags, ast)
+    var s = sema_empty_state(pool, move diags, ast)
 
     // Index 0 = error type (sentinel).
     s.add_type(TypeKind.TY_ERR, 0, 0, 0)
@@ -4764,11 +4774,13 @@ impl Sema:
         let tk = self.get_type_kind(resolved)
         if tk == TypeKind.TY_GENERIC_INST:
             let base_sym = self.get_generic_inst_base(resolved as i32)
-            // A5 (#606): a std Vec[T] needs drop iff its element T needs drop. POD-element
-            // Vecs (Vec[i32], Vec[str], …) stay non-drop — freeing those buffers is the
-            // separate wide flip, not element drop. str is Copy, so Vec[str] is non-drop.
+            // #691/D18 (supersedes A5/#606): every Vec owns and frees its heap
+            // buffer at scope end — ownership is a property of the handle, not
+            // its contents (§2.5.1). Element drops still run only when the
+            // element type needs them; a POD-element Vec's drop is just the
+            // buffer free.
             if base_sym == self.syms.vec:
-                return self.type_needs_drop(self.get_generic_inst_arg(resolved as i32, 0))
+                return 1
             let base_name = self.pool_resolve(base_sym)
             if base_name == "Sender" or base_name == "Receiver":
                 return 1
@@ -4821,7 +4833,7 @@ impl Sema:
         if origin_node != 0:
             diag.add_label(Span { file: self.local_file_id, start: self.ast.get_start(origin_node), end: self.ast.get_end(origin_node) }, "`" ++ origin_name ++ "` is destroyed before `" ++ view_name ++ "` drops")
         diag.add_help("declare `" ++ view_name ++ "` after `" ++ origin_name ++ "`, or clear/drop `" ++ view_name ++ "` before `" ++ origin_name ++ "` goes out of scope")
-        self.diags.emit(diag)
+        self.diags.emit(move diag)
 
     mut fn emit_returned_view_origin_use_error(view_sym: i32, use_node: i32):
         let origin_sym = self.binding_poisoned_origin_sym(view_sym)
@@ -4841,7 +4853,7 @@ impl Sema:
         if use_node != 0:
             diag.add_label(Span { file: self.local_file_id, start: self.ast.get_start(use_node), end: self.ast.get_end(use_node) }, "view is used here after a possible origin died")
         diag.add_help("copy the data out before the origin's scope ends, or declare `" ++ origin_name ++ "` in the outer scope")
-        self.diags.emit(diag)
+        self.diags.emit(move diag)
 
     fn binding_decl_node(sym: i32) -> i32:
         if self.binding_decl_nodes.contains(sym):
@@ -5998,7 +6010,7 @@ impl Sema:
         diag.set_origin(origin_file, origin_fn, origin_line as i32, node)
         if suggestion.len() > 0:
             diag.add_help("did you mean '" ++ suggestion ++ "'?")
-        self.diags.emit(diag)
+        self.diags.emit(move diag)
 
     // ── Type compatibility ───────────────────────────────────────────
 

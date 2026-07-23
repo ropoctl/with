@@ -165,6 +165,23 @@ share-place model. The receiver modes (`&self`/`mut self`/`move self`)
 and the `Copy` opt-in for aggregates are part of the same model. See
 `docs/decisions.md` D5.
 
+**D22 map-view and contextual-Copy semantics are canonical, and implementation
+is still in progress.** `HashMap[K, V].get` and `BTreeMap[K, V].get` uniformly
+return `Option[&V]`; `remove` is the ownership-transfer operation and returns
+`Option[V]`. Copy-ness never changes a lookup signature. A `&T` remains a
+reference during inference and pattern projection, including when `T: Copy`.
+It materializes an independent `T` only when an owned-value demand has already
+been established. `Option`, `Result`, patterns, `?`, `??`, and eliminators are
+transparent to view origins; they do not erase a borrow. See specification
+§§3.4, 3.8, 9.7, 10, 13.3, 21.1 and `docs/decisions.md` D22.
+
+The current compiler is deliberately NON-COMPLIANT while D22 is being
+implemented. Do not restore conditional `get` returns, teach new code that
+lookup owns/copies, or treat a lost origin through `unwrap` as precedent. Do
+not implement D22 from isolated TODOs: first use the approved implementation
+design and the full NON-COMPLIANT acceptance matrix so every equivalent
+spelling shares one semantic rule.
+
 **`FnAbi` is the single ABI source of truth — never re-derive call ABI
 per-path.** Every function signature has ONE ABI descriptor (`FnAbi`
 with a per-parameter `PassMode` — `Direct`/`Indirect`/`IndirectPlace`/
@@ -546,6 +563,54 @@ stop there unless the maintainer says it blocks the release.
 
 Publish the Darwin arm64 binary as `with-darwin-aarch64`. Do not publish a
 release binary asset named `main`; `src/main` is only the local seed path.
+
+---
+
+## The Specification Leads
+
+`docs/with-specification.md` is the bible. Two rules, both absolute:
+
+**The spec leads the implementation.** A spec change is a ruling that the
+product is now NON-COMPLIANT until the implementation catches up. There is
+no "implement first, spec after," no "hold the spec text until the code
+lands," and no reverting spec text to match what the code happens to do.
+Compliance work chases the spec — never the reverse. When the spec and the
+implementation disagree, the implementation is wrong, or the disagreement
+is surfaced to Eric for a ruling; it is never resolved by quietly editing
+the spec.
+
+**Spec changes are solemn.** Only Eric authors or blesses normative spec
+text — the exact words, not just the direction (D16's precedent: "the
+uniform spec sentence landing as the ruling itself"). An agent may draft
+and propose language, but a general directive, a mission statement, or an
+agreed design direction is NOT approval of specific spec wording. Nothing
+lands in the spec without Eric's explicit blessing of the words
+themselves.
+
+### "Do the thing" — the decision procedure
+
+Every spec change, and most decisions surfaced to Eric, go through this
+procedure. Present all four parts in one brief, then wait for the ruling:
+
+1. **What the others do.** Compare the reference projects (`.reference/`:
+   go, rust, swift, Vale, zig — plus any that fit) — verified in their
+   trees, not from memory. Name the mechanism each uses and where it
+   diverges from the others.
+2. **What the spec currently says.** Quote the exact text. Check whether
+   the current spec already rules the question (it often does — the
+   implementation may simply be non-compliant), and whether the proposal
+   duplicates an existing rule (one rule, one normative home).
+3. **Mission fit.** Relate the choice to `docs/mission.md` and the
+   decision record (`docs/decisions.md`). Say which option is most
+   with-y, not just which is safest.
+4. **Predict what Eric would say.** A committed BDFL prediction with
+   confidence, derived from his decision record — not a menu of options
+   with no stake. The prediction is falsifiable; being wrong and told why
+   improves the record.
+
+Then Eric rules. For spec changes, the blessed wording lands immediately
+as the ruling itself, and the implementation is non-compliant until it
+conforms (see above).
 
 ---
 

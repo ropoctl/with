@@ -30,7 +30,7 @@ comptime fn i64_pop_val() -> i64:
     v.push(100)
     v.push(200)
     v.push(300)
-    v.pop()
+    v.pop().unwrap()
 
 comptime fn i64_pop_len() -> i64:
     var v = Vec[i64].new()

@@ -346,6 +346,11 @@ impl Sema:
             return self.types_compatible_frozen(pointee, actual)
         0
 
+    // TODO(D22): retain this as evidence for the existing call-argument case,
+    // but do not grow D22 as a pile of call-shaped exceptions. The eventual
+    // contextual materialization predicate must also serve bindings, returns,
+    // operators, receivers, and joins while leaving inference and patterns as
+    // references. Implementation is intentionally pending.
     mut fn can_auto_copy_ref_arg(expected: i32, actual: i32) -> i32:
         if expected == 0 or actual == 0:
             return 0
@@ -1211,7 +1216,7 @@ impl Sema:
             let conc = self.global_race_concurrency_node
             diag.add_label(Span { file: self.global_race_concurrency_file, start: self.ast.get_start(conc), end: self.ast.get_end(conc) }, "program may run concurrently here (" ++ self.global_race_concurrency_reason ++ ")")
         diag.add_help("use Atomic[T], wrap the state in a synchronization type, or assert the access with `unsafe`")
-        self.diags.emit(diag)
+        self.diags.emit(move diag)
 
     mut fn validate_global_data_race_accesses():
         let proof_failed = if self.global_race_concurrency_node != 0: 1 else: 0
@@ -1416,7 +1421,7 @@ impl Sema:
                 let view_span = Span { file: self.local_file_id, start: self.ast.get_start(view_node), end: self.ast.get_end(view_node) }
                 diag.add_label(view_span, "returned view is derived from '" ++ param_name ++ "' here")
         diag.add_help("change the parameter to '" ++ param_name ++ ": &" ++ ty_name ++ "'")
-        self.diags.emit(diag)
+        self.diags.emit(move diag)
 
     mut fn should_warn_by_value_read_only_param(fn_node: i32, sig_idx: i32, pi: i32, eff: i32, param_tid: i32) -> i32:
         if eff != EFF_READ:
@@ -2321,7 +2326,7 @@ impl Sema:
             let end = self.ast.get_end(node)
             var diag = Diagnostic.warn("unused label " ++ self.label_name(self.fn_label_syms.get(li as i64)), Span { file: self.local_file_id, start, end })
             diag.set_code("unused-label")
-            self.diags.emit(diag)
+            self.diags.emit(move diag)
 
     fn push_label_boundary() -> Unit:
         self.label_syms.push(0)
@@ -3630,7 +3635,7 @@ impl Sema:
             self.emit_error("guarded with protocol methods could not be specialized for the concrete guard type", node)
             return WithFormKind.Binding
         let form = if is_mut != 0: WithFormKind.GuardedMut else: WithFormKind.Guarded
-        self.with_form_kinds.insert(node, form)
+        self.with_form_kinds.insert(node, move form)
         self.with_payload_types.insert(node, payload_ty)
         self.with_enter_methods.insert(node, enter_fn)
         self.with_exit_methods.insert(node, exit_fn)
@@ -3638,7 +3643,7 @@ impl Sema:
         self.with_enter_mono_syms.insert(node, self.sig_names.get(enter_sig as i64))
         self.with_exit_sigs.insert(node, exit_sig)
         self.with_exit_mono_syms.insert(node, self.sig_names.get(exit_sig as i64))
-        form
+        if is_mut != 0: WithFormKind.GuardedMut else: WithFormKind.Guarded
 
     mut fn fn_symbol_may_suspend(fn_sym: i32) -> i32:
         if fn_sym == 0:
@@ -7505,6 +7510,10 @@ impl Sema:
         let rhs_is_num_lit = sema_node_is_numeric_literal(self.ast, rhs_node)
         var lhs: TypeId = 0 as TypeId
         var rhs: TypeId = 0 as TypeId
+        // TODO(D22): `??` is a lazy match using the one contextual join, not
+        // "RHS must equal payload". Resolve reference-preserving origin unions,
+        // owned anchors, Copy materialization, and the §22.3 non-Copy diagnostic
+        // through the future shared join operation.
         if op == BinaryOp.OP_DEFAULT:
             lhs = self.check_expr(lhs_node)
             if lhs == 0:
@@ -7771,7 +7780,7 @@ impl Sema:
             return
         var diag = Diagnostic.warn("prefer 'x not in y' over 'not (x in y)'", Span { file: self.local_file_id, start: self.ast.get_start(node), end: self.ast.get_end(node) })
         diag.set_code("prefer-not-in")
-        self.diags.emit(diag)
+        self.diags.emit(move diag)
 
     mut fn check_unary(node: i32) -> i32:
         let op = self.ast.get_data0(node)
@@ -7867,6 +7876,9 @@ impl Sema:
             else:
                 self.emit_error("cannot dereference non-pointer value", node)
             return 0
+        // TODO(D22): `?` projects the exact success payload and transparently
+        // carries its origin set. Record that transfer for builtin and user Try
+        // alike; do not make `?` an ownership or origin-erasure boundary.
         if op == UnaryOp.UOP_TRY:
             if self.in_defer != 0:
                 self.emit_error_code("? operator not allowed in defer", node, "E0901")
@@ -7976,19 +7988,19 @@ impl Sema:
         var diag = Diagnostic.err("E0801: task result must be observed", Span { file: self.local_file_id, start: self.ast.get_start(node), end: self.ast.get_end(node) })
         diag.add_label(Span { file: self.local_file_id, start: self.ast.get_start(node), end: self.ast.get_end(node) }, "this task is marked must-observe")
         diag.add_help("await, cancel, return, store, or otherwise handle the task")
-        self.diags.emit(diag)
+        self.diags.emit(move diag)
 
     mut fn emit_task_detach_safety_error(node: i32):
         var diag = Diagnostic.err("E0802: task cannot be detached safely", Span { file: self.local_file_id, start: self.ast.get_start(node), end: self.ast.get_end(node) })
         diag.add_label(Span { file: self.local_file_id, start: self.ast.get_start(node), end: self.ast.get_end(node) }, "task captures data owned by this scope")
         diag.add_help("await, cancel, return, or restructure so the task no longer carries scope-bound state out of scope")
-        self.diags.emit(diag)
+        self.diags.emit(move diag)
 
     mut fn emit_task_handle_statement_error(node: i32):
         var diag = Diagnostic.err("E0801: task result must be observed", Span { file: self.local_file_id, start: self.ast.get_start(node), end: self.ast.get_end(node) })
         diag.add_label(Span { file: self.local_file_id, start: self.ast.get_start(node), end: self.ast.get_end(node) }, "a bound Task handle is not detached by mentioning it")
         diag.add_help("await, cancel, return, store, or otherwise handle the task")
-        self.diags.emit(diag)
+        self.diags.emit(move diag)
 
     mut fn check_task_statement_disposition(stmt: i32):
         if self.expr_is_task_value(stmt) == 0 or self.expr_is_scoped_task_value(stmt) != 0:
@@ -8015,7 +8027,7 @@ impl Sema:
                 var diag = Diagnostic.err("unused Task handle `" ++ name ++ "`", Span { file: self.local_file_id, start: self.ast.get_start(decl), end: self.ast.get_end(decl) })
                 diag.add_label(Span { file: self.local_file_id, start: self.ast.get_start(decl), end: self.ast.get_end(decl) }, "binding a task declares intent to observe it")
                 diag.add_help("await, cancel, return, store, track, or otherwise handle the task before the handle is lost")
-                self.diags.emit(diag)
+                self.diags.emit(move diag)
             i = i + 1
 
     mut fn check_block(node: i32) -> i32:
@@ -8511,6 +8523,10 @@ impl Sema:
         var out = out0
         if node == 0:
             return out
+        // TODO(D22): an explicitly recorded contextual Copy is an ownership
+        // boundary, but call args are not the only such context. Move this
+        // semantic distinction behind the future shared D22 representation;
+        // do not infer independence from a temporary or eliminator spelling.
         if self.auto_copy_ref_args.contains(node):
             return out
         let kind = self.ast.kind(node)
@@ -8582,6 +8598,9 @@ impl Sema:
     fn compute_expr_view_origin_mask(node: i32) -> i32:
         if node == 0:
             return 0
+        // TODO(D22): same boundary as collect_expr_view_deps. Transparent
+        // Option/Result carriers and eliminators must preserve origins; only a
+        // real contextual Copy/clone/transfer ends them for the owned result.
         if self.auto_copy_ref_args.contains(node):
             return 0
         let kind = self.ast.kind(node)
@@ -8791,6 +8810,19 @@ impl Sema:
                 else:
                     self.emit_error("returned ephemeral value may outlive its origin '" ++ origin_name ++ "'", report_node)
                 return
+
+    fn record_builtin_receiver_view_origins(call_node: i32, recv_node: i32):
+        if call_node == 0 or recv_node == 0:
+            return
+        let union_mask = self.compute_expr_view_origin_mask(recv_node)
+        var concrete_deps: Vec[i32] = Vec.new()
+        concrete_deps = self.collect_expr_view_deps(recv_node, move concrete_deps)
+        if concrete_deps.len() == 0:
+            let root = self.place_root_sym(recv_node)
+            if root != 0:
+                concrete_deps = self.push_unique_i32(move concrete_deps, root)
+        if union_mask != 0 or concrete_deps.len() > 0:
+            self.set_expr_view_deps(call_node, union_mask, concrete_deps)
 
     fn record_call_view_origins(call_node: i32, sig_idx: i32, param_offset: i32, recv_node: i32, extra_start: i32, arg_count: i32, has_resolved: i32):
         if call_node == 0 or sig_idx < 0:
@@ -12450,25 +12482,22 @@ impl Sema:
                         else:
                             ret = self.check_method_call_parts(lhs, method, self.ast.get_data1(rhs), self.ast.get_data2(rhs), node, lhs_ty as i32)
                         if ret != 0:
-                            self.pipeline_method_calls.insert(node, method)
-                            self.typed_expr_types.insert(node, ret)
-                        return ret
+                            return self.finish_pipeline_method(node, lhs_ty as i32, method, ret)
+                        return 0
             else if self.ast.kind(rhs) == NodeKind.NK_IDENT:
                 let method = self.ast.get_data0(rhs)
                 if self.pipeline_method_exists(lhs_ty as i32, method) != 0:
                     let ret2 = self.check_method_call_parts(lhs, method, -1, 0, node, lhs_ty as i32)
                     if ret2 != 0:
-                        self.pipeline_method_calls.insert(node, method)
-                        self.typed_expr_types.insert(node, ret2)
-                    return ret2
+                        return self.finish_pipeline_method(node, lhs_ty as i32, method, ret2)
+                    return 0
             else if self.ast.kind(rhs) == NodeKind.NK_TYPE_GENERIC:
                 let method2 = self.ast.get_data0(rhs)
                 if method2 != 0 and self.pipeline_method_exists(lhs_ty as i32, method2) != 0:
                     let ret3 = self.check_method_call_parts(lhs, method2, -1, 0, node, lhs_ty as i32)
                     if ret3 != 0:
-                        self.pipeline_method_calls.insert(node, method2)
-                        self.typed_expr_types.insert(node, ret3)
-                    return ret3
+                        return self.finish_pipeline_method(node, lhs_ty as i32, method2, ret3)
+                    return 0
             else if self.ast.kind(rhs) == NodeKind.NK_INDEX:
                 let rhs_indexed_base = self.ast.get_data0(rhs)
                 if self.ast.kind(rhs_indexed_base) == NodeKind.NK_IDENT:
@@ -12480,9 +12509,8 @@ impl Sema:
                         else:
                             ret4 = self.check_method_call_parts(lhs, method3, -1, 0, node, lhs_ty as i32)
                         if ret4 != 0:
-                            self.pipeline_method_calls.insert(node, method3)
-                            self.typed_expr_types.insert(node, ret4)
-                        return ret4
+                            return self.finish_pipeline_method(node, lhs_ty as i32, method3, ret4)
+                        return 0
         let generic_ret = self.check_generic_pipeline_call(node, lhs, lhs_ty as i32, rhs)
         if generic_ret >= 0:
             return generic_ret
@@ -12497,6 +12525,28 @@ impl Sema:
                 self.typed_expr_types.insert(node, ret_ty)
                 return ret_ty
         rhs_ty as i32
+
+    fn pipeline_method_has_mut_receiver(node: i32, recv_type: i32, method: i32) -> i32:
+        let resolved_sig = self.resolved_call_sigs.get(node)
+        if resolved_sig.is_some():
+            return if self.sig_receiver_mode(resolved_sig.unwrap()) == ReceiverMode.Mut: 1 else: 0
+        let resolved_recv = self.auto_deref_method_type_frozen(recv_type as TypeId, method)
+        let owner = self.method_owner_symbol_for_type(resolved_recv as i32)
+        if owner == 0:
+            return 0
+        if self.builtin_method_requires_mutable_receiver(owner, method) != 0:
+            return 1
+        self.method_has_mut_self_flag(owner, method)
+
+    mut fn finish_pipeline_method(node: i32, recv_type: i32, method: i32, call_ret: i32) -> i32:
+        let resolved_ret = self.resolve_alias(call_ret as TypeId)
+        let carries_receiver = if resolved_ret == self.ty_void and self.pipeline_method_has_mut_receiver(node, recv_type, method) != 0: 1 else: 0
+        let pipeline_ret = if carries_receiver != 0: recv_type else: call_ret
+        self.pipeline_method_calls.insert(node, method)
+        self.pipeline_call_return_types.insert(node, call_ret)
+        self.pipeline_carrier_kinds.insert(node, carries_receiver)
+        self.typed_expr_types.insert(node, pipeline_ret)
+        pipeline_ret
 
     mut fn eval_comptime_if_condition_truthy(node: i32) -> i32:
         if node == 0:
@@ -15904,6 +15954,12 @@ impl Sema:
         else:
             self.resolve_type_node_with_current_subst(self.ast.fn_meta_ret(meta), concrete_owner)
         if concrete_sig >= 0:
+            // Generic method calls need the same concrete call contract as free
+            // generic calls. D21's pipeline carrier classification reads the
+            // resolved receiver mode and return type from this signature, and
+            // MIR/codegen must dispatch the exact same specialization.
+            self.resolved_call_sigs.insert(node, concrete_sig)
+            self.resolved_call_mono_syms.insert(node, self.sig_names.get(concrete_sig as i64))
             let recv_param_offset = if is_static != 0: 0 else: 1
             let receiver = if is_static != 0: 0 else: recv_node
             self.propagate_method_call_param_effects(node, concrete_sig, recv_param_offset, receiver, extra_start, arg_count, self.has_resolved_call_args(node))
@@ -16592,6 +16648,10 @@ impl Sema:
                 self.emit_error("Option.flatten() requires Option[Option[T]]", node)
                 return 0
             return elem_ty
+        // TODO(D22): replace this old Option[T]-shaped cloned contract with
+        // Option[&T].cloned() -> Option[T] where T: Clone, add the sibling
+        // copied() boundary for T: Copy, and record that successful output as
+        // independent. Do not make unwrap conditionally own the payload.
         if method_name == "cloned":
             if arg_count != 0:
                 self.emit_error("Option.cloned() expects no arguments", node)
@@ -16970,11 +17030,19 @@ impl Sema:
                 return self.generic_constructor_return_type(owner_sym, recv_type)
             if field == self.syms.push or field == self.syms.set_i32 or field == self.syms.clear:
                 return self.ty_void as i32
+            if field == self.syms.pop and tk == TypeKind.TY_GENERIC_INST:
+                return self.ensure_option_type_for(self.get_generic_inst_arg(resolved as i32, 0))
         if owner_sym == self.syms.hashmap:
             if field == self.syms.new:
                 return self.generic_constructor_return_type(owner_sym, recv_type)
             if method_name == "increment" or method_name == "decrement" or method_name == "update":
                 return self.ty_void as i32
+            if tk == TypeKind.TY_GENERIC_INST:
+                let value_ty = self.get_generic_inst_arg(resolved as i32, 1)
+                if field == self.syms.get:
+                    return self.ensure_option_ref_type_for(value_ty)
+                if field == self.syms.remove:
+                    return self.ensure_option_type_for(value_ty)
         if owner_sym == self.syms.hashset:
             if field == self.syms.new:
                 return self.generic_constructor_return_type(owner_sym, recv_type)
@@ -17098,24 +17166,6 @@ impl Sema:
             if method_name == "min" or method_name == "max" or method_name == "abs" or method_name == "mul_add":
                 return recv_type
 
-        // HashMap.get and related C-backend intrinsics currently materialize an
-        // encoded optional value with the payload's static type. Preserve the
-        // existing surface methods until those intrinsics return real Option[T]
-        // — but never on an enum value: Option/Result handled their own
-        // unwrap above, and treating any other enum as an encoded optional
-        // lets `.unwrap()` extract a phantom payload from it (the value is
-        // corrupt from that point on — segfault class, #672).
-        let oe_resolved = self.resolve_alias(recv_type as TypeId)
-        var oe_is_enum = self.get_type_kind(oe_resolved) == TypeKind.TY_ENUM
-        if self.get_type_kind(oe_resolved) == TypeKind.TY_GENERIC_INST:
-            let oe_base_tid = self.lookup_named_type_visible(self.get_generic_inst_base(oe_resolved as i32))
-            if oe_base_tid != 0 and self.get_type_kind(oe_base_tid as TypeId) == TypeKind.TY_ENUM:
-                oe_is_enum = true
-        if not oe_is_enum:
-            if field == self.syms.is_some or field == self.syms.is_none:
-                return self.ty_bool as i32
-            if field == self.syms.unwrap:
-                return recv_type
         0
 
     fn method_expected_arg_type(recv_type: i32, field: i32, arg_index: i32) -> i32:
@@ -17611,7 +17661,7 @@ impl Sema:
             let recv_kind = unpack_place_kind(recv_packed)
             let recv_mut_state = unpack_place_mut(recv_packed)
             let recv_via_ro_ref = self.place_base_is_read_only_ref(expr)
-            if recv_kind == PlaceKind.PK_NotPlace:
+            if recv_kind == PlaceKind.PK_NotPlace and self.ast.kind(node) != NodeKind.NK_PIPELINE:
                 self.emit_error("mutating method requires a place receiver (§15.3)", node)
             else if recv_mut_state == PlaceMut.PM_ReadOnly or recv_via_ro_ref != 0:
                 self.emit_error("cannot call mutating method through a read-only place (§15.2)", node)
@@ -17619,13 +17669,10 @@ impl Sema:
                 self.check_mutation_against_views(expr, node)
                 self.record_global_place_write(expr, node)
         else if fn_param_is_move_self(pflags) != 0:
-            if self.ast.kind(expr) == NodeKind.NK_IDENT:
-                let recv_sym = self.ast.get_data0(expr)
-                if self.scope_has(recv_sym) != 0:
-                    self.scope_set_state(recv_sym, VarState.MOVED)
-                    self.effect_note_origin_node = node
-                    self.note_param_effect(recv_sym, EFF_CONSUME)
-                    self.effect_note_origin_node = 0
+            let move_recv_ty = self.check_expr(expr)
+            if move_recv_ty != 0 and self.is_copy(move_recv_ty as TypeId) == 0:
+                self.note_place_effect(expr, EFF_CONSUME)
+                self.mark_moved_if_consumed(expr)
 
     mut fn check_concrete_trait_method_call(recv_type: i32, method_sym: i32, arg_types: &Vec[i32], extra_start: i32, arg_count: i32, node: i32, expr: i32, has_resolved_args: i32) -> i32:
         if recv_type == 0:
@@ -17832,29 +17879,46 @@ impl Sema:
                 return 1
         0
 
-    fn builtin_method_requires_mutable_receiver(type_name_sym: i32, field: i32) -> i32:
+    // Builtin methods have no declared signature node, so their receiver mode
+    // must still come from one Sema-owned contract. D21 makes this distinction
+    // ownership-critical: Mut retains the caller's place, while Move consumes
+    // it. Keep predicates and independently-cloning operations read-only.
+    fn builtin_method_receiver_mode(type_name_sym: i32, field: i32) -> ReceiverMode:
         if type_name_sym == self.syms.vec:
             if field == self.syms.split_at_mut:
-                return 1
+                return ReceiverMode.Mut
             if field == self.syms.push or field == self.syms.set_i32 or field == self.syms.remove or field == self.syms.clear or field == self.syms.pop:
-                return 1
+                return ReceiverMode.Mut
         if type_name_sym == self.syms.vecrange:
             if field == self.syms.split_at_mut:
-                return 1
+                return ReceiverMode.Mut
         if type_name_sym == self.syms.hashmap:
             if field == self.syms.insert or field == self.syms.remove or field == self.syms.clear:
-                return 1
+                return ReceiverMode.Mut
             let method_name = self.pool_resolve(field)
             if method_name == "increment" or method_name == "decrement" or method_name == "update":
-                return 1
+                return ReceiverMode.Mut
         if type_name_sym == self.syms.hashset:
             if field == self.syms.insert or field == self.syms.remove or field == self.syms.clear:
-                return 1
+                return ReceiverMode.Mut
         if type_name_sym == self.syms.fixed_string:
             let method_name = self.pool_resolve(field)
             if method_name == "clear" or method_name == "push_byte" or method_name == "push_str":
-                return 1
-        0
+                return ReceiverMode.Mut
+        let method_name = self.pool_resolve(field)
+        if type_name_sym == self.syms.option:
+            if method_name == "unwrap" or method_name == "expect" or method_name == "unwrap_or" or method_name == "unwrap_or_else" or method_name == "map" or method_name == "and_then" or method_name == "or_else" or method_name == "filter" or method_name == "zip" or method_name == "unzip" or method_name == "flatten" or method_name == "inspect" or method_name == "transpose":
+                return ReceiverMode.Move
+        if type_name_sym == self.syms.result:
+            if method_name == "unwrap" or method_name == "expect" or method_name == "unwrap_or" or method_name == "unwrap_or_else" or method_name == "map" or method_name == "map_err" or method_name == "and_then" or method_name == "or_else" or method_name == "ok" or method_name == "err" or method_name == "inspect" or method_name == "inspect_err" or method_name == "transpose" or method_name == "context" or method_name == "with_context":
+                return ReceiverMode.Move
+        ReceiverMode.Read
+
+    fn builtin_method_requires_mutable_receiver(type_name_sym: i32, field: i32) -> i32:
+        if self.builtin_method_receiver_mode(type_name_sym, field) == ReceiverMode.Mut: 1 else: 0
+
+    fn builtin_method_requires_move_receiver(type_name_sym: i32, field: i32) -> i32:
+        if self.builtin_method_receiver_mode(type_name_sym, field) == ReceiverMode.Move: 1 else: 0
 
     fn is_shared_ref_like_receiver(recv_ty: i32) -> i32:
         if recv_ty == 0:
@@ -18071,6 +18135,17 @@ impl Sema:
                         self.emit_error("min/max operands must be the same type; use an explicit `as` cast", mc_arg_node)
             if self.method_arg_stores_value(obj_type as i32, field, ai) != 0:
                 self.check_ephemeral_task_storage(mc_arg_node, "generic container")
+                // Container stores take ownership of their element just like an
+                // owned function parameter. Builtins have no ordinary signature
+                // for finalize_call_site_ownership to inspect, so enforce D5 at
+                // this semantic boundary instead of silently moving a plain named
+                // binding in MIR. Rvalues need no spelling; `copy` keeps the
+                // source; `move` is invalidated by check_expr itself.
+                let mc_store_arg_kind = self.ast.kind(mc_arg_node)
+                if mc_store_arg_kind != NodeKind.NK_MOVE_ARG and mc_store_arg_kind != NodeKind.NK_COPY_ARG and self.is_copy(mc_arg_ty as TypeId) == 0:
+                    let mc_store_root = self.place_root_sym(mc_arg_node)
+                    if mc_store_root != 0 and self.scope_has(mc_store_root) != 0:
+                        self.emit_error("this parameter takes ownership of a non-Copy value (it is consumed or escapes the call); pass `move x` to transfer ownership, or `copy x` for an independent copy (§3.8)", mc_arg_node)
                 // #625 (viral-escape, decisions.md D2): storing an ephemeral
                 // element propagates its stack view-origins onto the container
                 // binding, so a later escape (return / heap-store / box) of the
@@ -18230,6 +18305,9 @@ impl Sema:
 
         let type_name_sym = self.method_owner_symbol_for_type(recv_type as i32)
         if type_name_sym != 0:
+            if self.builtin_method_requires_move_receiver(type_name_sym, field) != 0 and self.is_shared_ref_like_receiver(obj_type as i32) != 0:
+                self.emit_error("consuming method requires an owned receiver", node)
+                return 0
             if self.builtin_method_requires_mutable_receiver(type_name_sym, field) != 0:
                 if self.is_shared_ref_like_receiver(obj_type as i32) != 0:
                     self.emit_builtin_mutable_receiver_error(type_name_sym, field, node)
@@ -18269,7 +18347,9 @@ impl Sema:
                 // Receiver auto-deref through &T or *const T produces a read-only
                 // place (§2.3) regardless of the binding's mutability.
                 let recv_via_ro_ref = self.place_base_is_read_only_ref(expr)
-                if recv_kind == PlaceKind.PK_NotPlace:
+                // D21 pipeline rvalues are materialized as hidden statement
+                // places. Direct calls retain §15.3's place requirement.
+                if recv_kind == PlaceKind.PK_NotPlace and self.ast.kind(node) != NodeKind.NK_PIPELINE:
                     self.emit_error("mutating method requires a place receiver (§15.3)", node)
                 else if recv_mut_state == PlaceMut.PM_ReadOnly or recv_via_ro_ref != 0:
                     self.emit_error("cannot call mutating method through a read-only place (§15.2)", node)
@@ -18280,17 +18360,13 @@ impl Sema:
                 let ms_root = self.place_root_sym(expr)
                 if ms_root != 0 and self.scope_is_view_bound(ms_root) != 0:
                     self.emit_error("cannot mutate through read-only view yielded by iterator (§15.17)", node)
-            else if self.method_has_move_self_flag(type_name_sym, field) != 0:
+            else if self.method_has_move_self_flag(type_name_sym, field) != 0 or self.builtin_method_requires_move_receiver(type_name_sym, field) != 0:
                 // docs/mutability.md — move self receiver: the call consumes the
-                // receiver binding. Invalidate it so subsequent uses are caught.
-                self.note_place_effect(expr, EFF_CONSUME)
-                if self.ast.kind(expr) == NodeKind.NK_IDENT:
-                    let recv_sym = self.ast.get_data0(expr)
-                    if self.scope_has(recv_sym) != 0:
-                        self.scope_set_state(recv_sym, VarState.MOVED)
-                        self.effect_note_origin_node = node
-                        self.note_param_effect(recv_sym, EFF_CONSUME)
-                        self.effect_note_origin_node = 0
+                // receiver binding. Copy receivers satisfy the same contract by
+                // copying, so the caller remains live (mutability.md §7).
+                if self.is_copy(obj_type) == 0:
+                    self.note_place_effect(expr, EFF_CONSUME)
+                    self.mark_moved_if_consumed(expr)
             else if type_name_sym != 0 and self.builtin_method_requires_mutable_receiver(type_name_sym, field) != 0:
                 // §15.6 — view-liveness for builtin mutating methods (push, pop,
                 // insert, etc.). The earlier hardcoded path already rejected
@@ -18694,11 +18770,13 @@ impl Sema:
                     return self.ty_str as i32
             if type_name_sym == self.syms.vec:
                 if field == self.syms.push:
-                    return recv_type as i32
+                    return self.ty_void as i32
                 if field == self.syms.set_i32 or field == self.syms.clear:
                     return self.ty_void as i32
-                if field == self.syms.get or field == self.syms.pop or field == self.syms.remove:
+                if field == self.syms.get or field == self.syms.remove:
                     return self.get_generic_inst_arg(recv_type, 0)
+                if field == self.syms.pop:
+                    return self.ensure_option_type_for(self.get_generic_inst_arg(recv_type, 0))
                 if generic_len_ret != 0:
                     return generic_len_ret
                 if field == self.syms.contains:
@@ -18938,11 +19016,16 @@ impl Sema:
                 if mc_method_name_raw == "increment" or mc_method_name_raw == "decrement" or mc_method_name_raw == "update":
                     return self.ty_void as i32
                 if field == self.syms.get:
-                    return self.get_generic_inst_arg(recv_type, 1)
+                    // D22 seeds map lookup from the receiver only. TODO(D22):
+                    // preserve this origin through every transparent carrier,
+                    // pattern, `?`, `??`, and eliminator instead of merely
+                    // recording it at the producer.
+                    self.record_builtin_receiver_view_origins(node, expr)
+                    return self.ensure_option_ref_type_for(self.get_generic_inst_arg(recv_type, 1))
                 if field == self.syms.contains:
                     return self.ty_bool as i32
                 if field == self.syms.remove:
-                    return self.get_generic_inst_arg(recv_type, 1)
+                    return self.ensure_option_type_for(self.get_generic_inst_arg(recv_type, 1))
                 if generic_len_ret != 0:
                     return generic_len_ret
                 if field == self.syms.keys:
@@ -18982,6 +19065,7 @@ impl Sema:
                 if field == self.syms.insert:
                     return self.ensure_handle_type_for(sm_elem_ret_ty)
                 if field == self.syms.get:
+                    self.record_builtin_receiver_view_origins(node, expr)
                     return self.ensure_option_ref_type_for(sm_elem_ret_ty)
                 if field == self.syms.slot:
                     return self.ensure_slotmapslot_type_for(sm_elem_ret_ty)
@@ -19003,6 +19087,10 @@ impl Sema:
                 if mc_method_name_raw == "set":
                     return self.ty_void as i32
             if type_name_sym == self.syms.option:
+                // TODO(D22): Option/Result payload projection is transparent to
+                // view origins. These return-type branches currently recover the
+                // payload type but do not provide the general origin transfer
+                // required by §21.1 Rule 10.
                 if field == self.syms.unwrap:
                     if mc_resolved_arg_count != 0:
                         self.emit_error("Option.unwrap() expects no arguments", node)
@@ -19115,6 +19203,12 @@ impl Sema:
             recv_type as i32
         let builtin_ret = self.builtin_intrinsic_method_return_type(builtin_recv_type, type_name_sym, field)
         if builtin_ret != 0:
+            // TODO(D22): producer seeding below is insufficient on its own.
+            // Builtin eliminators must transfer semantic origin sets exactly as
+            // their non-builtin equivalents; no intrinsic may become an origin
+            // erasure boundary.
+            if field == self.syms.get and (type_name_sym == self.syms.hashmap or type_name_sym == self.syms.slotmap):
+                self.record_builtin_receiver_view_origins(node, expr)
             self.typed_expr_types.insert(node, builtin_ret)
             return builtin_ret
 
@@ -19567,6 +19661,17 @@ impl Sema:
             return self.type_expr_contains_ref(self.ast.get_data0(node))
         0
 
+    fn generic_type_expr_is_long_lived_storage(node: i32) -> i32:
+        if node == 0 or self.ast.kind(node) != NodeKind.NK_TYPE_GENERIC:
+            return 0
+        let base = self.ast.get_data0(node)
+        if base == self.syms.vec or base == self.syms.hashmap or base == self.syms.hashset or base == self.syms.btreemap or base == self.syms.btreeset or base == self.syms.slotmap or base == self.syms.box or base == self.syms.task or base == self.syms.scoped_task or base == self.syms.channel:
+            return 1
+        let name = self.pool_resolve(base)
+        if name == "Rc" or name == "Arc" or name == "Sender" or name == "Receiver":
+            return 1
+        0
+
     fn type_expr_is_collection_with_ref(node: i32) -> i32:
         if node == 0:
             return 0
@@ -19576,7 +19681,11 @@ impl Sema:
             let arg_count = self.ast.get_data2(node)
             for ai in 0..arg_count:
                 let arg_node = self.ast.get_extra(extra_start + ai)
-                if self.type_expr_contains_ref(arg_node) != 0:
+                // §3.3 forbids references in long-lived storage, not in every
+                // generic carrier. Option[&T] and Result[&T, E] are ordinary
+                // ephemeral locals (§3.4); Vec[&T] and other owning stores are
+                // forbidden. Recurse so Option[Vec[&T]] remains forbidden.
+                if self.generic_type_expr_is_long_lived_storage(node) != 0 and self.type_expr_contains_ref(arg_node) != 0:
                     return 1
                 if self.type_expr_is_collection_with_ref(arg_node) != 0:
                     return 1
@@ -19792,7 +19901,7 @@ impl Sema:
                 let lu_start = self.ast.get_start(last_use)
                 let lu_end = self.ast.get_end(last_use)
                 diag.add_label(Span { file: self.local_file_id, start: lu_start, end: lu_end }, "view used here")
-            self.diags.emit(diag)
+            self.diags.emit(move diag)
             return
 
     // Register a borrow with pre-computed place/kind/field/path.
@@ -20411,6 +20520,13 @@ impl Sema:
         let kind = self.ast.kind(node)
         if kind == NodeKind.NK_IDENT:
             return self.ast.get_data0(node)
+        // D21: a place-threading pipeline remains the same place. Make the
+        // carrier transparent to every existing place-root consumer so effect,
+        // view-liveness, and mutation checks keep using the ordinary call law.
+        if kind == NodeKind.NK_PIPELINE:
+            let carrier = self.pipeline_carrier_kinds.get(node)
+            if carrier.is_some() and carrier.unwrap() != 0:
+                return self.place_root_sym(self.ast.get_data0(node))
         if kind == NodeKind.NK_FIELD_ACCESS or kind == NodeKind.NK_COMPUTED_FIELD_ACCESS or kind == NodeKind.NK_INDEX or kind == NodeKind.NK_MULTI_INDEX or kind == NodeKind.NK_GROUPED or kind == NodeKind.NK_NO_SUSPEND:
             return self.place_root_sym(self.ast.get_data0(node))
         // &x.field — strip the reference operator to get the underlying place's root
@@ -20532,6 +20648,13 @@ impl Sema:
         if node == 0:
             return pack_place(PlaceKind.PK_NotPlace, PlaceMut.PM_NoMut)
         let kind = self.ast.kind(node)
+        // D21: the result of a Mut + Unit method stage is the receiver place,
+        // not the call's Unit result. Nested stages therefore classify exactly
+        // as the original receiver and inherit the same mutability.
+        if kind == NodeKind.NK_PIPELINE:
+            let carrier = self.pipeline_carrier_kinds.get(node)
+            if carrier.is_some() and carrier.unwrap() != 0:
+                return self.classify_place(self.ast.get_data0(node))
         // Identifier root — local binding, parameter, or global. P2.4 stub
         // uses scope_lookup to confirm the symbol resolves to a binding;
         // later phases will distinguish OwnedParam / Global / Captured /

@@ -30,7 +30,7 @@ comptime fn str_pop_val() -> str:
     v.push("first")
     v.push("second")
     v.push("third")
-    v.pop()
+    v.pop().unwrap()
 
 comptime fn str_pop_len() -> i64:
     var v = Vec[str].new()

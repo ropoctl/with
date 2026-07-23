@@ -234,11 +234,14 @@ Remaining action hardening:
 
 Related stdlib/language blockers tracked for later design:
 
-- `Vec.push` now returns the receiver, so annotated fluent chains such as
-  `let v: Vec[str] = Vec.new() |> push("a") |> push("b")` work.
-- Type context still does not propagate through pipelines into an unannotated
-  `Vec.new()`, so `let v = Vec.new() |> push("a")` cannot infer the element
-  type from the later method.
+- **Superseded by D21 (2026-07-22):** the historical implementation made
+  `Vec.push` return the receiver so annotated fluent chains such as
+  `let v: Vec[str] = Vec.new() |> push("a") |> push("b")` worked. `Vec.push`
+  is now specified as a Unit-returning mutator; the same surface chain uses
+  §9.6 place-threading and never creates an owned receiver return.
+- Type context propagation through an unannotated `Vec.new()` pipeline remains
+  a separate inference concern under D21; it must not be solved by restoring
+  receiver-returning `push`.
 
 Implemented tests:
 

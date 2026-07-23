@@ -1,5 +1,15 @@
 # Handoff: current state
 
+> **SUPERSEDED CURRENT-STATE NOTICE — D22 (2026-07-23): A new decision has been
+> made, but implementation is still in progress.** The normative current state
+> is specification v7.2 plus `docs/decisions.md` D22: `HashMap.get` and
+> `BTreeMap.get` return `Option[&V]` uniformly, `remove` transfers `Option[V]`,
+> Copy materialization is contextual rather than part of lookup's signature,
+> and transparent carriers preserve view origins. Historical sections below are
+> retained for provenance. Any statement that keyed-map `get` returns
+> `Option[V]`, or that origins may be lost through Option/Result elimination, is
+> superseded and must not guide new implementation work.
+
 Updated 2026-07-19. HEAD = the latest `main` doc commit, pushed.
 **Both canonized rulings are now IMPLEMENTED: D11 (a80c38c0) and D12 in
 full — scalars (566bc58b), uniform bare-self (e101e7e7), str (e823026b);
@@ -174,13 +184,15 @@ not deferred.
 ## #665 — comptime HashMap Option convergence (LANDED bb31e86a, battery GREEN)
 
 Confirmed: the full battery passed on bb31e86a (`GATES EXIT: 0` — all 9 targets,
-FIXPOINT, audit violations=0, EMIT-C smoke, last-green recorded). The fix:
-comptime `HashMap.get`/`remove` now return `Option[V]`
+FIXPOINT, audit violations=0, EMIT-C smoke, last-green recorded). The historical
+fix made comptime `HashMap.get`/`remove` return `Option[V]`
 (was naked value — a per-phase type divergence); added `eval_option_method_call`
 in `src/ComptimeEval.w` for comptime Option receivers (unwrap/expect/is_some/
 is_none/unwrap_or). Closure-taking Option combinators (map/and_then/filter) and
 #665 items 2 (comptime annotated-let generic inference) & 3 (user impl-methods
-as comptime fns) remain — keep #665 open for those.
+as comptime fns) remain — keep #665 open for those. **D22 supersedes the `get`
+half of that historical contract:** comptime `get` must converge on
+`Option[&V]`; `remove` remains the owned `Option[V]` transfer.
 
 ---
 

@@ -81,6 +81,10 @@ impl[K: Ord, V] BTreeMap[K, V]:
             i = i + 1
         false
 
+    // TODO(D22 — implementation in progress): the normative signature is
+    // Option[&V] for every V. Do not preserve this owned return or copy map
+    // storage while changing it; implement it only through the approved D22
+    // view-origin and contextual-materialization design.
     pub fn get(key: K) -> Option[V]:
         let idx = self.last_index_of(key)
         if idx < 0:
@@ -111,6 +115,8 @@ impl[K: Ord, V] BTreeMap[K, V]:
             i = i + 1
         self.entries.push((key, value))
 
+    // D22 keeps remove as the owned Option[V] transfer. TODO(D22): when get is
+    // made borrowing, preserve this consuming path and its exactly-once drop.
     pub mut fn remove(key: K) -> Option[V]:
         let idx = self.last_index_of(key)
         if idx < 0:

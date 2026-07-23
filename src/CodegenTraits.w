@@ -185,7 +185,7 @@ impl Codegen:
             fact.flags = 256
             fact.name = trait_name
             fact.detail = f"trait-table methods={collected_count} ast-methods={ast_method_count} vtable-slots={vtable_slots}"
-            self.analysis_add(fact)
+            self.analysis_add(move fact)
             canonical_method_start = canonical_method_start + ast_method_count
         if canonical_method_start != method_count:
             self.analysis_fail(f"trait method rows={method_count} canonical AST rows={canonical_method_start}")
@@ -482,9 +482,12 @@ impl Codegen:
         resolved
 
     mut fn generate_default_trait_method_for_impl_ext(impl_type_sym: i32, method_idx: i32, trait_sym: i32, impl_node: i32):
-        // Set up trait type param bindings before generating the method
-        let saved_syms = self.type_binding_syms
-        let saved_tys = self.type_binding_types
+        // Set up trait type param bindings before generating the method.
+        // #691: scope the extra bindings by remembering lengths and popping
+        // back — never by moving the vec headers out and back (the moved-out
+        // field cannot be pushed, and pre-flip the bit-copied header aliased
+        // the live buffer across a possible realloc).
+        let saved_vec_len = self.type_binding_syms.len()
         let saved_len = self.type_bindings_len
         let body_node = self.trait_method_default_bodies.get(method_idx as i64)
         if body_node == 0:
@@ -513,8 +516,10 @@ impl Codegen:
 
         self.generate_default_trait_method_for_impl(impl_type_sym, method_idx)
 
-        self.type_binding_syms = saved_syms
-        self.type_binding_types = saved_tys
+        while self.type_binding_syms.len() > saved_vec_len:
+            let _ = self.type_binding_syms.pop()
+        while self.type_binding_types.len() > saved_vec_len:
+            let _ = self.type_binding_types.pop()
         self.type_bindings_len = saved_len
 
     mut fn generate_default_trait_method_for_impl(impl_type_sym: i32, method_idx: i32):
