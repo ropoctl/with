@@ -844,10 +844,20 @@ fn link_stage_resolve_runtime_root() -> str:
     // Fall back to compiler-relative runtime dir.
     compiler_dir ++ "/runtime"
 
+// Directory holding the link inputs built FOR the active target:
+// the runtime root itself for native, its cross/<target>/ subdir
+// for a cross target (bridge objects, embedded objects, lld rsp).
+fn link_stage_runtime_variant_dir() -> str:
+    let root = link_stage_resolve_runtime_root()
+    if target_spec_is_native():
+        return root
+    root ++ "/cross/" ++ target_spec_name()
+
 fn link_stage_find_llvm_static_bridge() -> str:
     let root = link_stage_resolve_runtime_root()
-    let bridge_o = root ++ "/llvm_bridge.o"
-    let rsp = root ++ "/llvm_ld.rsp"
+    let variant = link_stage_runtime_variant_dir()
+    let bridge_o = variant ++ "/llvm_bridge.o"
+    let rsp = variant ++ "/llvm_ld.rsp"
     let ld_file = root ++ "/llvm_ld"
     if runtime_read_file(bridge_o).len() > 0 and runtime_read_file(rsp).len() > 0 and runtime_read_file(ld_file).len() > 0:
         return bridge_o
@@ -1222,17 +1232,21 @@ fn link_stage_link_object_to_binary_plan_with_units(obj_path: str, extra_objects
     if link_stage_undefined_symbols_need_llvm_bridge(undef):
         let static_bridge = link_stage_find_llvm_static_bridge()
         if static_bridge.len() > 0:
-            // Static LLVM linking: use llvm_bridge.o + LLVM static libs
+            // Static LLVM linking: use llvm_bridge.o + LLVM static libs.
+            // All target-built inputs come from the variant dir (the
+            // cross/<target>/ subdir on a cross link); only the linker
+            // path metadata is the host's.
             let root = link_stage_resolve_runtime_root()
-            let rsp_path = root ++ "/llvm_ld.rsp"
+            let variant = link_stage_runtime_variant_dir()
+            let rsp_path = variant ++ "/llvm_ld.rsp"
             let ld_path = link_stage_read_file_trimmed(root ++ "/llvm_ld")
             extras.push(static_bridge)
             // Include embedded runtime objects for self-contained binary
-            let embedded_path = root ++ "/embedded_objects.o"
+            let embedded_path = variant ++ "/embedded_objects.o"
             if runtime_read_file(embedded_path).len() > 0:
                 extras.push(embedded_path)
             // Include clang bridge for c_import support
-            let clang_bridge_path = root ++ "/clang_bridge.o"
+            let clang_bridge_path = variant ++ "/clang_bridge.o"
             if runtime_read_file(clang_bridge_path).len() > 0:
                 extras.push(clang_bridge_path)
             extras.push("@" ++ rsp_path)
