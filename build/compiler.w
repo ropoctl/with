@@ -69,7 +69,7 @@ fn comp_dirname(path: str) -> str:
         return "/"
     path.slice(0, last_slash as i64)
 
-fn comp_path_basename(path: str) -> str:
+pub fn comp_path_basename(path: str) -> str:
     var last_slash: i64 = -1
     for i in 0..path.len() as i32:
         let ch = path.byte_at(i as i64)
@@ -79,7 +79,7 @@ fn comp_path_basename(path: str) -> str:
         return path.slice(last_slash + 1, path.len())
     path
 
-fn comp_rsp_path(path: str) -> str:
+pub fn comp_rsp_path(path: str) -> str:
     let normalized = comp_replace_all(path, "\\", "/")
     if comp_index_of(normalized, " ") >= 0:
         return "\"" ++ normalized ++ "\""
@@ -1805,7 +1805,7 @@ fn comp_str_compare(a: str, b: str) -> i32:
         return -1
     1
 
-fn comp_sort_strings(items: Vec[str]) -> Vec[str]:
+pub fn comp_sort_strings(items: Vec[str]) -> Vec[str]:
     var sorted: Vec[str] = Vec.new()
     for i in 0..items.len() as i32:
         let item = items.get(i as i64)
