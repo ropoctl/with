@@ -277,7 +277,7 @@ impl Regex:
                 Some(captures) => {
                     match captures.get(0):
                         Some(found) => {
-                            out.push(captures)
+                            out.push(move captures)
                             if found.end == found.start:
                                 if found.end >= text.len() as i32:
                                     break

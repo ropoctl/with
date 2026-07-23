@@ -614,7 +614,7 @@ pub fn run_pcre2_migrate_action(ctx: ActionCtx) -> i32:
         excludes.push(args.get(exclude_i as i64))
         exclude_i = exclude_i + 1
     let workspace = ctx.create_workspace("pcre2-migrate")
-    workspace.set_migrate_options(pcre2_migrate_options(source_dir, tmp_dir, source_dir, excludes))
+    workspace.set_migrate_options(pcre2_migrate_options(source_dir, tmp_dir, source_dir, move excludes))
     let migrate_result = workspace.compile()
     if migrate_result.rc != 0:
         return pcre2_fail(ctx, f"migrate failed with exit code {migrate_result.rc}")
@@ -664,7 +664,7 @@ pub fn run_pcre2_migrate_smoke_action(ctx: ActionCtx) -> i32:
     let out_w = pcre2_join(output_dir, "pcre2_compile.w")
     let excludes: Vec[str] = Vec.new()
     let workspace = ctx.create_workspace("pcre2-migrate-smoke")
-    workspace.set_migrate_options(pcre2_migrate_options(compile_c, out_w, source_dir, excludes))
+    workspace.set_migrate_options(pcre2_migrate_options(compile_c, out_w, source_dir, move excludes))
     let result = workspace.compile()
     if result.rc != 0:
         return pcre2_fail(ctx, f"pcre2_compile.c migration smoke failed with exit code {result.rc}")

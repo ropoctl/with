@@ -73,10 +73,6 @@ type Zcu {
     last_resolved: ResolveResult,
     resolved_root_path: str,
     // Wave 5 canonical typed sidecars from the latest semantic pass.
-    typed_expr_types: HashMap[i32, i32],
-    typed_binding_types: HashMap[i32, i32],
-    typed_binding_names: HashMap[i32, i32],
-    typed_binding_muts: HashMap[i32, i32],
     last_typed_dump: str,
     typed_pool_cache: AstPool,
     last_sema: Sema,
@@ -107,15 +103,14 @@ fn Zcu.init -> Zcu:
     zcu_debug_init("Zcu.init:pool")
     let diagnostics: DiagnosticList = DiagnosticList.init()
     zcu_debug_init("Zcu.init:diagnostics")
-    let sema_seed: Sema = Sema.placeholder(pool, diagnostics, AstPool.new())
+    let sema_seed: Sema = Sema.placeholder(pool, DiagnosticList.init(), AstPool.new())
     zcu_debug_init("Zcu.init:sema_seed")
     Zcu {
         pool: pool,
         frontend_pool: pool,
-        // Read the list back through the sema that now owns it; the
-        // struct copy shares the same diagnostics buffer (§3.8: the
-        // local was consumed by Sema.placeholder above).
-        diagnostics: sema_seed.diags,
+        // Zcu owns the active diagnostic list. The placeholder snapshot has an
+        // independent empty list so neither field aliases or moves from the other.
+        diagnostics,
         imported_paths: zcu_new_vec_str(),
         prelude_prefix_decls: 0,
         prelude_prefix_non_use: 0,
@@ -138,10 +133,6 @@ fn Zcu.init -> Zcu:
         pending_warnings: zcu_new_vec_str(),
         last_resolved: ResolveResult.init(),
         resolved_root_path: "",
-        typed_expr_types: HashMap.new(),
-        typed_binding_types: HashMap.new(),
-        typed_binding_names: HashMap.new(),
-        typed_binding_muts: HashMap.new(),
         last_typed_dump: "",
         typed_pool_cache: AstPool.new(),
         last_sema: sema_seed,
@@ -351,7 +342,7 @@ impl Zcu:
         self.extra_source_names = names
         self.extra_source_texts = texts
 
-    fn add_source_text_mapping(file_id: i32, name: str, text: str):
+    fn add_source_text_mapping(file_id: i32, name: str, text: str) -> Unit:
         self.source_text_file_ids.push(file_id)
         self.source_text_names.push(zcu_owned_text(name))
         self.source_texts.push(zcu_owned_text(text))
@@ -359,13 +350,13 @@ impl Zcu:
     mut fn clear_stage_outputs():
         self.last_resolved = ResolveResult.init()
         self.resolved_root_path = ""
-        self.typed_expr_types = HashMap.new()
-        self.typed_binding_types = HashMap.new()
-        self.typed_binding_names = HashMap.new()
-        self.typed_binding_muts = HashMap.new()
         self.last_typed_dump = ""
         self.typed_pool_cache = AstPool.new()
-        self.last_sema = Sema.placeholder(self.pool, self.diagnostics, AstPool.new())
+        // Reset the active diagnostics and the placeholder snapshot independently.
+        // Moving one list into both roles leaves the active Vec as a reset sentinel,
+        // which is not a reusable empty Vec (its element-size metadata is zero).
+        self.diagnostics = DiagnosticList.init()
+        self.last_sema = Sema.placeholder(self.pool, DiagnosticList.init(), AstPool.new())
         self.last_mir_module = MirModule.init()
         self.last_mir_dump = ""
         self.last_async_mir_module = AsyncMirModule.init()
@@ -399,11 +390,6 @@ impl Zcu:
         if zcu_debug_pool_flow_enabled() != 0:
             runtime_eprint(f"[zcu] sync_from_sema:before zcu.pool={self.pool.state.symbol_texts.len() as i32} sema.pool={sema.pool.state.symbol_texts.len() as i32} sema.ast.decls={sema.ast.decl_count()}")
         self.pool = sema.pool
-        self.diagnostics = sema.diags
-        self.typed_expr_types = sema.typed_expr_types
-        self.typed_binding_types = sema.typed_binding_types
-        self.typed_binding_names = sema.typed_binding_names
-        self.typed_binding_muts = sema.typed_binding_muts
         var tracked_paths = self.tracked_input_paths
         self.tracked_input_paths = tracked_input_merge_unique(move tracked_paths, &sema.tracked_input_paths)
         self.last_sema = sema

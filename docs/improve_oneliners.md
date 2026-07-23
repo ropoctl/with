@@ -5,6 +5,11 @@ This document groups every `POSSIBLE_IMPROVE` entry in
 is more than 20% longer than its Perl 6 counterpart in
 `.reference/perl_oneliners.md`.
 
+> **D22 status (2026-07-23):** keyed-map reads in these recipes follow the
+> accepted uniform-view contract and use explicit `.cloned()` for owned
+> non-Copy results. Implementation is still in progress; do not revert the
+> recipes to owned lookup to accommodate the current compiler.
+
 The grouping is diagnostic, not a claim that character count is the only
 design goal. Several commands fit more than one group; each appears once under
 the cause that accounts for the largest share of its extra text. The commands
@@ -451,10 +456,10 @@ with -e 'fn s(a:str)->BTreeSet[str]:[a.slice(i,i+1) for i in 0..a.len()];let x=s
 with -e 'fn s(a:str)->BTreeSet[str]:[a.slice(i,i+1) for i in 0..a.len()];let x=s("banana");let y=s("anna");let z=x.intersection(&y);print(f"{z.len() as f64/sqrt_f64((x.len()*y.len()) as f64)}")'
 
 # Build an index of character positions
-with -e 'let s="banana";var m:BTreeMap[str,str]=BTreeMap.new();for i in 0..s.len(){let c=s.slice(i,i+1);let v=m.get(c).unwrap_or("");m.insert(c,v++if v=="":f"{i}" else:f" {i}")};for (c,i) in m.items():print(f"{c}: {i}")'
+with -e 'let s="banana";var m:BTreeMap[str,str]=BTreeMap.new();for i in 0..s.len(){let c=s.slice(i,i+1);let v=m.get(c).cloned().unwrap_or("");m.insert(c,v++if v=="":f"{i}" else:f" {i}")};for (c,i) in m.items():print(f"{c}: {i}")'
 
 # Build an index of word positions
-with -e 'let w=/\s+/.split(stdin.lines()[0]);var m:BTreeMap[str,str]=BTreeMap.new();for i in 0..w.len(){let x=w[i];let v=m.get(x).unwrap_or("");m.insert(x,v++if v=="":f"{i}" else:f" {i}")};for (x,i) in m.items():print(f"{x}: {i}")' <example.txt
+with -e 'let w=/\s+/.split(stdin.lines()[0]);var m:BTreeMap[str,str]=BTreeMap.new();for i in 0..w.len(){let x=w[i];let v=m.get(x).cloned().unwrap_or("");m.insert(x,v++if v=="":f"{i}" else:f" {i}")};for (x,i) in m.items():print(f"{x}: {i}")' <example.txt
 
 # Print lines containing all vowels
 with -n 'if line.contains("a") and line.contains("e") and line.contains("i") and line.contains("o") and line.contains("u"):print(line)' <example.txt

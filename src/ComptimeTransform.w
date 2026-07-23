@@ -1859,7 +1859,7 @@ impl Sema:
         let before = out.decl_count()
         var lexer = Lexer.init(source, self.local_file_id)
         let tokens = lexer.tokenize()
-        var parser = Parser.init_with_pool(tokens, source, self.local_file_id, intern, self.diags, out)
+        var parser = Parser.init_with_pool(move tokens, source, self.local_file_id, intern, move self.diags, out)
         let parsed = parser.parse_module()
         self.diags = parser.diags
         if parsed.decl_count() <= before:
@@ -3160,7 +3160,7 @@ impl Sema:
         self.decl_is_c_import = ordered_ci
 
         let transform_pool = intern
-        var transform_sema = Sema.init(transform_pool, self.diags, out)
+        var transform_sema = Sema.init(transform_pool, move self.diags, out)
         transform_sema.source_text = self.source_text
         transform_sema.decl_source_paths = sema_clone_str_vec(&self.decl_source_paths)
         transform_sema.decl_source_file_ids = sema_clone_i32_vec(&self.decl_source_file_ids)

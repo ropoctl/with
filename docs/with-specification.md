@@ -1,8 +1,29 @@
-# The With Programming Language — Specification v7.1
+# The With Programming Language — Specification v7.2
 
 **Author:** Eric Hartford
 **Status:** Reference specification for prototype implementation
-**Changelog v7.1:** Global declarations specified (§9.1c): `global`
+**D22 implementation status (2026-07-23): A new decision has been made, but
+implementation is still in progress.** The D22 rules are normative now. The
+compiler, comptime evaluator, backends, standard library, diagnostics, and
+tests are NON-COMPLIANT wherever they do not yet implement them. Existing
+implementation behavior must not be treated as precedent against D22.
+**Changelog v7.2:** Owning keyed-map lookup has one uniform contract: `get`
+returns `Option[&V]`; ownership transfer is performed by `remove`, which
+returns `Option[V]`. A shared reference to a `Copy` value remains a reference
+during inference and structural projection, but may satisfy an independently
+established owned-value demand through contextual Copy materialization.
+Pattern bindings preserve exact projected types. Option/Result elimination
+preserves exact payload types, while `??`, `unwrap_or`, `unwrap_or_else`, and
+other multi-expression joins use the contextual join rule. View origins
+propagate through transparent carriers and eliminators until an operation
+actually produces an independent owned value (§3.4, §3.8, §9.7, §10,
+§13.3, §21.1, D22).
+**Changelog v7.1:** Unit-returning `mut fn` pipeline stages thread the
+receiver place; non-Unit stages thread their returned value, with resolved
+generic returns and ordinary temporary/drop/alias rules (§9.6, D21). A
+`mut fn` may not duplicate ownership still retained by its receiver into an
+owned return; receiver-returning fluency is consuming (§9.5). Global
+declarations specified (§9.1c): `global`
 (stable) / `global var` (rebindable), pre-`main` initialization, and
 the usage-based data-race rule — never-mutated and synchronized
 globals always safe; bare mutation safe iff the program is provably
@@ -596,6 +617,15 @@ neither of which depends on the compiler's static analysis being correct:
   body touches the value is guarded so it never runs against a moved-from
   value. A moved-out value's drop does nothing.
 
+**Ownership is a property of the handle, not of its contents.** Every value
+that owns heap — a container, a box, an owned buffer — releases it when its
+owner's scope ends, regardless of whether its *elements* need destruction:
+`Vec[i32]` frees its buffer exactly as `Vec[File]` does; trivially-copyable
+elements merely skip the per-element destructor loop. (Replacement is
+already covered by §2.2's drop-on-reassignment.) Leaking memory therefore
+requires a deliberate, visible act — owning the memory from a named scope —
+never inaction: a program that does nothing special does not leak.
+
 Together these make **double-free impossible by construction**: the live bits
 exist in exactly one binding at a time, every move hands them off and blanks
 the source, and dropping a blanked source frees nothing. This makes §2.2's
@@ -792,6 +822,12 @@ borrowing from the set of parameters the body may actually derive it
 from. This origin set is inferred from the function body and enforced
 at the call site.
 
+Carrying a view through `Option`, `Result`, a tuple, pattern projection,
+or another transparent value carrier does not erase its origin.
+Construction, projection, elimination, and control-flow joins preserve
+the origins of every view that can flow into the resulting value. The
+complete normative rule is §21.1, Rule 10.
+
 ### 3.5 Borrow Scope: Non-Lexical Lifetimes
 
 A borrow is active from the point it is created until its **last use**,
@@ -923,12 +959,82 @@ this mistake (for example, a view of a consumed parameter escaping
 through the return value), it emits a directed suggestion naming the
 parameter and the `&T` fix.
 
-When a plain by-value parameter expects a `Copy` type and the argument is a
-shared reference to that type, the compiler copies the pointee. Ordinary value
-coercions then apply, so an `&i32` may satisfy an `i64` parameter. This is a
-call-site value read, not a receiver-ABI change: the reference remains borrowed,
-and `&T` never implicitly produces an owned non-`Copy` `T`. Raw pointers do not
-participate; dereferencing one still requires `unsafe` (§19).
+**Contextual Copy materialization (D22).** A shared reference `&T` remains
+`&T` during inference and exact-type propagation, including an unannotated
+binding, an inferred return, pattern projection, and closure capture. `Copy`
+does not silently erase reference identity.
+
+When `T: Copy`, an expression of type `&T` may satisfy an independently
+established owned-value demand. The compiler copies the pointee, then applies
+ordinary value coercions. Thus an `&i32` may satisfy an owned `i32` or `i64`
+demand. The produced value is independent of the reference's origin; the
+source reference remains borrowed if it is used again.
+
+An owned-value demand is established independently by:
+
+1. an explicit binding, assignment, cast, field, element, or declared return
+   type;
+2. a resolved by-value parameter, constructor component, or receiver;
+3. a resolved operator operand or result type; or
+4. the join rule below.
+
+Inference alone does not create an owned demand. In particular, `let x =
+view`, an inferred function return, a pattern binding, or a closure capture
+preserves the reference type. Method and overload resolution first preserve
+reference identity and apply ordinary auto-dereferencing; contextual Copy
+materialization may satisfy an already-selected by-value receiver but does not
+change receiver dispatch or ABI.
+
+At an `if`, `match`, `??`, array-literal, or equivalent multi-expression type
+join:
+
+1. If all reaching expressions have the same type, that type is preserved.
+2. If an enclosing expected type or any reaching expression independently
+   establishes an owned result type `J`, the join result is `J`. Every
+   compatible `&T` expression is contextually materialized when `T: Copy`,
+   then ordinarily coerced to `J`. A single owned expression is sufficient,
+   and arm order does not affect the result.
+3. If all reaching expressions are compatible shared references, the result
+   remains a shared reference and carries the union of their possible origins.
+4. An owned temporary is never implicitly borrowed merely to force a
+   reference result.
+5. A reference to a non-`Copy` value cannot satisfy an owned demand;
+   producing an independent value requires an explicit owning operation such
+   as `clone`.
+
+Removing or changing the last owned expression may cause an inferred join to
+preserve `&T` instead. This is an ordinary inferred-type change, but it changes
+view-origin obligations. An explicit surrounding result type pins the join
+across such edits. When a later diagnostic depends on whether a join preserved
+views or materialized owned values, the diagnostic must identify the
+expression that established the owned join and every relevant arm that was
+materialized. Clean builds do not emit coercion notes.
+
+```
+let count = counts.get("api").unwrap()          // &i32
+let snapshot: i32 = counts.get("api").unwrap() // independent i32
+let port = counts.get("port") ?? 8080           // i32: owned arm anchors join
+
+let selected = match source:
+    .Api      => counts.get("api").unwrap()      // &i32 -> i32
+    .Worker   => counts.get("worker").unwrap()   // &i32 -> i32
+    .Queue    => counts.get("queue").unwrap()    // &i32 -> i32
+    .Fallback => counts.get("fallback").unwrap() // &i32 -> i32
+    .Computed => compute_count()                  // i32 anchors the join
+// selected: i32
+
+// Pin the intended result if later arm edits must not change it:
+let stable_count: i32 = match source:
+    .Api      => counts.get("api").unwrap()
+    .Worker   => counts.get("worker").unwrap()
+    .Queue    => counts.get("queue").unwrap()
+    .Fallback => counts.get("fallback").unwrap()
+    .Computed => compute_count()
+```
+
+Raw pointers do not participate. Dereferencing a raw pointer still requires
+`unsafe` (§19). This rule generalizes the former call-site-only Copy read. It
+does not introduce an ambient reference-to-value inference coercion.
 
 **The vibe:** "The function just wants to look at the data. I
 shouldn't have to manually type `&`."
@@ -2951,6 +3057,8 @@ inline lambdas or non-escaping closures):
 fn find_value(lock: &Mutex[HashMap[str, i32]], key: &str) -> Option[i32]:
     with lock.lock() as map:
         match map.get(key):
+            // v is &i32; the declared Option[i32] return context materializes
+            // an independent Copy value under §3.8/D22.
             Some(v) => return Some(v)   // returns from find_value
             None    => ()
     None
@@ -3646,6 +3754,20 @@ the dotted `fn Type.name` — is associated / free (no receiver).
 | `fn Type.m()` at top level | none (associated) | `Type.m()` | — |
 | `mut`/`move fn` at top level | *error* — mode with no receiver | — | — |
 
+**A `mut fn` may not duplicate the receiver's ownership into its return
+(D21).** The caller retains the receiver place across a `mut fn` call, so a
+non-`Copy` owned return may not be the receiver itself or another owner of
+storage that the receiver still owns. Receiver-returning fluency is a
+consuming contract and is spelled `move fn`.
+
+This rule forbids duplicated ownership, not useful results. A `mut fn` may
+return a `Copy` value, a view governed by returned-origin tracking, a fresh
+independent owned value, or ownership moved out of a receiver projection when
+reset-on-move blanks that source projection (§2.5.1, D17). In the last case the
+caller retains the changed receiver place and the return is the sole owner of
+the moved-out value. The compiler rejects only a non-`Copy` owned return whose
+ownership is still retained by the receiver.
+
 ```
 impl Counter:
     fn get() -> i32: self.n            # read borrow — no `self` parameter
@@ -3739,7 +3861,92 @@ can fail. Both are idiomatic — they solve different problems.
 data |> parse |> validate? |> transform |> summarize
 ```
 
-`x |> f(a)` desugars to `f(x, a)`. Left-associative.
+Pipelines are left-associative. Ordinarily, `x |> f(a)` desugars to
+`f(x, a)`, and the next stage receives that call's result. There is one
+place-preserving case for in-place mutation (D21):
+
+Stage lookup uses the piped value as a receiver when an applicable instance or
+extension method named `f` exists, so `x |> f(a)` resolves as `x.f(a)`; that
+method takes precedence over a same-named free function. If no applicable
+method exists, the stage uses the ordinary free-function form `f(x, a)`.
+
+**A stage that resolves to a `mut fn` whose resolved concrete return type is
+`Unit` performs the ordinary mutating call and continues with the same receiver
+place.** Resolution includes return-type inference, overload resolution, and
+generic substitution. A `mut fn` stage with any other return type continues
+with its returned value under the ordinary pipeline rule.
+
+```
+var v: Vec[i32] = Vec.new()
+
+v
+|> push(1)       // push mutates v and returns Unit; the pipeline still carries v
+|> clear()       // clear mutates v and returns Unit; the pipeline still carries v
+|> push(3)
+
+assert(v.len() == 1)
+```
+
+This is definitionally the corresponding statement sequence:
+
+```
+v.push(1)
+v.clear()
+v.push(3)
+```
+
+Argument evaluation, receiver exclusivity, view liveness, alias checking, and
+mutation ordering are exactly those of those ordinary calls (§3.2, §21.1). A
+pipeline does not create a second or weaker place-mutation regime. For example,
+`v |> push(f(v))` is governed exactly like `v.push(f(v))`: it is allowed when
+`f(v)` finishes before the mutation and produces an independent value, and is
+rejected when the argument retains access to `v`.
+
+**A non-`Unit` result changes what the pipeline carries.** The named receiver
+remains alive and mutated in its enclosing scope, while the next stage receives
+the returned value:
+
+```
+var v: Vec[i32] = Vec.new()
+
+let popped = v
+    |> push(1)    // Unit: still carrying v
+    |> pop()      // Option[i32]: now carrying the Option
+    |> unwrap()
+
+assert(popped == 1)
+assert(v.is_empty())
+```
+
+The decision is static but not restricted to a literal `-> Unit` annotation.
+An inferred Unit return threads the place. A generic stage threads the place
+when its resolved return type is Unit after substitution, and carries the
+returned value in instantiations where the substituted return type is not Unit:
+
+```
+v |> apply(clear_it) |> push(1)  // apply's resolved R is Unit: still carrying v
+let ok = v |> apply(check_it)    // apply's resolved R is bool: carries the bool
+```
+
+**Rvalue receivers become statement temporaries.** The ordinary move and
+temporary-drop rules (§2.2, §2.4) then apply without pipeline-specific
+ownership behavior:
+
+```
+Vec.new() |> push(1)
+// The hidden Vec place is dropped at statement end.
+
+let v: Vec[i32] = Vec.new() |> push(1)
+// The hidden Vec remains the final pipeline value and assignment moves it to v.
+
+let item: Option[i32] = Vec.new() |> push(1) |> pop()
+// pop changes the pipeline value to Option; item receives the Option and the
+// now-empty hidden Vec is dropped at statement end.
+```
+
+A stage resolving to `Never` is not Unit: it diverges, there is no pipeline
+value or continuation, and subsequent stages are unreachable under the
+ordinary `Never` and unreachable-code rules (§20b.5).
 
 **Backward application:**
 ```
@@ -3812,6 +4019,19 @@ Inline match is an expression form. Arms are written as
 `pattern => expr`; guards use `pattern if cond => expr`. Arms are
 comma-separated, and a trailing comma is allowed under §29.2. The
 semicolon-separated form used in earlier examples is invalid.
+
+**Pattern projection preserves exact types (D22).** Pattern matching is
+structural projection, not an owned-value demand. A pattern binding receives
+the exact type of the projected subvalue. Projecting through a shared
+reference produces shared-reference subviews; it does not contextually copy
+`Copy` fields.
+
+Therefore `Some(v)` matched against `Option[&V]` binds `v: &V` for every `V`
+and every generic instantiation. A nested pattern such as `Some((a, b))`
+matched against `Option[&(A, B)]` binds `a: &A` and `b: &B`. Contextual Copy
+materialization may occur later when one of those bindings is used in an
+independently established owned-value context. No `ref` pattern syntax or
+type annotation is required merely to preserve the reference.
 
 **Guards:**
 ```
@@ -4508,9 +4728,22 @@ let port = config.get("port") ?? 8080
 let name = user.display_name ?? user.username ?? "anonymous"
 ```
 
-**Desugaring:** `expr ?? default` desugars to `expr.unwrap_or(default)`.
-The right-hand side is lazily evaluated (only computed if left is
-`None`).
+`expr ?? default` evaluates `expr` once and is semantically equivalent to:
+
+```
+match expr:
+    Some(value) => value
+    None => default
+```
+
+The right-hand side is lazily evaluated. The result type is the §3.8 join of
+the payload expression and the default expression. Consequently:
+
+- `Option[&T] ?? &T` remains `&T` and unions the possible view origins.
+- `Option[&T] ?? T` produces `T` when `T: Copy`, because the owned default
+  establishes an owned join.
+- `Option[&T] ?? T` is a type error for non-`Copy` `T` unless an explicit
+  owning conversion is supplied.
 
 **Early exit form:** `??` can be followed by `return`, `break`, or
 `continue` for early exit on `None`. The `break` and `continue`
@@ -4534,6 +4767,9 @@ let user = match find_user(id):
     None => return Err(.NotFound)
 ```
 
+Early-exit forms use the same successful-payload rule; a diverging fallback
+contributes no result type.
+
 ### 10.5 Option Combinators (Standard Library Requirement)
 
 The standard library must provide these methods on `Option[T]`:
@@ -4543,8 +4779,8 @@ The standard library must provide these methods on `Option[T]`:
 | `map` | `(fn(T) -> U) -> Option[U]` | Transform the inner value |
 | `and_then` | `(fn(T) -> Option[U]) -> Option[U]` | Chain fallible operations |
 | `or_else` | `(fn() -> Option[T]) -> Option[T]` | Fallback provider |
-| `unwrap_or` | `(T) -> T` | Default value |
-| `unwrap_or_else` | `(fn() -> T) -> T` | Lazy default |
+| `unwrap_or[U]` | `(U) -> Join[T, U]` | Lazy branch selection; result uses §3.8 join |
+| `unwrap_or_else[U]` | `(fn() -> U) -> Join[T, U]` | Lazy fallback; result uses §3.8 join |
 | `unwrap` | `() -> T` | Extract value; **panics** if `None` |
 | `expect` | `(msg: &str) -> T` | Extract value; **panics** with message if `None` |
 | `filter` | `(fn(&T) -> bool) -> Option[T]` | Keep if predicate holds |
@@ -4553,9 +4789,21 @@ The standard library must provide these methods on `Option[T]`:
 | `zip` | `(Option[U]) -> Option[(T, U)]` | Combine two options |
 | `unzip` | `() -> (Option[A], Option[B])` | Split paired option |
 | `flatten` | `() -> Option[T]` where Self = `Option[Option[T]]` | Remove nesting |
-| `cloned` | `() -> Option[T]` where T: Clone | Clone inner value |
+| `copied` | `() -> Option[T]` where Self = `Option[&T]`, T: Copy | Copy a borrowed payload into an independent value |
+| `cloned` | `() -> Option[T]` where Self = `Option[&T]`, T: Clone | Clone a borrowed payload into an independent value |
 | `inspect` | `(fn(&T)) -> Option[T]` | Side effect without consuming |
 | `transpose` | `() -> Result[Option[T], E]` where Self = `Option[Result[T, E]]` | Swap Option/Result nesting |
+
+`Join[T, U]` is specification metavocabulary, not user-facing type syntax. It
+means the contextual join defined by §3.8. `unwrap`, `expect`, `?`,
+`Some(value)` patterns, and `Ok(value)` patterns preserve the exact payload
+type. In particular, eliminating `Option[&T]` without an independently
+established owned demand produces `&T`, never conditionally `T`.
+
+`copied` and `cloned` are ownership boundaries. Their successful results
+carry no view origin from the source reference. D22 standardizes these
+`Option` forms; corresponding iterator and `Result` conveniences remain
+separate standard-library requirements.
 
 **Examples:**
 ```
@@ -4580,8 +4828,8 @@ let name = find_user(id)
 | `map_err` | `(fn(E) -> F) -> Result[T, F]` | Transform Err value |
 | `and_then` | `(fn(T) -> Result[U, E]) -> Result[U, E]` | Chain operations |
 | `or_else` | `(fn(E) -> Result[T, F]) -> Result[T, F]` | Recover from error |
-| `unwrap_or` | `(T) -> T` | Default on error |
-| `unwrap_or_else` | `(fn(E) -> T) -> T` | Lazy default |
+| `unwrap_or[U]` | `(U) -> Join[T, U]` | Lazy branch selection; result uses §3.8 join |
+| `unwrap_or_else[U]` | `(fn(E) -> U) -> Join[T, U]` | Lazy fallback; result uses §3.8 join |
 | `unwrap` | `() -> T` | Extract value; **panics** if `Err` |
 | `expect` | `(msg: &str) -> T` | Extract value; **panics** with message if `Err` |
 | `is_ok` | `() -> bool` | Check success |
@@ -5633,6 +5881,33 @@ let report = transactions.iter()
     |> map(t => "{t.date}: ${t.amount}")
     |> join("\n")
 ```
+
+**Lookup observes; removal transfers (D22).**
+
+Every owning keyed map in the standard library, including `HashMap[K, V]`
+and `BTreeMap[K, V]`, has one uniform lookup contract:
+
+| Method | Signature | Ownership |
+|--------|-----------|-----------|
+| `get` | `(self: &Self, key: K) -> Option[&V]` | Borrows map-owned storage |
+| `remove` | `(mut self: Self, key: K) -> Option[V]` | Transfers ownership out |
+
+`get` returns `Option[&V]` for every `V`, including `Copy` values. Its return
+type does not vary by generic instantiation. The returned view originates in
+the map receiver, not in the transient key argument, and remains valid only
+while that storage remains unmutated.
+
+`remove` is the ownership-transfer operation. A successfully removed value is
+independent of subsequent mutation or destruction of the map. A separately
+named copying or cloning convenience may produce an owned value, but `get`
+itself never changes return shape according to whether `V` implements `Copy`.
+
+`Vec`, string, array, and slice indexing or lookup APIs are not
+restandardized by D22. The general rules of §3.8, §9.7, §10, and §21.1 apply
+to their existing signatures exactly as written. Any change to those
+signatures is a separate ruling, provisionally identified as a D23 candidate.
+`SlotMap.get` already has the uniform `Option[&T]` contract specified by §6.2
+and therefore participates in D22 without an API change.
 
 **HashMap convenience methods:**
 
@@ -11017,9 +11292,11 @@ At every program point, the following must hold:
    the destructor.
 
 8. **Mutation composability.** Mutation through `mut self` receivers
-   does not require reborrowing — the receiver is the caller's place,
-   so method chains compose naturally. Each `mut self` call mutates
-   that place and leaves it valid for subsequent calls.
+   does not require reborrowing — the receiver is the caller's place.
+   Each `mut self` call mutates that place and leaves it valid for
+   subsequent calls. In a pipeline, a Unit-returning `mut fn` stage
+   continues with that place; a non-Unit stage continues with its return
+   value (§9.6, D21).
 
 9. **Move-state join.** At a control-flow merge, a place is moved if it
    is moved on any predecessor path that reaches the merge without
@@ -11049,6 +11326,22 @@ At every program point, the following must hold:
    use(owner)                        // OK: the only arm that moved
                                      // owner left the function
    ```
+
+10. **Transparent-carrier origin propagation.** Constructing, projecting,
+    eliminating, or joining values that contain views preserves the origin
+    set of every view that can flow into the result. This includes `Option`,
+    `Result`, tuples, pattern bindings, `if let`, `let ... else`, `match`, `?`,
+    `??`, `unwrap`, `expect`, and non-owning combinators.
+
+    A control-flow join carries the union of the origins from all reaching
+    view-producing paths. An operation ends origin propagation only when it
+    actually produces an independent owned value, including contextual
+    materialization of a `Copy` pointee, an explicit clone, or ownership
+    transferred by a consuming collection operation such as `remove`.
+
+    Origin tracking follows semantic values, not wrapper spellings. A view
+    does not become independent merely because it passed through an enum,
+    temporary, intrinsic, or compiler-generated lowering.
 
 ---
 
@@ -11152,6 +11445,39 @@ into a `with` scope, or take `&T`). A single-location "value escapes"
 error does not satisfy this contract. False rejection of safe code is
 compiler precision debt; an unclear rejection is diagnostic debt.
 Both are compiler bugs, never user obligations.
+
+When a contextual Copy annotation would make an invalidated view independent,
+the diagnostic must explain that distinction and provide a machine-applicable
+fix when possible:
+
+```text
+error: cannot mutate `counts` while `count` is a live view into it
+ --> counts.clear()
+note: `count` views a value stored in `counts`
+note: `count` is used after this mutation
+help: take an independent Copy value:
+      let count: i32 = counts.get("api").unwrap()
+```
+
+For a non-`Copy` join, the diagnostic must explain both branch contracts:
+
+```text
+error: `??` would need to copy `Vec[Job]`, which is not `Copy`
+ --> queues.get("ready") ?? Vec.new()
+note: the successful branch is `&Vec[Job]`, a view into `queues`
+note: the default branch is an owned `Vec[Job]`
+help: clone the found value into an independent Vec:
+      queues.get("ready").cloned() ?? Vec.new()
+help: or borrow the default too:
+      queues.get("ready") ?? &empty
+```
+
+A cloning suggestion is emitted only when the pointee implements `Clone`. A
+borrowed-default suggestion is emitted only when the proposed default has a
+lifetime valid for the resulting view. When neither applies, the diagnostic
+must explain that a borrowed map cannot yield ownership and may suggest
+`remove` when ownership transfer matches the operation. It must not imply that
+an annotation alone can copy a non-`Copy` value.
 
 ---
 

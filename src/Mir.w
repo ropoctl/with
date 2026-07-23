@@ -469,6 +469,9 @@ type MirBody {
     // User-defined generic calls must carry the concrete contract above.
     // Builtin generic dispatch shares MirIntrinsic.GENERIC_CALL but does not.
     call_contract_required: Vec[i32],
+    // D21: for a Unit-returning `mut self` pipeline stage, the exact receiver
+    // place carried after this call. -1 for ordinary return-value calls.
+    call_pipeline_receiver_places: Vec[i32],
 
     // Stage 4 (spec §2.5.2): locals that are ever moved — and therefore
     // reset-on-move (§2.5.1) — recorded at the single pending_reset_locals.push
@@ -580,10 +583,11 @@ impl MirModule:
 
     mut fn add_body(body: MirBody):
         let body_idx = self.bodies.len() as i32
-        self.bodies.push(body)
-        self.body_fn_syms.push(body.fn_sym)
-        if body.fn_sym != 0:
-            self.body_index_by_fn_sym.insert(body.fn_sym, body_idx)
+        let fn_sym = body.fn_sym
+        self.bodies.push(move body)
+        self.body_fn_syms.push(fn_sym)
+        if fn_sym != 0:
+            self.body_index_by_fn_sym.insert(fn_sym, body_idx)
 
     fn body_count() -> i32:
         self.bodies.len() as i32
@@ -655,6 +659,7 @@ fn MirBody.init_for_fn(fn_sym: i32) -> MirBody:
         call_sig_indices: Vec.new(),
         call_mono_syms: Vec.new(),
         call_contract_required: Vec.new(),
+        call_pipeline_receiver_places: Vec.new(),
         ever_moved_locals: Vec.new(),
     }
 
@@ -866,6 +871,7 @@ impl MirBody:
         self.call_sig_indices.push(-1)
         self.call_mono_syms.push(0)
         self.call_contract_required.push(0)
+        self.call_pipeline_receiver_places.push(-1)
         for i in 0..count:
             self.call_arg_operands.push(operands.get(i as i64))
         id
@@ -905,6 +911,16 @@ impl MirBody:
         if call_id < 0 or call_id >= self.call_contract_required.len() as i32:
             return false
         self.call_contract_required.get(call_id as i64) != 0
+
+    mut fn set_call_pipeline_receiver_place(call_id: i32, place_id: i32):
+        if call_id < 0 or call_id >= self.call_pipeline_receiver_places.len() as i32:
+            return
+        self.call_pipeline_receiver_places.set_i32(call_id, place_id)
+
+    fn call_pipeline_receiver_place(call_id: i32) -> i32:
+        if call_id < 0 or call_id >= self.call_pipeline_receiver_places.len() as i32:
+            return -1
+        self.call_pipeline_receiver_places.get(call_id as i64)
 
     fn call_sig_index(call_id: i32) -> i32:
         if call_id < 0 or call_id >= self.call_sig_indices.len() as i32:
@@ -2530,6 +2546,8 @@ fn validate_mir_body(body: &MirBody) -> str:
     let call_args_count = body.call_arg_starts.len() as i32
     if call_args_count != body.call_arg_counts.len() as i32:
         return "call args table length mismatch"
+    if call_args_count != body.call_pipeline_receiver_places.len() as i32:
+        return "call args/pipeline receiver place length mismatch"
 
     for bb in 0..bb_count:
         let stmt_start = body.bb_stmt_starts.get(bb as i64)
@@ -3179,12 +3197,38 @@ fn validate_typed_mir_body(mir_mod: &MirModule, body: &MirBody) -> MirValidation
     for bb in 0..bb_count:
         let term_kind = body.bb_term_kinds.get(bb as i64)
         let d0 = body.bb_term_d0.get(bb as i64)
+        let d1 = body.bb_term_d1.get(bb as i64)
         let d2 = body.bb_term_d2.get(bb as i64)
         let span = body.bb_term_spans.get(bb as i64)
 
         if term_kind == TermKind.TK_SWITCH_INT:
             if mir_validate_operand_type(mir_mod, body, d0) == 0:
                 return mir_validation_fail(body.fn_sym, span, "switch operand does not resolve to a concrete MIR type")
+            continue
+
+        if term_kind == TermKind.TK_CALL:
+            let dest_ty = mir_validate_place_type(mir_mod, body, d2)
+            let resolved_dest = mir_mod.mir_resolve_alias(dest_ty)
+            let dest_is_unit = dest_ty > 0 and mir_mod.mir_get_type_kind(resolved_dest) == TypeKind.TY_VOID
+            if body.call_intrinsic(d1) == MirIntrinsic.VEC_PUSH and not dest_is_unit:
+                return mir_validation_fail(body.fn_sym, span, "Vec.push call destination must be Unit")
+
+            let carrier_place = body.call_pipeline_receiver_place(d1)
+            if carrier_place >= 0:
+                if not dest_is_unit:
+                    return mir_validation_fail(body.fn_sym, span, "D21 receiver-place pipeline call destination must be Unit")
+                if carrier_place >= body.place_locals.len() as i32:
+                    return mir_validation_fail(body.fn_sym, span, "D21 pipeline carrier place is out of range")
+                let arg_start = body.call_arg_starts.get(d1 as i64)
+                let arg_count = body.call_arg_counts.get(d1 as i64)
+                if arg_count <= 0:
+                    return mir_validation_fail(body.fn_sym, span, "D21 receiver-place pipeline call has no receiver argument")
+                let recv_operand = body.call_arg_operands.get(arg_start as i64)
+                let recv_kind = body.operand_kinds.get(recv_operand as i64)
+                if recv_kind != OperandKind.OK_COPY and recv_kind != OperandKind.OK_MOVE:
+                    return mir_validation_fail(body.fn_sym, span, "D21 pipeline receiver argument is not a place operand")
+                if body.operand_d0.get(recv_operand as i64) != carrier_place:
+                    return mir_validation_fail(body.fn_sym, span, "D21 pipeline carrier is not the call receiver place")
             continue
 
     mir_validation_ok()

@@ -9,7 +9,7 @@ comptime fn vec_battery(n: i32) -> i32:
     var sum = 0
     for i in 0..xs.len() as i32:
         sum = sum + xs.get(i as i64)
-    xs.pop()
+    let _ = xs.pop()
     sum + xs.len() as i32
 
 const CT_VEC: i32 = comptime vec_battery(17)

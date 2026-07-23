@@ -320,9 +320,6 @@ type CCodegen {
     local_effective_cache: HashMap[i64, i32],
     local_ref_target_cache: HashMap[i64, i32],
     local_value_use_cache: HashMap[i64, i32],
-    // Stored as raw i32 (the enum's backing repr): the compiler-backed
-    // HashMap.get cannot synthesize Option[enum] to match a written return
-    // annotation, so the typed enum is reconstructed at the accessor boundary.
     place_kind_cache: HashMap[i64, i32],
     callee_hint_cache: HashMap[i32, i32],
 }
@@ -1981,11 +1978,20 @@ impl CCodegen:
         args.push(payload_tid)
         self.sema.find_generic_inst_type(self.sema.syms.option, args, 1) as i32
 
+    fn option_ref_tid_for_payload(payload_tid: i32) -> i32:
+        if payload_tid == 0 or self.is_void_tid(payload_tid) != 0:
+            return 0
+        let ref_tid = self.sema.find_exact_type(TypeKind.TY_REF, payload_tid, 0, 0) as i32
+        if ref_tid == 0:
+            return 0
+        self.option_tid_for_payload(ref_tid)
+
     mut fn call_hashmap_get_option_tid(body: &MirBody, args_id: i32) -> i32:
         let recv_operand = self.call_arg_operand(body, args_id, 0)
         var value_tid = self.hashmap_value_tid(self.operand_tid(body, recv_operand))
         if value_tid == 0:
             value_tid = self.call_hashmap_value_tid_from_usage(body, args_id)
+        // D22 map-view flip retracted until Stage 6: owned Option[V].
         self.option_tid_for_payload(value_tid)
 
     mut fn call_hashmap_value_tid_from_usage(body: &MirBody, args_id: i32) -> i32:
@@ -5880,13 +5886,6 @@ impl CCodegen:
                 elem_tid = self.sema.ty_i64 as i32
             let elem_ty = self.c_type(elem_tid, 0)
             var out = "    " ++ cc_lbrace() ++ " " ++ elem_ty ++ " __with_tmp = " ++ elem_text ++ "; with_vec_push(" ++ recv_ptr ++ ", &__with_tmp); " ++ cc_rbrace() ++ "\n"
-            if has_ret != 0:
-                // Mirror the LLVM backend: materialize the receiver only into
-                // a vec-typed dest. A unit-typed join local (statement-if
-                // result) is not an assignment target for the whole vec.
-                let push_dst_tid = self.place_tid(body, dest_place)
-                if self.c_type(push_dst_tid, 0) == "with_vec":
-                    out = out ++ "    " ++ self.place_text(body, dest_place) ++ " = *(" ++ recv_ptr ++ ");\n"
             out = out ++ f"    goto bb{next_bb};"
             return out
 
@@ -5960,8 +5959,22 @@ impl CCodegen:
             var out = "    " ++ cc_lbrace() ++ " int64_t __with_n = with_vec_len(" ++ recv_ptr ++ ");\n"
             if has_ret != 0:
                 let dst = self.place_text(body, dest_place)
-                out = out ++ "        memset(&(" ++ dst ++ "), 0, sizeof(" ++ dst ++ "));\n"
-                out = out ++ "        if (__with_n > 0) " ++ cc_lbrace() ++ " memcpy(&(" ++ dst ++ "), with_vec_get_ptr(" ++ recv_ptr ++ ", __with_n - 1), sizeof(" ++ dst ++ ")); with_vec_remove(" ++ recv_ptr ++ ", __with_n - 1); " ++ cc_rbrace() ++ "\n"
+                let dst_tid = ret_tid
+                if self.type_is_payload_enum(dst_tid) != 0:
+                    let some_variant = self.payload_enum_single_payload_variant(dst_tid)
+                    let none_variant = self.payload_enum_single_unit_variant(dst_tid)
+                    if some_variant < 0 or none_variant < 0:
+                        self.fail("Vec.pop Option result requires one payload variant and one unit variant")
+                        return "    abort();"
+                    let payload_tid = self.sema.type_reflection_variant_payload_type_frozen(dst_tid, some_variant, 0)
+                    let payload_c = self.c_type(payload_tid, 0)
+                    out = out ++ "        if (__with_n > 0) " ++ cc_lbrace() ++ " " ++ payload_c ++ " __with_v = " ++ self.zero_value_text(payload_tid) ++ "; memcpy(&__with_v, with_vec_get_ptr(" ++ recv_ptr ++ ", __with_n - 1), sizeof(__with_v)); with_vec_remove(" ++ recv_ptr ++ ", __with_n - 1); " ++ dst ++ " = " ++ self.payload_enum_literal(dst_tid, some_variant, "__with_v") ++ "; " ++ cc_rbrace() ++ "\n"
+                    out = out ++ "        else " ++ cc_lbrace() ++ " " ++ dst ++ " = " ++ self.payload_enum_literal(dst_tid, none_variant, "") ++ "; " ++ cc_rbrace() ++ "\n"
+                else:
+                    // Pointer-niche Option: zero is None and the payload itself
+                    // is Some. Keep this fallback representation-preserving.
+                    out = out ++ "        memset(&(" ++ dst ++ "), 0, sizeof(" ++ dst ++ "));\n"
+                    out = out ++ "        if (__with_n > 0) " ++ cc_lbrace() ++ " memcpy(&(" ++ dst ++ "), with_vec_get_ptr(" ++ recv_ptr ++ ", __with_n - 1), sizeof(" ++ dst ++ ")); with_vec_remove(" ++ recv_ptr ++ ", __with_n - 1); " ++ cc_rbrace() ++ "\n"
             else:
                 out = out ++ "        if (__with_n > 0) " ++ cc_lbrace() ++ " with_vec_remove(" ++ recv_ptr ++ ", __with_n - 1); " ++ cc_rbrace() ++ "\n"
             out = out ++ "    " ++ cc_rbrace() ++ "\n"
@@ -6060,11 +6073,20 @@ impl CCodegen:
             var out = f"    {cc_lbrace()} {key_ty} __with_k = {key_text}; "
             if recv_is_hashmap != 0:
                 let dst = self.place_text(body, dest_place)
-                out = out ++ "int64_t __with_v = 0;"
-                out = out ++ " int64_t __with_r = 0;"
+                if self.type_is_payload_enum(ret_tid) == 0:
+                    self.fail("HashMap.remove Option result requires a payload enum")
+                    return "    abort();"
+                let some_variant = self.payload_enum_single_payload_variant(ret_tid)
+                let none_variant = self.payload_enum_single_unit_variant(ret_tid)
+                if some_variant < 0 or none_variant < 0:
+                    self.fail("HashMap.remove Option result requires one payload variant and one unit variant")
+                    return "    abort();"
+                let payload_tid = self.sema.type_reflection_variant_payload_type_frozen(ret_tid, some_variant, 0)
+                let payload_c = self.c_type(payload_tid, 0)
+                out = out ++ payload_c ++ " __with_v = " ++ self.zero_value_text(payload_tid) ++ ";"
                 out = out ++ " if ((" ++ recv ++ ") != 0 && with_hashmap_remove((void*)(intptr_t)(" ++ recv ++ "), &__with_k, &__with_v, " ++ is_str_key ++ ") != 0) "
-                out = out ++ cc_lbrace() ++ " __with_r = (__with_v + 1); " ++ cc_rbrace()
-                out = out ++ " memcpy(&(" ++ dst ++ "), &__with_r, sizeof(__with_r) < sizeof(" ++ dst ++ ") ? sizeof(__with_r) : sizeof(" ++ dst ++ ")); " ++ cc_rbrace() ++ "\n"
+                out = out ++ cc_lbrace() ++ " " ++ dst ++ " = " ++ self.payload_enum_literal(ret_tid, some_variant, "__with_v") ++ "; " ++ cc_rbrace()
+                out = out ++ " else " ++ cc_lbrace() ++ " " ++ dst ++ " = " ++ self.payload_enum_literal(ret_tid, none_variant, "") ++ "; " ++ cc_rbrace() ++ " " ++ cc_rbrace() ++ "\n"
             else:
                 if has_ret != 0:
                     out = out ++ self.place_text(body, dest_place) ++ " = "
@@ -6100,6 +6122,8 @@ impl CCodegen:
                 out = out ++ f"    goto bb{next_bb};"
                 return out
             // Legacy encoded Option path for pointer/integer option lowering.
+            // (D22 map-view flip retracted until Stage 6: owned payload, not a
+            // pointer niche.)
             var out = "    " ++ cc_lbrace() ++ " " ++ key_ty ++ " __with_k = " ++ key_text ++ "; int64_t __with_v = 0;"
             out = out ++ " int64_t __with_r = 0;"
             out = out ++ " if ((" ++ recv ++ ") != 0 && with_hashmap_get((void*)(intptr_t)(" ++ recv ++ "), &__with_k, &__with_v, " ++ is_str_key ++ ") != 0) "
@@ -7568,6 +7592,10 @@ impl CCodegen:
         0
 
     mut fn zero_value_text(tid: i32) -> str:
+        // MIR can retain the backend's pseudo Vec type for compiler-created
+        // carrier/reset locals. It has the same C representation as Vec[T].
+        if tid == CC_PSEUDO_TID_VEC:
+            return "(with_vec)" ++ cc_lbrace() ++ "0" ++ cc_rbrace()
         let resolved = self.sema.resolve_alias(tid)
         let tk = self.sema.get_type_kind(resolved)
         if tk == TypeKind.TY_BOOL:
@@ -9040,6 +9068,9 @@ impl CCodegen:
             out.write("extern void* with_memmove(void*, const void*, int64_t);\n")
         if self.module_exports_c_name("with_memcmp") == 0:
             out.write("extern int32_t with_memcmp(const void*, const void*, int64_t);\n")
+        out.write("extern void* with_hashmap_get_ptr(void*, const void*, int64_t);\n")
+        if self.module_exports_c_name("with_hashmap_get") == 0:
+            out.write("extern int32_t with_hashmap_get(void*, const void*, void*, int64_t);\n")
         out.write("extern int64_t with_clock_nanos(void);\n")
         out.write("extern int32_t with_nanosleep(int64_t);\n")
         out.write("extern double with_parse_float(with_str);\n")

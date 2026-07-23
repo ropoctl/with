@@ -1,9 +1,8 @@
 //! expect-stdout: ok
 
-// [A5] #606: a self-returning mutator (`xs.push`) used as a *statement* discards
-// its aliasing result, leaving the receiver live and reusable. Two pushes then
-// further use of `xs` must drop each element exactly once at scope exit (no
-// premature drop, no double-free).
+// D21: direct `push` calls return Unit and mutate `xs` in place. Two statements
+// followed by a read leave the single receiver owner live until scope exit,
+// where both elements and the Vec buffer drop exactly once.
 
 var COUNT = 0
 

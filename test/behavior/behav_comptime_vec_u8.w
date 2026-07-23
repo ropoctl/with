@@ -31,7 +31,7 @@ comptime fn u8_pop_val() -> u8:
     v.push(10)
     v.push(20)
     v.push(30)
-    v.pop()
+    v.pop().unwrap()
 
 comptime fn u8_pop_len() -> i64:
     var v = Vec[u8].new()

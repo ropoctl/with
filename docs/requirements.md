@@ -1,11 +1,16 @@
 # With Language Requirements
 
 This document is a hand-maintained requirements traceability matrix for
-`docs/with-specification.md` (Specification v7.1). It was originally generated,
+`docs/with-specification.md` (Specification v7.2). It was originally generated,
 but the generators were retired; update this file directly when the specification
 changes. The build never regenerates or rewrites it. The surviving
 `:requirements-informative-check` target only enforces that Section 30 remains
 informative rather than creating independent normative requirements.
+
+**D22 status (2026-07-23): A new decision has been made, but implementation is
+still in progress.** Unchecked D22 entries are accepted requirements, not
+proposals. The compiler is NON-COMPLIANT until they and their acceptance pins
+pass; existing behavior is not precedent against them.
 
 **Triage campaign (2026-06-10): COMPLETE.** Every requirement below
 was reviewed against the spec, the implementation, and the test suite
@@ -27,7 +32,7 @@ still names the same requirement.
 - Filler/meta sentences such as moved-document notices, appendix framing, and pure changelog prose are intentionally excluded. Examples and code blocks are usually represented through the surrounding normative prose, not as independent requirements.
 - Section 30 is explicitly informative. Its `30.x` entries, when present, are trace links only and are not independent normative requirements. Normative grammar requirements must cite the owning section that defines the construct.
 
-Current inventory: 3114 normative requirements plus 52 informative Section 30 trace links from 275 numbered spec sections.
+Current inventory: 3167 normative requirements plus 52 informative Section 30 trace links from 275 numbered spec sections.
 
 ## 1. Design Goals
 
@@ -809,6 +814,14 @@ Current inventory: 3114 normative requirements plus 52 informative Section 30 tr
   - Requirement: This origin set is inferred from the function body and enforced at the call site.
   - Source: `§3.4 L592-L596`
   - Related spec refs: none
+- [ ] `3.4.1.9` **Transparent carriers do not erase view origins.**
+  - Requirement: Carrying a view through `Option`, `Result`, a tuple, pattern projection, or another transparent value carrier does not erase its origin.
+  - Source: `§3.4 L825-L829`
+  - Related spec refs: §21.1, D22
+- [ ] `3.4.1.10` **Construction, projection, elimination, and joins preserve every possible view origin.**
+  - Requirement: Construction, projection, elimination, and control-flow joins preserve the origins of every view that can flow into the resulting value.
+  - Source: `§3.4 L825-L829`
+  - Related spec refs: §21.1, D22
 
 ### §3.5 Borrow Scope: Non-Lexical Lifetimes
 
@@ -937,6 +950,38 @@ Current inventory: 3114 normative requirements plus 52 informative Section 30 tr
   - Requirement: I shouldn't have to manually type `&`."
   - Source: `§3.8 L729-L730`
   - Related spec refs: none
+- [ ] `3.8.1.13` **A shared reference remains a reference during inference and exact-type propagation.**
+  - Requirement: `&T` remains `&T` in unannotated bindings, inferred returns, pattern projection, and closure capture; `Copy` does not erase reference identity.
+  - Source: `§3.8 L962-L965`
+  - Related spec refs: D22
+- [ ] `3.8.1.14` **A Copy pointee may materialize only under an independently established owned demand.**
+  - Requirement: When `T: Copy`, `&T` may satisfy an independently established owned demand by copying the pointee and then applying ordinary value coercions.
+  - Source: `§3.8 L967-L986`
+  - Related spec refs: D22
+- [ ] `3.8.1.15` **Inference alone does not create an owned demand.**
+  - Requirement: An unannotated binding, inferred return, pattern binding, closure capture, or unresolved method lookup does not by itself materialize `&Copy` into an owned value.
+  - Source: `§3.8 L981-L986`
+  - Related spec refs: §9.7, D22
+- [ ] `3.8.1.16` **Owned join anchors are deterministic and arm-order independent.**
+  - Requirement: An enclosing expected owned type or any independently-owned reaching expression anchors an owned join; every compatible `&Copy` arm materializes, and arm order does not affect the result.
+  - Source: `§3.8 L988-L1003`
+  - Related spec refs: D22
+- [ ] `3.8.1.17` **All-reference joins preserve references and union their origins.**
+  - Requirement: If all reaching expressions are compatible shared references, the join remains a shared reference and carries the union of their possible origins.
+  - Source: `§3.8 L988-L1003`
+  - Related spec refs: §21.1, D22
+- [ ] `3.8.1.18` **Owned values never auto-borrow to force a reference join.**
+  - Requirement: An owned temporary is never implicitly borrowed merely to force a reference result, and a non-`Copy` view never satisfies an owned demand without an explicit owning operation.
+  - Source: `§3.8 L988-L1003`
+  - Related spec refs: D22
+- [ ] `3.8.1.19` **A result annotation pins a join across owned-anchor edits.**
+  - Requirement: Removing the final owned arm may change an inferred result to `&T`; an explicit surrounding result type pins the intended join, and dependent diagnostics identify the anchor and materialized arms.
+  - Source: `§3.8 L1005-L1011`
+  - Related spec refs: §22.3, D22
+- [ ] `3.8.1.20` **Contextual Copy materialization excludes raw pointers and receiver ABI changes.**
+  - Requirement: Raw pointers do not participate, and contextual Copy materialization does not change receiver dispatch or ABI.
+  - Source: `§3.8 L1035-L1037`
+  - Related spec refs: §19, D22
 
 ### §3.9 Implicit Trait Object Coercion
 
@@ -3422,113 +3467,157 @@ Current inventory: 3114 normative requirements plus 52 informative Section 30 tr
 
 ### §9.5 Extension Blocks
 
-- [x] `9.5.1.1` **Method call syntax applies to all self parameter forms:**
-  - Requirement: **Method call syntax** applies to all `self` parameter forms:
-  - Source: `§9.5 L3397`
+- [x] `9.5.1.1` **Receiver mode is a keyword on the declaration; self is implicit.**
+  - Requirement: A method's receiver mode is a keyword on the declaration; `self` is an implicit binding whose enclosing type is never written as a parameter.
+  - Source: `§9.5 L3644-L3648`
   - Related spec refs: none
-- [x] `9.5.1.2` **First parameter; Call syntax; Semantics**
-  - Requirement: First parameter; Call syntax; Semantics
-  - Source: `§9.5 L3399`
+- [x] `9.5.1.2` **Declaration location decides instance versus associated function.**
+  - Requirement: A function inside an `impl`/`extend`/`type` is an instance method with a synthesized receiver; a top-level function, including a dotted `fn Type.name`, is associated/free and has no receiver.
+  - Source: `§9.5 L3650-L3653`
   - Related spec refs: none
-- [x] `9.5.1.3` **self: &T; x.method(); Borrows x immutably**
-  - Requirement: `self: &T`; `x.method()`; Borrows `x` immutably
-  - Source: `§9.5 L3401`
+- [x] `9.5.1.3` **Plain fn inside a type borrows the receiver immutably.**
+  - Requirement: A plain `fn` inside a type synthesizes `self: &Self` and borrows the receiver immutably.
+  - Source: `§9.5 L3655-L3657`
   - Related spec refs: none
-- [x] `9.5.1.4` **mut self: Self; x.method(); Mutates x in place**
-  - Requirement: `mut self: Self`; `x.method()`; Mutates `x` in place
-  - Source: `§9.5 L3402`
+- [x] `9.5.1.4` **mut fn inside a type mutates the receiver place.**
+  - Requirement: A `mut fn` inside a type synthesizes `mut self: Self` and mutates the receiver in place through a share-place borrow.
+  - Source: `§9.5 L3655-L3658`
   - Related spec refs: none
-- [x] `9.5.1.5` **move self: Self; x.method(); Moves (consumes) x**
-  - Requirement: `move self: Self`; `x.method()`; Moves (consumes) `x`
-  - Source: `§9.5 L3403`
+- [x] `9.5.1.5` **move fn inside a type consumes the receiver.**
+  - Requirement: A `move fn` inside a type synthesizes `move self: Self` and moves (consumes) the receiver.
+  - Source: `§9.5 L3655-L3659`
   - Related spec refs: none
 - [x] `9.5.1.6` **Consuming self enables consuming method chains:**
   - Requirement: **Consuming `self` enables consuming method chains:**
-  - Source: `§9.5 L3405`
+  - Source: `§9.5 L3730-L3745`
   - Related spec refs: none
 - [x] `9.5.1.7` **This eliminates the need for pipeline placeholder syntax in builder patterns.**
   - Requirement: This eliminates the need for pipeline placeholder syntax in builder patterns.
-  - Source: `§9.5 L3422-L3424`
+  - Source: `§9.5 L3747-L3749`
   - Related spec refs: none
 - [x] `9.5.1.8` **The pipeline operator |> remains available for free functions and partial a...**
   - Requirement: The pipeline operator `|>` remains available for free functions and partial application.
-  - Source: `§9.5 L3422-L3424`
+  - Source: `§9.5 L3747-L3749`
   - Related spec refs: none
 - [x] `9.5.1.9` **When to use which builder pattern:**
   - Requirement: **When to use which builder pattern:**
-  - Source: `§9.5 L3426`
+  - Source: `§9.5 L3751`
   - Related spec refs: none
 - [x] `9.5.1.10` **Pattern; Best for; Example**
   - Requirement: Pattern; Best for; Example
-  - Source: `§9.5 L3428`
+  - Source: `§9.5 L3753`
   - Related spec refs: none
 - [x] `9.5.1.11` **with ... as mut (§7.2); Configuring fields on an existing struct with defau...**
   - Requirement: `with ... as mut` (§7.2); Configuring fields on an existing struct with defaults; `with Config.default() as mut c: c.timeout = 30`
-  - Source: `§9.5 L3430`
+  - Source: `§9.5 L3755`
   - Related spec refs: §7.2
 - [x] `9.5.1.12` **Method chains (§9.5); Progressive construction with type-state, validation,...**
   - Requirement: Method chains (§9.5); Progressive construction with type-state, validation, or multiple steps; `Builder.new().host("x").build()?`
-  - Source: `§9.5 L3431`
+  - Source: `§9.5 L3756`
   - Related spec refs: §9.5
 - [x] `9.5.1.13` **Use with ... as mut when you have a struct with default values and just nee...**
   - Requirement: Use `with ... as mut` when you have a struct with default values and just need to set some fields.
-  - Source: `§9.5 L3433-L3436`
+  - Source: `§9.5 L3758-L3761`
   - Related spec refs: none
 - [x] `9.5.1.14` **Use method chains when each step transforms or validates the builder, espec...**
   - Requirement: Use method chains when each step transforms or validates the builder, especially when `.build()` can fail.
-  - Source: `§9.5 L3433-L3436`
+  - Source: `§9.5 L3758-L3761`
   - Related spec refs: none
 - [x] `9.5.1.15` **Both are idiomatic — they solve different problems.**
   - Requirement: Both are idiomatic — they solve different problems.
-  - Source: `§9.5 L3433-L3436`
+  - Source: `§9.5 L3758-L3761`
   - Related spec refs: none
+- [ ] `9.5.1.16` **A mut fn may not duplicate receiver ownership into an owned return.**
+  - Requirement: A `mut fn` may not return the non-Copy receiver itself or another owner of storage whose ownership is still retained by the receiver; receiver-returning fluency is a consuming `move fn` contract.
+  - Source: `§9.5 L3663-L3667`
+  - Related spec refs: D21
+- [ ] `9.5.1.17` **The receiver-return rule forbids duplication, not useful results.**
+  - Requirement: A `mut fn` may return a Copy value, a returned-origin-tracked view, a fresh independent owned value, or ownership moved out of a receiver projection whose source is blanked by reset-on-move; the caller then retains the changed receiver place and the return is the sole owner of the moved-out value.
+  - Source: `§9.5 L3669-L3675`
+  - Related spec refs: §2.5.1, D17, D21
 
 ### §9.6 Pipeline and Composition Operators
 
 - [x] `9.6.1.1` **Pipeline (forward application):**
   - Requirement: **Pipeline (forward application):**
-  - Source: `§9.6 L3440`
+  - Source: `§9.6 L3765-L3768`
   - Related spec refs: none
-- [x] `9.6.1.2` **x |> f(a) desugars to f(x, a).**
-  - Requirement: `x |> f(a)` desugars to `f(x, a)`.
-  - Source: `§9.6 L3445`
-  - Related spec refs: none
+- [ ] `9.6.1.2` **Ordinarily x |> f(a) desugars to f(x, a) and threads its result.**
+  - Requirement: Ordinarily, `x |> f(a)` desugars to `f(x, a)`, and the next stage receives that call's result; Unit-returning `mut fn` stages use the place-threading rule below.
+  - Source: `§9.6 L3770-L3778`
+  - Related spec refs: D21
 - [x] `9.6.1.3` **Left-associative.**
-  - Requirement: Left-associative.
-  - Source: `§9.6 L3445`
+  - Requirement: Pipelines are left-associative.
+  - Source: `§9.6 L3770`
   - Related spec refs: none
 - [x] `9.6.1.4` **Backward application:**
   - Requirement: **Backward application:**
-  - Source: `§9.6 L3447`
+  - Source: `§9.6 L3857-L3860`
   - Related spec refs: none
 - [x] `9.6.1.5` **f <| x desugars to f(x).**
   - Requirement: `f <| x` desugars to `f(x)`.
-  - Source: `§9.6 L3452-L3453`
+  - Source: `§9.6 L3862-L3863`
   - Related spec refs: none
 - [x] `9.6.1.6` **Right-associative.**
   - Requirement: Right-associative.
-  - Source: `§9.6 L3452-L3453`
+  - Source: `§9.6 L3862-L3863`
   - Related spec refs: none
 - [x] `9.6.1.7` **Useful for avoiding parentheses in nested calls:**
   - Requirement: Useful for avoiding parentheses in nested calls:
-  - Source: `§9.6 L3452-L3453`
+  - Source: `§9.6 L3862-L3869`
   - Related spec refs: none
 - [x] `9.6.1.8` **Bitwise shift operators:**
   - Requirement: **Bitwise shift operators:**
-  - Source: `§9.6 L3461`
+  - Source: `§9.6 L3871`
   - Related spec refs: none
 - [x] `9.6.1.9` **<< (left shift) and >> (right shift) are binary operators at precedence lev...**
   - Requirement: `<<` (left shift) and `>>` (right shift) are binary operators at precedence level 9, between bitwise operators and additive operators.
-  - Source: `§9.6 L3463-L3464`
+  - Source: `§9.6 L3873-L3874`
   - Related spec refs: none
 - [x] `9.6.1.10` **Right shift is arithmetic (sign-extending) for signed types and logical (ze...**
   - Requirement: Right shift is arithmetic (sign-extending) for signed types and logical (zero-filling) for unsigned types.
-  - Source: `§9.6 L3472-L3473`
+  - Source: `§9.6 L3882-L3883`
   - Related spec refs: none
 - [x] `9.6.1.11` **Function composition uses the pipeline operator or explicit closures:**
   - Requirement: **Function composition** uses the pipeline operator or explicit closures:
-  - Source: `§9.6 L3475-L3476`
+  - Source: `§9.6 L3885-L3886`
   - Related spec refs: none
+- [ ] `9.6.1.12` **A resolved Unit-returning mut fn stage continues with its receiver place.**
+  - Requirement: A pipeline stage resolving to a `mut fn` whose resolved concrete return type is Unit performs the ordinary mutating call and continues with the same receiver place.
+  - Source: `§9.6 L3779-L3783`
+  - Related spec refs: D21
+- [ ] `9.6.1.13` **A non-Unit mut fn stage continues with its returned value.**
+  - Requirement: A `mut fn` pipeline stage with any non-Unit return type continues with its returned value, leaving a named receiver alive and mutated in its enclosing scope.
+  - Source: `§9.6 L3779-L3783, L3811-L3825`
+  - Related spec refs: D21
+- [ ] `9.6.1.14` **Pipeline mutator calls use the ordinary call's access rules.**
+  - Requirement: Argument evaluation, receiver exclusivity, view liveness, alias checking, and mutation ordering for a place-threading pipeline stage are exactly those of the corresponding ordinary method call; pipelines create no second or weaker mutation regime.
+  - Source: `§9.6 L3796-L3809`
+  - Related spec refs: §3.2, §21.1, D21
+- [ ] `9.6.1.15` **Unit dispatch uses the resolved concrete return after inference and substitution.**
+  - Requirement: Place-threading is determined statically from the resolved concrete return type after return-type inference, overload resolution, and generic substitution; it does not require a literal `-> Unit` annotation.
+  - Source: `§9.6 L3779-L3783, L3827-L3835`
+  - Related spec refs: §11.2, D21
+- [ ] `9.6.1.16` **An rvalue pipeline receiver is an ordinary statement temporary.**
+  - Requirement: An rvalue receiver of a place-threading pipeline stage is materialized as a statement temporary governed by the ordinary assignment-move and temporary-drop rules.
+  - Source: `§9.6 L3837-L3851`
+  - Related spec refs: §2.2, §2.4, D21
+- [ ] `9.6.1.17` **A receiver temporary moves out only while it remains the final pipeline value.**
+  - Requirement: If the receiver place remains the pipeline's final value, an ordinary surrounding value context may move it out; if a non-Unit stage switches the pipeline to another result, that result continues and the receiver temporary drops at statement end.
+  - Source: `§9.6 L3837-L3851`
+  - Related spec refs: §2.2, §2.4, D21
+- [ ] `9.6.1.18` **A Never-returning stage diverges under ordinary rules.**
+  - Requirement: A stage resolving to Never is not Unit; it produces no pipeline value or continuation, and subsequent stages are unreachable.
+  - Source: `§9.6 L3853-L3855`
+  - Related spec refs: §20b.5, D21
+- [ ] `9.6.1.19` **A mixed Unit/non-Unit chain switches from place to result exactly at the non-Unit stage.**
+  - Requirement: In a mixed chain such as `v |> push(1) |> pop() |> unwrap()`, Unit-returning `push` keeps carrying `v`, non-Unit `pop` switches the pipeline to its Option result, and `v` remains alive and mutated.
+  - Source: `§9.6 L3811-L3825`
+  - Related spec refs: D21
+- [x] `9.6.1.20` **Pipeline stages prefer an applicable method on the piped receiver.**
+  - Requirement: For `x |> f(a)`, stage lookup resolves an applicable instance or extension method as `x.f(a)` in preference to a same-named free function; when no method applies, the stage uses `f(x, a)`.
+  - Source: `§9.6 L3774-L3777`
+  - Related spec refs: §9.5
 
 ### §9.7 Pattern Matching
 
@@ -3812,6 +3901,18 @@ Current inventory: 3114 normative requirements plus 52 informative Section 30 tr
   - Requirement: This is critical for ergonomic iteration, since `for` loops with implicit `.iter()` always yield references.
   - Source: `§9.7 L3823-L3827`
   - Related spec refs: none
+- [ ] `9.7.1.71` **Pattern projection is not an owned-value demand.**
+  - Requirement: Pattern matching structurally projects the exact subvalue type and never contextually copies a `Copy` field merely because it is bound.
+  - Source: `§9.7 L4023-L4034`
+  - Related spec refs: §3.8, D22
+- [ ] `9.7.1.72` **Some(v) on Option[&V] binds v as &V in every instantiation.**
+  - Requirement: `Some(v)` matched against `Option[&V]` binds `v: &V`; nested projection through a reference produces shared-reference subviews.
+  - Source: `§9.7 L4023-L4034`
+  - Related spec refs: §3.8, §21.1, D22
+- [ ] `9.7.1.73` **Reference-preserving patterns require no ref syntax.**
+  - Requirement: Contextual Copy materialization may occur at a later owned use, but no `ref` pattern syntax or type annotation is required merely to preserve the reference.
+  - Source: `§9.7 L4023-L4034`
+  - Related spec refs: §3.8, D22
 
 ### §9.8 Pipeline DSL Patterns
 
@@ -4220,10 +4321,10 @@ Current inventory: 3114 normative requirements plus 52 informative Section 30 tr
   - Requirement: The `??` operator provides a default value when an `Option` is `None`:
   - Source: `§10.4 L4206-L4207`
   - Related spec refs: none
-- [x] `10.4.1.2` **Desugaring: expr ?? default desugars to expr.unwrap_or(default).**
-  - Requirement: **Desugaring:** `expr ?? default` desugars to `expr.unwrap_or(default)`.
-  - Source: `§10.4 L4214-L4216`
-  - Related spec refs: none
+- [ ] `10.4.1.2` **The default operator is a lazy match whose arms use the contextual join.**
+  - Requirement: `expr ?? default` evaluates `expr` once and is semantically a `match` whose successful payload and lazy default use the §3.8 join.
+  - Source: `§10.4 L4731-L4746`
+  - Related spec refs: §3.8, D22
 - [x] `10.4.1.3` **The right-hand side is lazily evaluated (only computed if left is None).** — tests: [#493](https://github.com/withlang-dev/with/issues/493)
   - Requirement: The right-hand side is lazily evaluated (only computed if left is `None`).
   - Source: `§10.4 L4214-L4216`
@@ -4244,6 +4345,22 @@ Current inventory: 3114 normative requirements plus 52 informative Section 30 tr
   - Requirement: The desugaring is:
   - Source: `§10.4 L4229-L4230`
   - Related spec refs: none
+- [ ] `10.4.1.8` **Two borrowed default branches preserve a view and union origins.**
+  - Requirement: `Option[&T] ?? &T` remains `&T` and carries the union of both possible origins.
+  - Source: `§10.4 L4742`
+  - Related spec refs: §3.8, §21.1, D22
+- [ ] `10.4.1.9` **An owned Copy default anchors an owned result.**
+  - Requirement: `Option[&T] ?? T` produces `T` when `T: Copy`, because the owned default establishes the owned join.
+  - Source: `§10.4 L4743-L4744`
+  - Related spec refs: §3.8, D22
+- [ ] `10.4.1.10` **A non-Copy borrowed payload cannot join an owned default implicitly.**
+  - Requirement: `Option[&T] ?? T` is a type error for non-`Copy` `T` unless an explicit owning conversion is supplied.
+  - Source: `§10.4 L4745-L4746`
+  - Related spec refs: §3.8, §22.3, D22
+- [ ] `10.4.1.11` **Diverging early-exit defaults contribute no result type.**
+  - Requirement: Early-exit forms preserve the exact successful payload type, and a diverging fallback contributes no result type.
+  - Source: `§10.4 L4770-L4771`
+  - Related spec refs: §20b.5, D22
 
 ### §10.5 Option Combinators (Standard Library Requirement)
 
@@ -4267,14 +4384,14 @@ Current inventory: 3114 normative requirements plus 52 informative Section 30 tr
   - Requirement: `or_else`; `(fn() -> Option[T]) -> Option[T]`; Fallback provider
   - Source: `§10.5 L4248`
   - Related spec refs: none
-- [x] `10.5.1.6` **unwrap_or; (T) -> T; Default value**
-  - Requirement: `unwrap_or`; `(T) -> T`; Default value
-  - Source: `§10.5 L4249`
-  - Related spec refs: none
-- [x] `10.5.1.7` **unwrap_or_else; (fn() -> T) -> T; Lazy default** — impl: [#393](https://github.com/withlang-dev/with/issues/393)
-  - Requirement: `unwrap_or_else`; `(fn() -> T) -> T`; Lazy default
-  - Source: `§10.5 L4250`
-  - Related spec refs: none
+- [ ] `10.5.1.6` **unwrap_or[U]; (U) -> Join[T, U]; contextual joined default**
+  - Requirement: `unwrap_or[U]`; `(U) -> Join[T, U]`; lazy branch selection uses the §3.8 join.
+  - Source: `§10.5 L4782`
+  - Related spec refs: §3.8, D22
+- [ ] `10.5.1.7` **unwrap_or_else[U]; (fn() -> U) -> Join[T, U]; contextual lazy default**
+  - Requirement: `unwrap_or_else[U]`; `(fn() -> U) -> Join[T, U]`; lazy fallback uses the §3.8 join.
+  - Source: `§10.5 L4783`
+  - Related spec refs: §3.8, D22
 - [x] `10.5.1.8` **unwrap; () -> T; Extract value; panics if None** — impl: [#545](https://github.com/withlang-dev/with/issues/545)
   - Requirement: `unwrap`; `() -> T`; Extract value; **panics** if `None`
   - Source: `§10.5 L4251`
@@ -4307,10 +4424,10 @@ Current inventory: 3114 normative requirements plus 52 informative Section 30 tr
   - Requirement: `flatten`; `() -> Option[T]` where Self = `Option[Option[T]]`; Remove nesting
   - Source: `§10.5 L4258`
   - Related spec refs: none
-- [x] `10.5.1.16` **cloned; () -> Option[T] where T: Clone; Clone inner value** — impl: [#393](https://github.com/withlang-dev/with/issues/393)
-  - Requirement: `cloned`; `() -> Option[T]` where T: Clone; Clone inner value
-  - Source: `§10.5 L4259`
-  - Related spec refs: none
+- [ ] `10.5.1.16` **cloned; Option[&T] -> Option[T] where T: Clone**
+  - Requirement: `cloned`; `() -> Option[T]` where Self = `Option[&T]`, `T: Clone`; clone a borrowed payload into an independent value.
+  - Source: `§10.5 L4793`
+  - Related spec refs: §21.1, D22
 - [x] `10.5.1.17` **inspect; (fn(&T)) -> Option[T]; Side effect without consuming** — impl: [#393](https://github.com/withlang-dev/with/issues/393)
   - Requirement: `inspect`; `(fn(&T)) -> Option[T]`; Side effect without consuming
   - Source: `§10.5 L4260`
@@ -4323,6 +4440,18 @@ Current inventory: 3114 normative requirements plus 52 informative Section 30 tr
   - Requirement: **Examples:**
   - Source: `§10.5 L4263`
   - Related spec refs: none
+- [ ] `10.5.1.20` **copied; Option[&T] -> Option[T] where T: Copy**
+  - Requirement: `copied`; `() -> Option[T]` where Self = `Option[&T]`, `T: Copy`; copy a borrowed payload into an independent value.
+  - Source: `§10.5 L4792`
+  - Related spec refs: §21.1, D22
+- [ ] `10.5.1.21` **Exact eliminators preserve payload type; Join is specification metavocabulary.**
+  - Requirement: `unwrap`, `expect`, `?`, and structural variant patterns preserve the exact payload type; `Join[T, U]` denotes §3.8's contextual join and is not user-facing syntax.
+  - Source: `§10.5 L4797-L4808`
+  - Related spec refs: §3.8, §9.7, D22
+- [ ] `10.5.1.22` **copied and cloned end the source view origin for their owned result.**
+  - Requirement: `Option[&T].copied()` and `.cloned()` are ownership boundaries whose successful owned results carry no origin from the source view.
+  - Source: `§10.5 L4803-L4808`
+  - Related spec refs: §21.1, D22
 
 ### §10.6 Result Combinators (Standard Library Requirement)
 
@@ -4346,14 +4475,14 @@ Current inventory: 3114 normative requirements plus 52 informative Section 30 tr
   - Requirement: `or_else`; `(fn(E) -> Result[T, F]) -> Result[T, F]`; Recover from error
   - Source: `§10.6 L4285`
   - Related spec refs: none
-- [x] `10.6.1.6` **unwrap_or; (T) -> T; Default on error**
-  - Requirement: `unwrap_or`; `(T) -> T`; Default on error
-  - Source: `§10.6 L4286`
-  - Related spec refs: none
-- [x] `10.6.1.7` **unwrap_or_else; (fn(E) -> T) -> T; Lazy default** — impl: [#393](https://github.com/withlang-dev/with/issues/393)
-  - Requirement: `unwrap_or_else`; `(fn(E) -> T) -> T`; Lazy default
-  - Source: `§10.6 L4287`
-  - Related spec refs: none
+- [ ] `10.6.1.6` **unwrap_or[U]; (U) -> Join[T, U]; contextual joined default**
+  - Requirement: `Result.unwrap_or[U]`; `(U) -> Join[T, U]`; default-on-error uses the §3.8 join.
+  - Source: `§10.6 L4831`
+  - Related spec refs: §3.8, D22
+- [ ] `10.6.1.7` **unwrap_or_else[U]; (fn(E) -> U) -> Join[T, U]; contextual lazy default**
+  - Requirement: `Result.unwrap_or_else[U]`; `(fn(E) -> U) -> Join[T, U]`; lazy recovery uses the §3.8 join.
+  - Source: `§10.6 L4832`
+  - Related spec refs: §3.8, D22
 - [x] `10.6.1.8` **unwrap; () -> T; Extract value; panics if Err** — impl: [#545](https://github.com/withlang-dev/with/issues/545)
   - Requirement: `unwrap`; `() -> T`; Extract value; **panics** if `Err`
   - Source: `§10.6 L4288`
@@ -5569,6 +5698,34 @@ Current inventory: 3114 normative requirements plus 52 informative Section 30 tr
   - Requirement: These methods cover the most common HashMap mutation patterns without requiring the entry API's verbose ceremony.
   - Source: `§13.3 L5361-L5362`
   - Related spec refs: none
+- [ ] `13.3.1.55` **Owning keyed-map lookup has one uniform borrowed contract.**
+  - Requirement: `HashMap[K, V].get` and `BTreeMap[K, V].get` return `Option[&V]` for every `V`, including `Copy` values.
+  - Source: `§13.3 L5885-L5903`
+  - Related spec refs: §3.8, D22
+- [ ] `13.3.1.56` **Map get return shape never varies by generic instantiation.**
+  - Requirement: `get` never changes return shape according to whether `V` implements `Copy`.
+  - Source: `§13.3 L5895-L5903`
+  - Related spec refs: D22
+- [ ] `13.3.1.57` **A map lookup view originates in the receiver, not the key.**
+  - Requirement: The `Option[&V]` returned by `get` borrows map-owned storage from the receiver and carries no origin from the transient key argument.
+  - Source: `§13.3 L5895-L5898`
+  - Related spec refs: §21.1, D22
+- [ ] `13.3.1.58` **Map remove is the ownership-transfer operation.**
+  - Requirement: `HashMap.remove` and `BTreeMap.remove` return `Option[V]`; a removed value is independent of later mutation or destruction of the map.
+  - Source: `§13.3 L5900-L5903`
+  - Related spec refs: §2.2, D22
+- [ ] `13.3.1.59` **Copying and cloning map conveniences must be separately named.**
+  - Requirement: A map may provide separately named copying or cloning conveniences, but `get` itself remains a view operation.
+  - Source: `§13.3 L5901-L5903`
+  - Related spec refs: §10.5, D22
+- [ ] `13.3.1.60` **D22 does not restandardize Vec, string, array, or slice lookup signatures.**
+  - Requirement: D22's general expression and origin rules apply to the existing signatures of `Vec`, string, array, and slice lookup/indexing APIs; changing those signatures requires a separate ruling.
+  - Source: `§13.3 L5905-L5910`
+  - Related spec refs: §3.8, §9.7, §10, §21.1, D22
+- [ ] `13.3.1.61` **SlotMap.get already participates through its uniform view contract.**
+  - Requirement: `SlotMap.get` retains its §6.2 `Option[&T]` signature and participates in D22 without an API change.
+  - Source: `§13.3 L5909-L5910`
+  - Related spec refs: §6.2, D22
 
 ### §13.4 Generators (`yield`)
 
@@ -12285,15 +12442,27 @@ Current inventory: 3114 normative requirements plus 52 informative Section 30 tr
   - Requirement: Each drop point is a "use" of the variable being dropped, extending the borrow lifetime through the destructor.
   - Source: `§21.1 L10676-L10679`
   - Related spec refs: none
-- [x] `21.1.1.15` **Mutation composability. Mutation through mut self receivers does not requir...**
-  - Requirement: **Mutation composability.** Mutation through `mut self` receivers does not require reborrowing — the receiver is the caller's place, so method chains compose naturally. Each `mut self` call mutates that place and leaves it valid for subsequent calls.
-  - Source: `§21.1 L10681-L10684`
-  - Related spec refs: none
+- [ ] `21.1.1.15` **Mutation composability. Mutation through mut self receivers does not requir...**
+  - Requirement: **Mutation composability.** Mutation through `mut self` receivers does not require reborrowing because the receiver is the caller's place. Each call mutates that place and leaves it valid; a Unit-returning `mut fn` pipeline stage continues with the place, while a non-Unit stage continues with its return value.
+  - Source: `§21.1 L11132-L11137`
+  - Related spec refs: §9.6, D21
 - [x] `21.1.1.16` **Move-state join. At a control-flow merge a place is moved if moved on any non-diverging predecessor; diverging paths contribute nothing.**
   - Requirement: **Move-state join.** At a control-flow merge, a place is moved if it is moved on any predecessor path that reaches the merge without diverging; paths that diverge (return, break, continue, or a call that never returns) contribute no move-state to the merge. A place moved on some reaching paths and live on others is treated as moved for use-checking (§2.2) and may not be used until reinitialized on all paths; its destructor is elaborated to run only on the paths where it is still live (§2.4).
   - Source: `§21.1 L10723-L10739`
   - Related spec refs: `§2.2`, `§2.4`
   - impl: [#612](https://github.com/withlang-dev/with/issues/612)
+- [ ] `21.1.1.17` **Transparent carriers and eliminators preserve every possible view origin.**
+  - Requirement: Constructing, projecting, eliminating, or joining `Option`, `Result`, tuple, pattern, `?`, `??`, `unwrap`, `expect`, and other non-owning carrier values preserves every view origin that can flow into the result.
+  - Source: `§21.1 L11330-L11345`
+  - Related spec refs: §3.4, §9.7, §10, D22
+- [ ] `21.1.1.18` **View-producing joins union reaching origins.**
+  - Requirement: A control-flow join that remains a view carries the union of the origins from every reaching view-producing path.
+  - Source: `§21.1 L11336-L11340`
+  - Related spec refs: §3.8, D22
+- [ ] `21.1.1.19` **Only a genuinely independent owned result ends origin propagation.**
+  - Requirement: Contextual Copy materialization, an explicit clone, or a consuming transfer such as `remove` ends origin propagation only for the produced independent owned value; wrappers, temporaries, intrinsics, and lowering artifacts do not.
+  - Source: `§21.1 L11336-L11345`
+  - Related spec refs: §2.2, §3.8, D22
 
 ## 22. Ephemeral Type Rules
 
@@ -12508,6 +12677,22 @@ Current inventory: 3114 normative requirements plus 52 informative Section 30 tr
   - Requirement: Both are compiler bugs, never user obligations.
   - Source: `§22.3 L10782-L10787`
   - Related spec refs: none
+- [ ] `22.3.1.10` **A view-invalidation diagnostic explains the origin and Copy snapshot fix.**
+  - Requirement: When an owned annotation would make a `Copy` view independent, the diagnostic names the viewing binding, owning collection, invalidating mutation, later use, and machine-applicable annotated-binding fix.
+  - Source: `§22.3 L11449-L11460`
+  - Related spec refs: §3.8, D22
+- [ ] `22.3.1.11` **A non-Copy join diagnostic explains both branch contracts.**
+  - Requirement: A failing `Option[&T] ?? T` join names the borrowed successful branch, owned default branch, and the fact that non-`Copy` `T` cannot be copied implicitly.
+  - Source: `§22.3 L11462-L11480`
+  - Related spec refs: §3.8, §10.4, D22
+- [ ] `22.3.1.12` **D22 remedies are suggested only when applicable.**
+  - Requirement: `.cloned()` is suggested only when `T: Clone`; a borrowed default only when its lifetime is valid; and `remove` only when ownership transfer matches the operation.
+  - Source: `§22.3 L11475-L11480`
+  - Related spec refs: §10.5, §13.3, D22
+- [ ] `22.3.1.13` **Join-dependent diagnostics identify the owned anchor and materialized arms.**
+  - Requirement: When a later diagnostic depends on a join's inferred owned/view shape, it identifies the expression that established the owned join and every relevant reference arm that materialized.
+  - Source: `§3.8 L1005-L1011`
+  - Related spec refs: §3.8, D22
 
 ## 23. `with` Block Semantics
 

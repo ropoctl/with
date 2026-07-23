@@ -92,7 +92,7 @@ fn link_stage_result_for_command(command: LinkStageCommand) -> LinkStageResult:
 fn link_stage_result_for_plan(plan: LinkStagePlan) -> LinkStageResult:
     if not plan.ok:
         return link_stage_result_fail()
-    link_stage_result_for_command(plan.command)
+    link_stage_result_for_command(move plan.command)
 
 fn link_stage_argv_append(argv: str, arg: str) -> str:
     argv ++ arg ++ "\0"
@@ -642,7 +642,7 @@ fn link_stage_link_with_extras_libs_args_plan(obj_path: str, bin_path: str, extr
             return link_stage_plan_fail()
         return link_stage_link_with_llvm_args_plan(obj_path, bin_path, extras, link_libs, link_args, ld_path)
     let command = link_stage_make_link_command("cc", obj_path, bin_path, extras, link_libs, link_args)
-    link_stage_plan_for_command(command)
+    link_stage_plan_for_command(move command)
 
 fn link_stage_link_with_llvm(obj_path: str, bin_path: str, extras: Vec[str], link_libs: Vec[str], llvm_ld: str) -> bool:
     link_stage_link_with_llvm_result(obj_path, bin_path, extras, link_libs, llvm_ld).ok
@@ -658,7 +658,7 @@ fn link_stage_link_with_llvm_args_plan(obj_path: str, bin_path: str, extras: Vec
     let command = link_stage_make_llvm_link_command(llvm_ld, obj_path, bin_path, extras, link_libs, link_args)
     if command.linker.len() == 0:
         return link_stage_plan_fail()
-    link_stage_plan_for_command(command)
+    link_stage_plan_for_command(move command)
 
 fn link_stage_str_contains(hay: str, needle: str) -> bool:
     let hay_len = hay.len() as i32

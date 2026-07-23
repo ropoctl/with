@@ -726,7 +726,7 @@ fn suspend_emit_no_suspend_error(diags: DiagnosticList, sema: &Sema, body: &MirB
         else:
             diag.add_note("this call may yield the current fiber")
     diag.add_help("move the suspension outside the no_suspend block, or remove the no_suspend assertion")
-    out.emit(diag)
+    out.emit(move diag)
     out
 
 fn suspend_emit_guard_error(diags: DiagnosticList, sema: &Sema, body: &MirBody, site: SuspendSiteSpan, guard_local: i32) -> DiagnosticList:
@@ -739,7 +739,7 @@ fn suspend_emit_guard_error(diags: DiagnosticList, sema: &Sema, body: &MirBody, 
     if guard_name.len() > 0:
         diag.add_note("`" ++ guard_name ++ "` is still live here")
     diag.add_help("move, copy, or clone the needed data before awaiting, or drop the guard before the suspension point")
-    out.emit(diag)
+    out.emit(move diag)
     out
 
 fn suspend_emit_derived_guard_error(diags: DiagnosticList, sema: &Sema, body: &MirBody, site: SuspendSiteSpan, view_local: i32, guard_local: i32) -> DiagnosticList:
@@ -756,7 +756,7 @@ fn suspend_emit_derived_guard_error(diags: DiagnosticList, sema: &Sema, body: &M
     if guard_name.len() > 0:
         diag.add_note("`" ++ guard_name ++ "` is the no_await_guard origin")
     diag.add_help("move, copy, or clone the needed data before awaiting, or drop the derived view before the suspension point")
-    out.emit(diag)
+    out.emit(move diag)
     out
 
 fn suspend_check_body(ast: AstPool, sema: &Sema, body_by_fn: &HashMap[i32, i32], body_may_suspend: SuspendBits, body: &MirBody, diags: DiagnosticList) -> DiagnosticList:

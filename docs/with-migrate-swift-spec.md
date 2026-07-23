@@ -2,6 +2,11 @@
 
 **Best-effort migration from Swift to With.**
 
+> **D22 status (2026-07-23): A new decision has been made, but implementation
+> is still in progress.** Swift Dictionary value reads migrate to uniform With
+> `Option[&V]` views. Scalar destinations may contextually materialize Copy;
+> non-Copy Swift value semantics require an explicit `.cloned()` in With.
+
 Swift and With share a surprising amount of design philosophy:
 value types by default, protocol/trait-based polymorphism, optional
 chaining, result types, and async/await. The hard parts are

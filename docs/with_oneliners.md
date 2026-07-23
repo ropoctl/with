@@ -4,6 +4,11 @@ With one-liners are small compiled With programs typed directly into the
 terminal. They can read files or pipelines, use the standard library, import C,
 and call the same language features as a source file.
 
+> **D22 status (2026-07-23):** map-view, contextual-Copy, `.copied()`, and
+> borrowed `.cloned()` examples follow accepted specification v7.2, but their
+> implementation is still in progress. A currently failing D22-shaped recipe is
+> compiler non-compliance, not cookbook intent.
+
 This is a With companion to `.reference/perl_oneliners.md`. Each recipe keeps
 the reference's compact description-then-command style. The commands assume a
 POSIX shell unless the final section says otherwise.
@@ -513,12 +518,12 @@ Print the cosine similarity based on sets of 1-grams
 
 Build and print an index of characters within a string
 
-    with -e 'let s="banana";var m:BTreeMap[str,str]=BTreeMap.new();for i in 0..s.len(){let c=s.slice(i,i+1);let v=m.get(c).unwrap_or("");m.insert(c,v++if v=="":f"{i}" else:f" {i}")};for (c,i) in m.items():print(f"{c}: {i}")'
+    with -e 'let s="banana";var m:BTreeMap[str,str]=BTreeMap.new();for i in 0..s.len(){let c=s.slice(i,i+1);let v=m.get(c).cloned().unwrap_or("");m.insert(c,v++if v=="":f"{i}" else:f" {i}")};for (c,i) in m.items():print(f"{c}: {i}")'
     POSSIBLE_IMPROVE
 
 Build and print an index of words within the first line
 
-    with -e 'let w=/\s+/.split(stdin.lines()[0]);var m:BTreeMap[str,str]=BTreeMap.new();for i in 0..w.len(){let x=w[i];let v=m.get(x).unwrap_or("");m.insert(x,v++if v=="":f"{i}" else:f" {i}")};for (x,i) in m.items():print(f"{x}: {i}")' <example.txt
+    with -e 'let w=/\s+/.split(stdin.lines()[0]);var m:BTreeMap[str,str]=BTreeMap.new();for i in 0..w.len(){let x=w[i];let v=m.get(x).cloned().unwrap_or("");m.insert(x,v++if v=="":f"{i}" else:f" {i}")};for (x,i) in m.items():print(f"{x}: {i}")' <example.txt
     POSSIBLE_IMPROVE
 
 ## Selective Line Printing

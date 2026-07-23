@@ -4,6 +4,13 @@ A practical phrasebook for systems programmers coming from Rust, Zig,
 Go, and Swift. Each section shows the pattern you know, the With
 equivalent, and what to watch for.
 
+> **D22 status (2026-07-23): A new decision has been made, but implementation
+> is still in progress.** `HashMap.get` and `BTreeMap.get` uniformly return
+> `Option[&V]`; `remove` returns owned `Option[V]`. Copy values materialize only
+> when an owned context requires them, and origins survive Option/Result
+> elimination. Examples here teach the ruling even where the current compiler
+> remains NON-COMPLIANT.
+
 ---
 
 # Table of Contents
@@ -1373,6 +1380,19 @@ m.remove("b")
 Go slices → `Vec[T]`. Go maps → `HashMap[K, V]`. Append →
 `.push()`. `delete` → `.remove()`.
 
+The inferred `val` retains the view type. When an independent scalar snapshot
+is intended, say so at the ownership boundary:
+
+```with
+let count: i32 = m.get("a") ?? 0
+m.clear()
+println("{count}")  // independent Copy value
+```
+
+For non-Copy values, keep the reference, use `.cloned()` deliberately, or use
+`remove` to transfer the stored value. With never silently duplicates an owned
+buffer merely because it came from a map lookup.
+
 v6.3 also adds common map-mutation helpers:
 `m.update("a", 0, n => n + 1)` and `m.increment("a")`.
 
@@ -2181,6 +2201,10 @@ let set = HashSet[i32].from([1, 2, 3])
 `[T]` → `Vec[T]`. `[K: V]` → `HashMap[K, V]`. `Set<T>` →
 `HashSet[T]`. `.append` → `.push`. Subscript assignment →
 `.insert`.
+
+Unlike Swift's value-semantic dictionary read, the unannotated With result is a
+view into dictionary storage. An owned scalar target materializes a copy; an
+owned non-Copy target needs explicit `.cloned()` or consuming `remove`.
 
 ## Quick Reference: Syntax Mapping
 

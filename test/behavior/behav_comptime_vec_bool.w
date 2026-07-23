@@ -27,7 +27,7 @@ comptime fn bool_pop_val() -> bool:
     var v = Vec[bool].new()
     v.push(true)
     v.push(false)
-    v.pop()
+    v.pop().unwrap()
 
 comptime fn bool_pop_len() -> i64:
     var v = Vec[bool].new()

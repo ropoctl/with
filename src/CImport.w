@@ -14429,13 +14429,13 @@ impl CiStmtPool:
         if not migrate_convert_goto_to_structured():
             return self.native_goto_emit_cfg(ctx.state.cfg, &hoisted_stmt_ids, exprs, types)
 
-        let result = stackify_graph(ctx.state.cfg.graph)
+        let result = stackify_graph(move ctx.state.cfg.graph)
         if not result.ok:
             g_ci_bail_location = if ctx.state.location.len() > 0: ctx.state.location else: with_ci_cursor_location(session, body_cursor)
             g_ci_bail_message = "stackify: " ++ result.message
             g_ci_bail_kind = CXK_GOTO_STMT
             return 0 as CiStmtId
-        let body_id = self.stack_emit_tree(result.tree, ctx.state.cfg, exprs, types)
+        let body_id = self.stack_emit_tree(result.tree, move ctx.state.cfg, exprs, types)
         if (body_id as i32) == 0:
             if g_ci_bail_message.len() == 0:
                 g_ci_bail_message = "stackify emitter produced no body"

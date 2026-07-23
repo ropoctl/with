@@ -1,10 +1,8 @@
 //! expect-stdout: ok
 
-// [A5] #606: a self-returning mutator (`xs.push`) as the *tail* of a helper with
-// no return annotation. The aliasing result does not escape into a captured owner,
-// so the local `xs` drops its element exactly once locally — no leak, no
-// double-free. The trailing work in `main` (after the call returns) would expose
-// any double-free via heap corruption; it must stay clean.
+// D21: a direct `push` tail has Unit type. The receiver remains the sole owner,
+// so `xs` drops its element and buffer exactly once locally. The trailing work
+// in `main` would expose premature or duplicate cleanup via heap corruption.
 
 var COUNT = 0
 

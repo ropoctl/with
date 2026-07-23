@@ -95,7 +95,7 @@ impl AsyncLower:
                     break
 
         self.cur_body.finalize_states()
-        self.out_mod.add_body(self.cur_body)
+        self.out_mod.add_body(move self.cur_body)
 
     mut fn emit_error_at_span(message: str, start: i32, end: i32):
         let span = Span {

@@ -153,7 +153,7 @@ impl DiagnosticList:
         return
 
     mut fn emit(diag: Diagnostic) -> Unit:
-        self.items.push(diag)
+        self.items.push(move diag)
 
     fn count() -> i32:
         self.items.len() as i32

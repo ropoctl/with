@@ -573,7 +573,7 @@ impl Codegen:
 
     fn analysis_add(fact: AnalysisFact):
         if self.analysis_enabled != 0:
-            self.analysis_report.add(fact)
+            self.analysis_report.add(move fact)
 
     fn analysis_fail(message: str):
         if self.analysis_enabled != 0:
@@ -646,7 +646,7 @@ impl Codegen:
                 fact.name = self.sema.pool_resolve(sema_sym)
                 fact.detail = f"share-place declaration emitted={function != 0} ref-table={ref_table} llvm-pointer={llvm_pointer}"
                 let selected = self.analysis_fact_selected(&fact)
-                self.analysis_add(fact)
+                self.analysis_add(move fact)
                 if selected and function != 0 and (not ref_table or not llvm_pointer):
                     self.analysis_fail(f"declaration {self.sema.pool_resolve(sema_sym)} sig={si} param={pi}: share-place contract ref-table={ref_table} llvm-pointer={llvm_pointer}")
 
@@ -687,7 +687,7 @@ impl Codegen:
             fact.name = self.sema.pool_resolve(sema_sym)
             fact.detail = f"return-shape sema-ret={sema_ret} llvm-void={llvm_is_void} sret={has_sret}"
             let selected = self.analysis_fact_selected(&fact)
-            self.analysis_add(fact)
+            self.analysis_add(move fact)
             if selected and sema_returns_value and llvm_is_void and not has_sret:
                 self.analysis_fail(f"declaration {self.sema.pool_resolve(sema_sym)} sig={si}: Sema return type {sema_ret} emitted as LLVM void without sret")
 
@@ -701,7 +701,7 @@ impl Codegen:
             let body = self.mir_body_at(bi as i64)
             if body.lowering_failed != 0:
                 continue
-            let reachable = self.mir_reachable_blocks(&body)
+            let reachable = self.mir_reachable_blocks(body)
             for bb in 0..body.block_count():
                 if reachable.get(bb as i64) == 0 or body.term_kind(bb) != TermKind.TK_CALL:
                     continue
@@ -743,7 +743,7 @@ impl Codegen:
         fact.name = name
         fact.detail = analysis_marshal_strategy_name(strategy) ++ f" raw={raw} marshaled={marshaled} sig={sig} sema-share={share} ref-table={ref_table}"
         let selected = self.analysis_fact_selected(&fact)
-        self.analysis_add(fact)
+        self.analysis_add(move fact)
         if selected and share and not callee_is_extern and not ref_table:
             self.analysis_fail(f"call {name} body={body.fn_sym} args={args_id} param={param_index}: Sema share-place contract is absent from Codegen ref table")
         if selected and share and not callee_is_extern and (strategy == AnalysisMarshalStrategy.DirectValue or strategy == AnalysisMarshalStrategy.MissingSignature):
@@ -771,7 +771,7 @@ impl Codegen:
         fact.name = name
         fact.detail = analysis_marshal_strategy_name(strategy) ++ f" incoming={incoming} storage={storage} sig={sig} sema-share={share} ref-table={ref_table} llvm-pointer={incoming_ptr}"
         let selected = self.analysis_fact_selected(&fact)
-        self.analysis_add(fact)
+        self.analysis_add(move fact)
         if selected and share and not ref_table:
             self.analysis_fail(f"callee {name} sig={sig} param={param_index}: Sema share-place contract is absent from Codegen ref table")
         if selected and share and strategy != AnalysisMarshalStrategy.CalleePlaceAlias:
@@ -1379,7 +1379,14 @@ impl Codegen:
         self.gen_module(pool)
 
     fn mir_bodies_len() -> i64: unsafe { (*(self.mir_ptr as *const MirModule)).bodies.len() }
-    fn mir_body_at(i: i64) -> MirBody: unsafe { (*(self.mir_ptr as *const MirModule)).bodies.get(i) }
+    // Codegen only observes bodies owned by the frozen MirModule. Returning an
+    // owned MirBody here would shallow-copy every Vec field and make the local
+    // copy's scope-exit drop free storage still owned by the module.
+    fn mir_body_at(i: i64) -> &MirBody:
+        let mir = self.mir_ptr as *const MirModule
+        let body_count = unsafe { (*mir).bodies.len() }
+        assert(i >= 0 and i < body_count)
+        unsafe { ((*mir).bodies.ptr + (i as usize)) as &MirBody }
     fn mir_fn_syms_len() -> i64: unsafe { (*(self.mir_ptr as *const MirModule)).body_fn_syms.len() }
     fn mir_fn_sym_at(i: i64) -> i32: unsafe { (*(self.mir_ptr as *const MirModule)).body_fn_syms.get(i) }
     fn mir_find_body_idx(sym: i32) -> i32: unsafe { (*(self.mir_ptr as *const MirModule)).find_body(sym) }
@@ -4567,7 +4574,7 @@ impl Codegen:
             if alias_sym != 0:
                 self.record_c_abi_transform(alias_sym, has_sret, sret_ty, byval_mask, vec_copy_i64(&byval_types), direct_mask, vec_copy_i64(&direct_types), direct_ret_ty)
             if method_key_sym != 0:
-                self.record_c_abi_transform(method_key_sym, has_sret, sret_ty, byval_mask, byval_types, direct_mask, direct_types, direct_ret_ty)
+                self.record_c_abi_transform(method_key_sym, has_sret, sret_ty, byval_mask, move byval_types, direct_mask, move direct_types, direct_ret_ty)
 
         self.fn_values.insert(name_sym, function)
         self.fn_fn_types.insert(name_sym, fn_type)
@@ -4594,14 +4601,21 @@ const PM_INDIRECT: i32 = 1
 const PM_INDIRECT_PLACE: i32 = 2
 
 impl Codegen:
-    mut fn arg_pass_mode(sig_idx: i32, pi: i32) -> i32:
-        if self.sema.sig_param_uses_value_ref_abi(sig_idx, pi) != 0:
-            return PM_INDIRECT_PLACE
+    mut fn abi_param_source_type(sig_idx: i32, pi: i32) -> i64:
         var p_ty = self.sema_type_to_llvm(self.sema.sig_param_type(sig_idx, pi))
         if p_ty == 0:
             p_ty = self.type_fallback()
+        // Unit is carried as i32 at the LLVM ABI boundary. LLVM void is legal
+        // only as a function result; using it as a parameter or local alloca
+        // trips DataLayout while lazily emitting a generic specialization.
         if wl_get_type_kind(p_ty) == wl_void_type_kind():
             p_ty = wl_i32_type(self.context)
+        p_ty
+
+    mut fn arg_pass_mode(sig_idx: i32, pi: i32) -> i32:
+        if self.sema.sig_param_uses_value_ref_abi(sig_idx, pi) != 0:
+            return PM_INDIRECT_PLACE
+        let p_ty = self.abi_param_source_type(sig_idx, pi)
         if self.internal_abi_needs_indirect_param(p_ty):
             return PM_INDIRECT
         PM_DIRECT
@@ -4626,11 +4640,7 @@ impl Codegen:
         let param_count = self.sema.sig_get_param_count(sig_idx)
         let param_types: Vec[i64] = Vec.new()
         for pi in 0..param_count:
-            var p_ty = self.sema_type_to_llvm(self.sema.sig_param_type(sig_idx, pi))
-            if p_ty == 0:
-                p_ty = self.type_fallback()
-            if wl_get_type_kind(p_ty) == wl_void_type_kind():
-                p_ty = wl_i32_type(self.context)
+            var p_ty = self.abi_param_source_type(sig_idx, pi)
             // #D6: the prologue reads the single ABI classifier — an IndirectPlace
             // param is a pointer to the caller's place (value_ref_abi / share-place).
             if self.arg_pass_mode(sig_idx, pi) == PM_INDIRECT_PLACE:
@@ -4673,7 +4683,7 @@ impl Codegen:
         if has_sret != 0 or byval_mask != 0:
             self.record_c_abi_transform(cg_sym, has_sret, sret_ty, byval_mask, vec_copy_i64(&byval_types), 0, vec_copy_i64(&direct_types), 0)
             if cg_sym != fn_sym:
-                self.record_c_abi_transform(fn_sym, has_sret, sret_ty, byval_mask, byval_types, 0, direct_types, 0)
+                self.record_c_abi_transform(fn_sym, has_sret, sret_ty, byval_mask, move byval_types, 0, move direct_types, 0)
         if force_internal != 0:
             let promoted_fi = self.unit_promoted_name(fn_sym, effective_name)
             if promoted_fi.len() > 0:
@@ -5086,9 +5096,9 @@ impl Codegen:
             return
         self.extern_fn_has_sret.insert(fn_sym, has_sret)
         self.extern_fn_byval_params.insert(fn_sym, byval_mask)
-        self.extern_fn_byval_types.insert(fn_sym, byval_types)
+        self.extern_fn_byval_types.insert(fn_sym, move byval_types)
         self.extern_fn_direct_params.insert(fn_sym, direct_mask)
-        self.extern_fn_direct_param_types.insert(fn_sym, direct_types)
+        self.extern_fn_direct_param_types.insert(fn_sym, move direct_types)
         if has_sret != 0:
             self.extern_fn_sret_type.insert(fn_sym, sret_ty)
         if direct_ret_ty != 0:
@@ -5272,7 +5282,7 @@ impl Codegen:
             if not self.fn_values.get(canonical_sym).is_some():
                 self.fn_values.insert(canonical_sym, function)
                 self.fn_fn_types.insert(canonical_sym, actual_fn_type)
-                self.record_c_abi_transform(canonical_sym, has_sret, sret_ty, byval_mask, byval_types, direct_mask, direct_types, direct_ret_ty)
+                self.record_c_abi_transform(canonical_sym, has_sret, sret_ty, byval_mask, move byval_types, direct_mask, move direct_types, direct_ret_ty)
 
     fn resolve_callconv(name: str) -> i32:
         if name == "c": return wl_cc_c()
@@ -5734,8 +5744,7 @@ impl Codegen:
             actual_ret_ty = wl_void_type(self.context)
             actual_params.push(wl_ptr_type(self.context))
         for pi in 0..param_count:
-            let param_sema = self.sema.sig_param_type(sig_idx, pi)
-            let param_ty = self.sema_type_to_llvm(param_sema)
+            let param_ty = self.abi_param_source_type(sig_idx, pi)
             if self.sema.sig_param_uses_value_ref_abi(sig_idx, pi) != 0:
                 actual_params.push(wl_ptr_type(self.context))
                 byval_types.push(0)
@@ -5760,7 +5769,7 @@ impl Codegen:
         if has_sret != 0:
             wl_add_sret_attr(self.context, function, 0, ret_ty)
         if has_sret != 0 or byval_mask != 0:
-            self.record_c_abi_transform(mono_sym, has_sret, ret_ty, byval_mask, byval_types, 0, direct_types, 0)
+            self.record_c_abi_transform(mono_sym, has_sret, ret_ty, byval_mask, move byval_types, 0, move direct_types, 0)
         for pi in 0..param_count:
             if self.sema.sig_param_uses_value_ref_abi(sig_idx, pi) != 0:
                 self.record_ref_param(mono_sym, pi, param_count)
