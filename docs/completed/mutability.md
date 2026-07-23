@@ -1,4 +1,21 @@
-# Mutability and Calling Convention
+# Mutability and Calling Convention — Historical D5 Design (Superseded)
+
+> **SUPERSEDED (2026-07-23).** This document records the former D5
+> free-parameter SHARE-PLACE design and is no longer authoritative. The current
+> rule is specification §3.8: `&T` borrows and plain `T` consumes; the signature
+> states the mode, auto-ref removes call-site ceremony, and a consuming
+> signature does not require a redundant `move` annotation. Do not implement
+> the free-function calling convention described below.
+>
+> Every “current,” “canonical,” “authoritative,” “must,” and restoration claim
+> made below for free-parameter SHARE-PLACE is historical and void. For D22
+> intersections, `docs/d22-Eric-Ruling.md` is canonical and every conflict is
+> false.
+>
+> Receiver modes remain distinct and current: `fn`/`&self` reads, `mut fn`/
+> `mut self` mutates the receiver place in place, and `move fn`/`move self`
+> consumes it. D21's Unit-mutator pipeline place-threading is also unchanged.
+> The retained body below is historical rationale, not normative guidance.
 
 With separates several concerns that other languages typically conflate under a single mutability keyword. This section defines the language's complete model.
 

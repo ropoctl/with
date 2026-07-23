@@ -1,5 +1,20 @@
 # The FnAbi Descriptor — the missing single source of truth
 
+> **2026-07-23 ownership-mode amendment.** The one-descriptor architecture in
+> this document remains canonical (D6), but its D5 effect-inferred SHARE-PLACE
+> classifier is superseded. Source ownership now comes from the signature:
+> `&T` borrows, plain `T` consumes, and receiver modes govern receiver passing.
+> An explicit `&T` is a reference value with the ABI of that reference type.
+> `IndirectPlace` remains a physical by-place mechanism for compiler-modeled
+> borrowed places such as in-place receivers; it is not the default for a
+> read-only plain `T`.
+>
+> **D22 boundary.** `docs/d22-Eric-Ruling.md` is authoritative. Contextual Copy
+> is a semantic expression adjustment after ordinary resolution; it must never
+> choose or mutate a function ABI, overload, receiver mode, or lookup signature.
+> Once resolution establishes an owned `T` demand, the adjusted expression is
+> passed using that already-resolved signature's single `FnAbi` descriptor.
+
 Answering the three questions for the *call-lowering* problem (the cathedral),
 the same way we answered them for share-place. The finding: the transparent
 `T*`/`T**` divergence is not a quirk — it is the textbook symptom of With lacking
@@ -23,7 +38,8 @@ ONCE, and have both the prologue and all call sites read that same descriptor.**
   (`rustc_codegen_ssa/src/mir/mod.rs:187`), then the SAME `fn_abi` drives the
   caller's arg emission, the callee prologue, AND the return
   (`fn_abi.args[i].mode`, `fn_abi.ret.mode` — `mir/block.rs:548`). Rust literally
-  names the per-arg thing `PassMode` — the exact enum share-place needs.
+  names the per-arg thing `PassMode` — the exact one-descriptor architecture
+  With needs.
 - **Go** — `ABIParamResultInfo` (`InParams()`/`OutParams()` → `ABIParamAssignment`
   per param), computed once by `ABIAnalyzeFuncType` (`internal/abi/abiutils.go`).
   Caller (ssagen) and callee prologue read the one assignment.
@@ -50,28 +66,32 @@ ArgAbi     = { pass: PassMode, llvm_ty }
 PassMode =
     Direct          // by value (SSA/register) — Copy types, small scalars
     Indirect        // pointer to a CALLEE-OWNED copy (byval) — owned aggregates
-    IndirectPlace   // pointer to the CALLER'S place — share-place; callee mutates
-                    //   the caller's data, does NOT drop it   ← the share-place mode
+    IndirectPlace   // pointer to a borrowed CALLER place — in-place receiver;
+                    //   callee may mutate it and does NOT drop it
     Fat             // dyn-trait fat pointer
     Ignore          // zero-sized
 ```
 
-`compute_fn_abi(sig)` computes it once (cached per sig), from `is_copy` + the
-inferred effect (P0): `Copy → Direct`; non-Copy `read/write → IndirectPlace`;
-non-Copy `consume/escape_value → Indirect`; dyn → `Fat`. Then:
+`compute_fn_abi(sig)` computes it once (cached per signature) from the declared
+parameter/receiver mode plus physical type shape: plain consuming scalars use
+`Direct`, plain consuming aggregates use the target's owned `Direct`/`Indirect`
+form, explicit `&T` is a borrowed pointer value, `mut fn` receivers use
+`IndirectPlace`, `move fn` receivers use an owned mode, and dyn values use
+`Fat`. Inferred body effects remain analysis facts; they never select a
+different source ownership contract. Then:
 
 - **Callee prologue** (`declare_function`): for each `ArgAbi`, emit the param type
   + attrs from `pass` (Direct → value; Indirect/IndirectPlace → `ptr` + byval/
   noalias; Fat → fat-ptr). ONE loop.
 - **Every call site**: `push_call_arg(fn_abi, i, operand)` — Direct → value;
-  Indirect → copy-to-temp + ptr; IndirectPlace → address-of-caller-place (with the
+  Indirect → owned-temp + ptr; IndirectPlace → address-of-caller-place (with the
   #568 already-a-pointer short-circuit + rvalue temp); Fat → build fat-ptr. ONE
   routine.
 
 **The transparent `T*`/`T**` question dissolves:** the transparent receiver's
 pass mode is decided ONCE in `compute_fn_abi`; every caller and the callee read it.
-Two paths cannot disagree because there is only one decision. Share-place is then
-literally *one added variant* (`IndirectPlace`), and callee-no-drop +
+Two paths cannot disagree because there is only one decision. By-place receiver
+passing is then one `IndirectPlace` variant, and callee-no-drop +
 caller-address-passing are automatically consistent — they read the same ArgAbi.
 
 ## 3. What to rewire in With to conform
@@ -82,7 +102,7 @@ and per-path receiver logic. The rewire consolidates all of it into one
 descriptor:
 
 1. **Introduce `FnAbi`/`ArgAbi`/`PassMode` + `compute_fn_abi(sig)`**, cached per
-   sig, computed after the P0 effect fixpoint (so `IndirectPlace` is effect-driven).
+   sig and computed from the finalized declared signature and receiver mode.
    This subsumes `value_ref_abi`, `internal_abi_needs_indirect_param`, the byval
    mask, `fn_ref_param_*`, and the sret flag into ONE place.
 2. **`declare_function` reads `FnAbi`** for the prologue — replaces the ad-hoc
@@ -95,16 +115,19 @@ descriptor:
    trivial FnAbi or left as-is).
 4. **The transparent divergence is fixed at the root** — one `PassMode` per
    transparent param, read everywhere. No per-path special-casing.
-5. **Share-place = add `IndirectPlace`** to the mode set, driven by the effect;
-   callee-no-drop follows from `pass == IndirectPlace`, caller-address follows from
-   the same. `move x`/`copy x` force `Indirect`. Delete the move-by-default residue.
+5. **A compiler-modeled borrowed place = `IndirectPlace`** when the finalized
+   receiver/contract requires the caller's storage itself; callee-no-drop follows from
+   `pass == IndirectPlace`, and caller-address passing follows from the same
+   descriptor. Explicit `&T` remains a reference value, plain `T` stays owned,
+   `move x` is an explicit owned rvalue, and `copy x` creates an independent
+   owned value.
 
 The order: build `FnAbi` + `compute_fn_abi` as the descriptor (behavior-neutral:
 reproduce today's classifications) → route `declare_function` + `push_call_arg`
 through it (behavior-neutral cathedral, transparent bug fixed by unification) →
-then flip `IndirectPlace` on for share-place (P1, one place). The cathedral brick
-already landed (`mir_ref_arg_ptr`) is the `IndirectPlace` marshalling code; it
-becomes the `push_call_arg` IndirectPlace arm.
+then classify compiler-modeled borrowed-place receiver/contracts in one place. The
+cathedral brick already landed (`mir_ref_arg_ptr`) is the `IndirectPlace`
+marshalling code; it becomes the `push_call_arg` IndirectPlace arm.
 
 ## One-sentence version
 
@@ -114,4 +137,4 @@ between the callee prologue and all call sites; With lacks it, re-derives the AB
 per call path, and they drifted (the transparent `T*`/`T**` bug) — so the real
 move is to **introduce `FnAbi`/`compute_fn_abi` as the single ABI source of
 truth**, after which the cathedral is just "both sides read the descriptor" and
-share-place is one added `PassMode`.
+declared by-place receiver passing is one `PassMode`.

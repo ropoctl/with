@@ -11,6 +11,9 @@ informative rather than creating independent normative requirements.
 still in progress.** Unchecked D22 entries are accepted requirements, not
 proposals. The compiler is NON-COMPLIANT until they and their acceptance pins
 pass; existing behavior is not precedent against them.
+`docs/d22-Eric-Ruling.md` is the canonical and complete source. This matrix is
+derivative; any D22 omission or conflict here is false and must be repaired to
+match the ruling.
 
 **Triage campaign (2026-06-10): COMPLETE.** Every requirement below
 was reviewed against the spec, the implementation, and the test suite
@@ -3480,7 +3483,7 @@ Current inventory: 3167 normative requirements plus 52 informative Section 30 tr
   - Source: `§9.5 L3655-L3657`
   - Related spec refs: none
 - [x] `9.5.1.4` **mut fn inside a type mutates the receiver place.**
-  - Requirement: A `mut fn` inside a type synthesizes `mut self: Self` and mutates the receiver in place through a share-place borrow.
+  - Requirement: A `mut fn` inside a type synthesizes `mut self: Self` and mutates the receiver in place through a by-place mutable borrow.
   - Source: `§9.5 L3655-L3658`
   - Related spec refs: none
 - [x] `9.5.1.5` **move fn inside a type consumes the receiver.**

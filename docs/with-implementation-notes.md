@@ -14,7 +14,9 @@ The spec defines *what* the language guarantees. This document explains
 > preserve exact projected types, and transparent carriers preserve view
 > origins. Notes below that describe the current compiler are evidence about
 > implementation seams, not authority to retain non-compliant behavior. See
-> specification §§3.4, 3.8, 9.7, 10, 13.3, 21.1 and `decisions.md` D22.
+> `docs/d22-Eric-Ruling.md` first: it is canonical and complete, and every
+> conflict in these non-normative notes is false. Specification §§3.4, 3.8,
+> 9.7, 10, 13.3, 21.1 and `decisions.md` D22 are conforming projections.
 
 ---
 
@@ -172,10 +174,11 @@ ownership boundary creates an independent value.
 **Current non-compliance and TODO:** The current checker contains special
 knowledge for selected producers, but does not yet implement D22's general
 transparent-carrier transfer. In particular, a producer origin can be lost at
-an Option eliminator. Do not add another eliminator whitelist. The future
-implementation design must identify one semantic origin-transfer mechanism
-shared by all equivalent spellings, and must prove both rejection and
-non-rejection controls from §21.1 Rule 10 before this note is marked compliant.
+an Option eliminator. Do not add another eliminator whitelist. The implementation
+must follow `docs/d22-implementation-plan.md` and use one semantic
+origin-transfer mechanism shared by all equivalent spellings. It must prove
+both rejection and non-rejection controls from §21.1 Rule 10 before this note is
+marked compliant.
 
 For user code, the conservative default applies. The precision loss
 is small in practice. It occasionally forces a programmer to
@@ -3452,13 +3455,14 @@ References: Go's cgo pointer contract + `cgocheck` dynamic enforcement (adopted:
 contract + debug-mode teeth); Rust unsafe-docs-only and Zig manual (rejected: no
 guardrail). See decisions.md D4.
 
-## 63. D22 Doctrine-to-Implementation Seam Inventory (implementation pending)
+## 63. D22 Doctrine-to-Implementation Seam Inventory (implementation in progress)
 
 **Status (2026-07-23): A new decision has been made, but implementation is
 still in progress.** This section records where the current implementation must
-eventually be reconciled with the normative ruling. It is deliberately not an
-implementation plan; architecture and sequencing require a separate design
-cycle after the repository has been reindoctrinated.
+be reconciled with `docs/d22-Eric-Ruling.md`, the canonical and complete ruling.
+The approved architecture and sequence are in
+`docs/d22-implementation-plan.md`; this non-normative inventory names the
+cross-layer seams that plan must close and cannot amend either document.
 
 - **Lookup contracts:** HashMap, BTreeMap, comptime evaluation, native LLVM,
   emit-C, and runtime paths must all agree that `get` observes through

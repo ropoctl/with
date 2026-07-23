@@ -140,47 +140,53 @@ do this, never app developers"). When weighing ownership/drop/
 lifetime semantics, check `.reference/Vale` first; reach for Rust
 only when Vale's answer cannot meet the safety bar.
 
-**The calling convention is SHARE-PLACE by default — this is
-load-bearing, canonical, and MUST NOT be reverted.** `docs/completed/
-mutability.md` is the authoritative, Eric-authored design for With's
-mutability and calling-convention model. A non-`Copy` value passed
-`f(x)` is an *ephemeral shared-place alias*: the callee mutates the
-**caller's** place, the caller keeps ownership, and the destructor runs
-in the caller's scope. `move`/`copy` are required **only** when the
-callee's inferred effect summary is `consume`/`escape_value`
-(`escape_view` is governed by view-origin tracking). This is With's
-calling card — the Python-shaped ergonomics (`bump(p)` just mutates `p`;
-no `&mut` tax) with static borrow-checked safety, unique among systems
-languages. It is NOT move-by-default; it is NOT copy-by-default.
+**The signature states parameter ownership mode — this is load-bearing.**
+For free functions, `&T` borrows and plain `T` consumes. Auto-referencing
+removes call-site ceremony: `peek(x)` is the ordinary spelling when `peek`
+takes `&T`; `take(x)` is the ordinary spelling when `take` takes `T`. The
+signature is authoritative, so a body edit never silently changes ownership,
+destructor timing, or the public calling convention. `move x`, `copy x`, and
+`&x` remain explicit spellings of intent, but a consuming signature never
+requires a redundant call-site `move` acknowledgment. See specification §3.8
+and the supersession record in `docs/decisions.md` D5.
 
-Past agents "simplified" this to move + callee-drop (the callee consumes
-and drops every non-Copy by-value param). **That is a regression, not a
-simplification, and it is forbidden.** If you find by-value non-Copy
-params being moved/consumed/callee-dropped by default, that is a bug to
-fix toward share-place, never a behavior to preserve or extend. Do not
-propose, implement, or rationalize move-by-default for non-Copy params.
-Before touching parameter passing, argument lowering, drop scheduling,
-or effect handling, re-read `mutability.md` in full and preserve the
-share-place model. The receiver modes (`&self`/`mut self`/`move self`)
-and the `Copy` opt-in for aggregates are part of the same model. See
-`docs/decisions.md` D5.
+Do not infer a borrow merely because a plain-`T` parameter is currently
+read-only. That would make the contract and destructor timing depend on the
+body. A function that observes a value takes `&T`; a function that retains a
+borrowed input must make the lifetime valid, and a function that needs an
+independent retained value clones explicitly. During source migrations the
+compiler may diagnose a legacy read-only `T` and offer an exact `&T` fix-it,
+but canonical mode never silently reinterprets the declared type.
 
-**D22 map-view and contextual-Copy semantics are canonical, and implementation
-is still in progress.** `HashMap[K, V].get` and `BTreeMap[K, V].get` uniformly
+**Receiver modes are separate.** `fn`/`&self` reads, `mut fn`/`mut self`
+mutates the receiver place in place, and `move fn`/`move self` consumes it.
+Retiring free-parameter SHARE-PLACE does not change `mut fn` receiver
+semantics or D21's place-threading pipeline rule.
+
+**D22 has one canonical and complete source: `docs/d22-Eric-Ruling.md`.** It is
+Eric's ruling, not a draft or a summary. Every other document, comment, test,
+TODO, plan, or implementation behavior that conflicts with it is false and
+non-conforming. Do not edit, reinterpret, narrow, or broaden the ruling. The
+specification and decision log must conform to it; `docs/d22-implementation-plan.md`
+is a derivative execution plan and cannot amend it.
+
+**D22 map-view and contextual-Copy implementation is still in progress.**
+`HashMap[K, V].get` and `BTreeMap[K, V].get` uniformly
 return `Option[&V]`; `remove` is the ownership-transfer operation and returns
 `Option[V]`. Copy-ness never changes a lookup signature. A `&T` remains a
 reference during inference and pattern projection, including when `T: Copy`.
 It materializes an independent `T` only when an owned-value demand has already
 been established. `Option`, `Result`, patterns, `?`, `??`, and eliminators are
-transparent to view origins; they do not erase a borrow. See specification
-§§3.4, 3.8, 9.7, 10, 13.3, 21.1 and `docs/decisions.md` D22.
+transparent to view origins; they do not erase a borrow. Read the canonical
+ruling first; specification §§3.4, 3.8, 9.7, 10, 13.3, 21.1 and
+`docs/decisions.md` D22 are conforming projections of it.
 
 The current compiler is deliberately NON-COMPLIANT while D22 is being
 implemented. Do not restore conditional `get` returns, teach new code that
 lookup owns/copies, or treat a lost origin through `unwrap` as precedent. Do
-not implement D22 from isolated TODOs: first use the approved implementation
-design and the full NON-COMPLIANT acceptance matrix so every equivalent
-spelling shares one semantic rule.
+not implement D22 from isolated TODOs: follow
+`docs/d22-implementation-plan.md` and the full NON-COMPLIANT acceptance matrix
+so every equivalent spelling shares one semantic rule.
 
 **`FnAbi` is the single ABI source of truth — never re-derive call ABI
 per-path.** Every function signature has ONE ABI descriptor (`FnAbi`
@@ -195,8 +201,11 @@ shape, or a parameter kind, extend `compute_fn_abi`/`PassMode` in ONE
 place and read it — **never** write a fresh per-path "value vs address
 vs byval" decision. A per-path ABI derivation is the exact bug that
 produced the transparent `T*`/`T**` divergence; re-introducing one is a
-regression. Share-place (D5) is `PassMode::IndirectPlace`. See
-`docs/decisions.md` D6 and `docs/fn_abi_descriptor_design.md`.
+regression. `PassMode::IndirectPlace` is a physical mode for compiler-modeled
+borrowed places such as in-place receivers; an explicit `&T` is itself a
+reference value with the ABI of that reference type. A plain consuming `T` is
+owned even when its physical ABI is indirect. See `docs/decisions.md` D6 and
+`docs/fn_abi_descriptor_design.md`.
 
 ---
 
@@ -568,7 +577,11 @@ release binary asset named `main`; `src/main` is only the local seed path.
 
 ## The Specification Leads
 
-`docs/with-specification.md` is the bible. Two rules, both absolute:
+`docs/with-specification.md` is the bible. For D22,
+`docs/d22-Eric-Ruling.md` is the complete controlling ruling: if the spec,
+requirements, decision summary, plan, tests, comments, or code omit or conflict
+with it, those sources are non-conforming and must be repaired to match it.
+Two rules are otherwise absolute:
 
 **The spec leads the implementation.** A spec change is a ruling that the
 product is now NON-COMPLIANT until the implementation catches up. There is
@@ -810,9 +823,12 @@ Use `select`, `matrix`, `path`, `closure`, `explain:node`, and the audits instea
 See `docs/deep-debugging-tools.md`.
 
 `--dump-abi` prints, per function signature, each parameter's ownership/ABI
-classification — effect flags, `value_ref_abi`, and the `SHARE-PLACE | OWNED |
-COPY` verdict. It is the direct answer to "is this parameter a borrow
-(share-place) or owned?" — do NOT infer that from MIR or reasoning; dump it.
+classification — effect flags, `value_ref_abi`, and the current physical
+passing verdict. It is the direct answer to "is this declared borrow or owned
+parameter lowered consistently at caller and callee?" — do NOT infer that from
+MIR or reasoning; dump it. Any legacy `SHARE-PLACE` label in this diagnostic is
+implementation terminology for `IndirectPlace`, not permission to reinterpret
+a plain consuming `T` as a borrow.
 
 For drop-exactly-once correctness across (value shape × control flow × ownership
 op × receiver mode), run `with build :drop-audit` (tools/drop_audit.w —

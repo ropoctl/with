@@ -1,28 +1,34 @@
-# Resume After Mutability Is Fixed
+# Resume After Mutability Is Fixed — Historical Queue (Superseded)
 
-**Status: PARKED.** On 2026-07-05 Eric directed that the entire focus become
-restoring and fully implementing the **share-place calling convention** from
+> **SUPERSEDED (2026-07-23).** The D5 restoration directive below is no longer
+> active. Specification §3.8 now governs free parameters: `&T` borrows and plain
+> `T` consumes. Every imperative, “active work,” and “canonical” claim below is
+> void; do not execute it. Consult the current handoff and decision log before
+> recovering any unrelated backlog item. For D22,
+> `docs/d22-Eric-Ruling.md` is canonical and complete.
+
+**Historical status (2026-07-05; no longer active): PARKED.** At that time Eric
+directed that the entire focus become restoring and fully implementing the
+**share-place calling convention** from
 `docs/completed/mutability.md` — his original, explicit design, unique to With
 ("a calling card, a statement of what With means"), which subsequent agents
 trampled by implementing move+callee-drop instead. Everything below is
-deliberately deferred until that work is done and protected. **Do not start any
-of this while the mutability restoration is in progress.**
+preserved only to explain that former queue.
 
-The active work lives in its own plan/tracking; this file is only the backlog to
-resume afterward.
+There is no active restoration work in this file. Recover an unrelated backlog
+item only after validating it against the current roadmap and doctrine.
 
 ---
 
-## The mutability restoration (THE active work — not deferred)
+## Historical mutability restoration directive — void
 
-Ruled by Eric (2026-07-05): **Call 1 = restore share-place.** `mutability.md` is
-canonical. A non-`Copy` value passed `f(x)` is an *ephemeral shared-place alias*
+The 2026-07-05 ruling was: **Call 1 = restore share-place.** It then treated
+`mutability.md` as canonical and a non-`Copy` value passed `f(x)` as an
+*ephemeral shared-place alias*
 (callee mutates the caller's place, caller keeps ownership, destructor runs in
 the caller's scope); `move`/`copy` are required only when the body's effect
 summary is `consume`/`escape_value` (`escape_view` via view-origin tracking).
-The implementation currently does the opposite (move + callee-drop). This
-session: enshrine it in the spec, protect it from future agents, and implement
-it deeply and correctly.
+That former directive is retained as history and must not be implemented.
 
 ---
 
