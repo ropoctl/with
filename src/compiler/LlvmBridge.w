@@ -117,6 +117,7 @@ extern fn LLVMCreateTargetMachine(target: *mut u8, triple: *const u8, cpu: *cons
 extern fn LLVMCreateTargetDataLayout(tm: *mut u8) -> *mut u8
 extern fn LLVMSetModuleDataLayout(m: *mut u8, dl: *mut u8)
 extern fn LLVMSetTarget(m: *mut u8, triple: *const u8)
+extern fn LLVMGetTarget(m: *mut u8) -> *const u8
 extern fn LLVMDisposeTargetData(dl: *mut u8)
 extern fn LLVMDisposeMessage(msg: *mut u8)
 extern fn LLVMDisposeTargetMachine(tm: *mut u8)
@@ -1494,6 +1495,12 @@ fn path_to_cstr(path: str, buf: *mut u8) -> *const u8:
     buf as *const u8
 
 pub fn wl_assemble_to_object(source_path: str, output_path: str) -> i32:
+    wl_assemble_to_object_for_triple(source_path, output_path, "")
+
+// Assemble a .s file for an explicit target triple ("" = the active/
+// host triple). Build-graph compile_asm_object targets pass a
+// `triple=` arg for cross-target runtime assembly.
+pub fn wl_assemble_to_object_for_triple(source_path: str, output_path: str, triple_str: str) -> i32:
     unsafe:
         let _ = wl_init_native_target()
         let _ = wl_init_native_asm_printer()
@@ -1512,7 +1519,7 @@ pub fn wl_assemble_to_object(source_path: str, output_path: str) -> i32:
         let ctx = LLVMContextCreate()
         let m = LLVMModuleCreateWithNameInContext("asm\0" as *const u8, ctx)
         let default_triple = LLVMGetDefaultTargetTriple()
-        let triple = llvm_object_triple(default_triple)
+        let triple = if triple_str.len() > 0: to_cstr(triple_str) else: llvm_object_triple(default_triple)
         LLVMSetTarget(m, triple)
         LLVMSetModuleInlineAsm2(m, asm_ptr, asm_len)
         LLVMDisposeMemoryBuffer(mem_buf)
@@ -1561,8 +1568,14 @@ pub fn wl_compile_ir_to_object(source_path: str, output_path: str) -> i32:
             LLVMContextDispose(ctx)
             return 1
         let default_triple = LLVMGetDefaultTargetTriple()
-        let triple = llvm_object_triple(default_triple)
-        LLVMSetTarget(m, triple)
+        // Respect the triple the IR was emitted for (`with ir --target`
+        // embeds it); an IR file without one gets the active/host triple.
+        // Compiling IR as-written is what makes CompileLlvmIrObject
+        // correct for cross-target .ll inputs.
+        var triple = LLVMGetTarget(m) as *const u8
+        if triple as i64 == 0 or *(triple) == 0:
+            triple = llvm_object_triple(default_triple)
+            LLVMSetTarget(m, triple)
         var target: *mut u8 = 0 as *mut u8
         var terr: *mut u8 = 0 as *mut u8
         if LLVMGetTargetFromTriple(triple, &raw mut target, &raw mut terr) != 0:

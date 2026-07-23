@@ -364,10 +364,13 @@ impl Compilation:
         self.set_overflow_mode(options.overflow_mode)
         self.set_debug_info(options.debug_info)
         self.set_compiler_hooks_enabled(options.compiler_hooks_enabled)
-        // Install the --target selection (§18.5) before any parse or
-        // codegen: @[target] guards, comptime sysinfo, C-ABI decisions,
-        // LLVM triple, and the link stage all read the active target.
-        target_spec_set_active(options.target_kind)
+        self.set_target_kind(options.target_kind)
+
+    // Install the --target selection (§18.5) before any parse or
+    // codegen: @[target] guards, comptime sysinfo, C-ABI decisions,
+    // LLVM triple, and the link stage all read the active target.
+    mut fn set_target_kind(kind: i32):
+        target_spec_set_active(kind)
         wl_set_active_target_triple(target_spec_llvm_triple())
 
     fn apply_runtime_config(cfg: ProjectConfig) -> ProjectConfig:

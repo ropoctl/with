@@ -802,6 +802,11 @@ fn run_cli(argc: i32) -> i32:
         comp.configure(opt_level, no_std, alloc_mode, runtime_available)
         comp.set_prelude_mode(prelude_mode)
         comp.set_overflow_mode(driver_internal_overflow_mode())
+        let ir_target = driver_parse_build_target(argc)
+        if not ir_target.ok:
+            with_eprint("error: " ++ ir_target.error_msg)
+            return 1
+        comp.set_target_kind(ir_target.kind)
         let pool = comp.compile_file(source)
         if pool.decl_count() == 0:
             with_eprint("error: IR generation failed during compilation")
