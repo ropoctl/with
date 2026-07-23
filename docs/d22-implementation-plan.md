@@ -56,7 +56,252 @@ migration. Keep such work in a separate plan and batch.
 - `Option[&T].cloned() -> Option[T]` requires `T: Clone`.
 - Raw pointers never participate in contextual Copy.
 
-## Implementation sequence
+## Staged execution plan
+
+These stages are the commit and verification boundaries for implementing the
+semantic work packages below. A later stage may use facts produced by an
+earlier stage; it must not re-derive or reinterpret them. Each stage is kept
+reviewable on its own, and no stage is promoted while its gate is red.
+
+The current worktree contains D22 work mixed with an unrelated string,
+parameter-mode, bootstrap, runtime-ABI migration, and a suspect `Vec.clone`
+rewrite. That mixed tree is evidence and salvage material, not an
+implementation baseline. D22 must be reconstructed from reviewed hunks on top
+of the committed doctrine. A broad checkout or reset would destroy useful work;
+carrying the mixed tree forward would make ownership failures impossible to
+attribute.
+
+### Stage 0 — Preserve the mixed worktree and establish a D22-only baseline
+
+Before changing compiler behavior:
+
+1. Preserve every current tracked and untracked change in a recoverable local
+   rescue commit/branch. Do not push it as D22 and do not discard it.
+2. Start the D22 implementation from the committed doctrine baseline.
+3. Create a hunk-level salvage manifest. Classify every mixed hunk as:
+   - D22 candidate;
+   - unrelated migration work to quarantine;
+   - suspect work requiring a fresh proof;
+   - test/diagnostic evidence only.
+4. Reapply only reviewed D22 hunks. File proximity is not evidence: mixed files
+   such as `Sema.w`, `SemaCheck.w`, `MirLower.w`, `CodegenDispatch.w`,
+   `rt_core.w`, and `collections.w` must be split by function and purpose.
+5. Quarantine all broad `str`/parameter/bootstrap ABI edits and the
+   `Vec[T: Clone].clone` rewrite. D22 does not authorize them.
+
+The initial D22 candidate set is limited to:
+
+- Sema exact-type, contextual-adjustment, join, and origin facts;
+- MIR consumers of those facts;
+- keyed-map declarations, lookup/removal representation, and exact drop glue;
+- comptime and C-backend parity for those same facts;
+- D22 diagnostics, fixtures, and the semantic migration tool.
+
+**Gate:** the ruling and active doctrine are clean; the rescue state is
+recoverable; the implementation diff contains no unrelated source-signature,
+string-runtime, bootstrap, general parameter-ABI, or public `Vec.get` change.
+No build is needed to answer this source-control question.
+
+### Stage 1 — Version the acceptance matrix without changing behavior
+
+Move the complete D22 matrix into an explicit NON-COMPLIANT lane that is
+versioned but excluded from the ordinary green runner. Record the required
+verdict, exact type, expected diagnostic, origin set, and drop behavior in each
+fixture. Include HashMap, BTreeMap, and the already-uniform SlotMap control;
+explicit `Option[&T]`/`Result[&T, E]` programs provide producer-independent
+tests for the general rules.
+
+Promote a fixture to the active lane only in the stage that implements its
+requirement. A fixture must never be weakened to make a stage green.
+
+**Gate:** every case required by D22 Section 14 has a named fixture and an
+owner stage; the existing active test lanes are unchanged and green. This
+stage asks only whether the acceptance contract is complete and correctly
+quarantined.
+
+### Stage 2 — Establish exact Sema types and one contextual-Copy adjustment
+
+Implement the exact-type half of D22 before generating a pointee copy:
+
+- inference, generic forwarding, patterns, inferred returns, captures,
+  `unwrap`, `expect`, and `?` preserve exact reference types;
+- demand detection happens only after method, overload, trait, dispatch, and
+  ABI selection;
+- one Sema-owned adjustment records source expression, exact `&T` source type,
+  owned target type, and any ordinary post-copy value coercion;
+- raw pointers and non-Copy pointees never receive this adjustment.
+
+Use explicit carriers and SlotMap to prove the mechanism before changing
+HashMap or BTreeMap lookup representation. Do not add backend-local Copy
+inference.
+
+**Gate:** check-only fixtures prove exact inferred types and every single-value
+owned-demand position. `with check src/main.w` answers whether the compiler
+sources remain type-correct. Targeted semantic checks answer whether Sema
+records one adjustment without changing resolution or ABI. No runtime build is
+earned yet.
+
+### Stage 3 — Centralize joins and defaulting eliminators
+
+Add the one order-independent contextual join resolver required by D22. Route
+`if`, `match`, sequence/collection literals, `??`, `unwrap_or`, and
+`unwrap_or_else` through it. Record owned anchors, materialized reference arms,
+view-producing arms, the final type, and the unioned origin set.
+
+This stage includes diverging-arm handling, explicit expected-type
+stabilization, reordered and five-arm matches, borrowed defaults, owned Copy
+defaults, and non-Copy mismatch classification. It must not yet invent map- or
+backend-specific lowering.
+
+**Gate:** semantic fixtures prove arm-order independence and identical results
+for every covered join spelling. A source edit that removes the final owned
+anchor changes an inferred join to a reference exactly as the ruling states;
+an expected type pins it. Diagnostics may still be provisional, but failures
+must already be classified by the shared resolver rather than by generic
+unification.
+
+### Stage 4 — Propagate transparent-carrier origins as a general Sema fact
+
+Implement one origin-transfer mechanism for Option, Result, tuples, ephemeral
+structs/enums, patterns, control flow, optional chaining, built-in and
+user-defined `Try`, function effects, generic forwarding, and closure capture.
+Construction records carried origins; projection and exact-payload elimination
+transfer them; joins union them. Contextual Copy and explicit ownership
+boundaries clear the origin only on the independent result.
+
+Integrate these facts with NLL. A mutation is rejected while a possibly
+affected view remains live and accepted after its final use. The map lookup key
+must never become a view origin.
+
+No `HashMap.get().unwrap()` special case is allowed. Existing uniform producers
+and explicit carriers must prove the mechanism first.
+
+**Gate:** the negative origin matrix rejects `unwrap`, `expect`, `?`, user
+`Try`, nested patterns, joins, tuple/Result forwarding, and closure escape at
+the original storage owner. Positive controls prove contextual copies, clones,
+removes, and mutation after final use are independent or dead as appropriate.
+Use `--explain-mir-origin`, `--trace-place`, and `--validate-all` to confirm the
+semantic facts before touching runtime representation.
+
+### Stage 5 — Lower Sema decisions into ownership-correct MIR
+
+MIR consumes the exact Sema adjustment and join/origin records:
+
+- contextual Copy loads through the shared reference exactly once;
+- exact-payload eliminators preserve `&T` when no owned demand exists;
+- `copied` and `cloned` create owned results with their required bounds;
+- consuming Option/Result eliminators move non-Copy payloads and reset their
+  source wrapper instead of duplicating ownership;
+- compiler-generated temporaries preserve the Sema origin and place facts.
+
+This stage must not repeat Copy-ness, join selection, or origin inference in
+MIR. Fixing an unwrap double-free by dropping both owners, skipping a drop, or
+special-casing a map producer is forbidden.
+
+**Gate:** all promoted carrier/contextual-Copy fixtures pass MIR validation.
+`--trace-ownership`, `--dump-place-map`, and `--dump-drop-plan` show one owner
+after owned extraction and a live view after borrowed extraction. Focused
+Option/Result debug-allocator controls report zero invalid frees, double frees,
+and leaks. If not, use the debugger to name the exact lowering branch before
+another edit.
+
+### Stage 6 — Implement owning keyed-map contracts and exact native drops
+
+In one isolated ownership/ABI batch, align the native implementation of
+HashMap, BTreeMap, and SlotMap with the already-proven semantics:
+
+- `get` produces a view into receiver-owned storage for Copy and non-Copy V;
+- only the receiver seeds the view origin;
+- `remove` transfers one owned payload out;
+- replacement, clear, and destruction drop every still-owned key/value exactly
+  once;
+- removed values remain valid after mutation or collection destruction.
+
+For HashMap, a nullable pointer may represent `Option[&V]`, but caller and
+callee must share one internal ABI contract. For BTreeMap, form a checked
+reborrow of internal storage without changing the public signature of
+`Vec.get`; direct raw reborrow is library-maintainer machinery, not a D23
+ruling. Audit SlotMap rather than assuming that its existing source signature
+implies correct storage destruction.
+
+**Gate:** run the native debug allocator on Copy and nested non-Copy values for
+get, replace, remove, clear, and scope destruction. Use the D22 allocation/drop
+fixtures, `tools/debug_drop.w`, drop plans, and LLDB on the exact glue-emission
+branch. The gate is zero leaks and exactly one drop per owner—not merely the
+absence of the original double free. Because this stage touches ownership,
+drop scheduling, and an internal ABI, it remains alone in its batch and earns
+`:move-audit` and `:drop-audit`.
+
+### Stage 7 — Make comptime and C emission consume the same semantics
+
+Bring the remaining semantic engines into parity without re-deriving D22:
+
+- comptime evaluation consumes exact types, contextual adjustments, shared
+  joins, transparent origins, and uniform map contracts;
+- C emission consumes MIR/Sema decisions and uses the same lookup/removal and
+  Option representation contracts as native code;
+- no backend repairs a wrong source type or synthesizes an owned map lookup.
+
+**Gate:** paired native, comptime, and C-emitted fixtures produce the same
+types, diagnostics, values, origins, and drop behavior. Generated C compiles
+and runs under the applicable allocator checks. A backend-only pass does not
+promote the stage.
+
+### Stage 8 — Finish the D22 diagnostic contract
+
+Use the source facts recorded by Stages 2–4 to produce the normative
+diagnostics and machine-applicable remedies. The diagnostic must point through
+transparent carriers to the collection and view binding, identify the
+invalidating mutation and later use, identify mixed-join anchors and
+materialized arms, and distinguish a Copy annotation remedy from explicit
+`cloned()` or a lifetime-correct borrowed fallback.
+
+**Gate:** exact diagnostic fixtures pass. Every suggested rewrite is compiled
+as a positive companion fixture. Successful programs emit no materialization
+notes, and no non-Copy error suggests that an annotation can manufacture
+ownership.
+
+### Stage 9 — Migrate active source and retire obsolete pins
+
+Only after the semantics and diagnostics are stable, run the D22 migration over
+the compiler and standard-library source. The migration tool may apply only
+compiler-proven, unambiguous fix-its; it must never infer intent from `.get()`
+spelling or text shape. Ambiguous lifetime/ownership choices remain loud human
+decisions.
+
+Convert superseded call-site-only rejection pins into positive tests and
+promote the remaining NON-COMPLIANT fixtures. Re-audit active comments and
+doctrine against the ruling. Do not combine the postponed string/parameter ABI
+migration with this source migration.
+
+**Gate:** the candidate compiler checks the migrated source; the migration is
+idempotent; no D22 NON-COMPLIANT fixture remains; and a repository search finds
+no active doctrine or code comment that conflicts with the ruling.
+
+### Stage 10 — Bless the isolated D22 batch
+
+Run verification in increasing cost order:
+
+1. focused Sema/type/diagnostic fixtures;
+2. MIR validators and origin/ownership/drop traces;
+3. comptime/native/C parity fixtures;
+4. native debug allocator and move/drop audits;
+5. `with check src/main.w` and the targeted D22 suite;
+6. `with build` and `with build :fixpoint`;
+7. `audit:all` and `with build :test`;
+8. `with build :test-green`, `with build :last-green`, reseed, and install only
+   after the completed battery supplies the required evidence.
+
+Before each build, state the exact unanswered question and what a pass or fail
+would mean. If a failure is in ownership, MIR, codegen, or fixpoint behavior,
+use the deep-debugging workflow and locate the exact function, branch,
+condition, and emitted instruction before changing code.
+
+**Gate:** every completion criterion below is satisfied across every semantic
+engine and backend, and stage2 equals stage3. Only this stage permits calling
+D22 implemented.
+
+## Detailed semantic work packages
 
 ### 1. Version the complete conformance matrix
 
