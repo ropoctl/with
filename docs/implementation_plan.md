@@ -2,10 +2,11 @@
 
 > **D22 override (2026-07-23): A new decision has been made, but implementation
 > is still in progress.** This older issue ordering does not contain the D22
-> implementation design. Specification v7.2, requirements, and
-> `docs/decisions.md` D22 lead: doctrine and excluded acceptance pins land
-> first; transparent-carrier origins and contextual Copy require a separately
-> approved plan. Do not fold D22 into an old issue by analogy.
+> implementation design. `docs/d22-Eric-Ruling.md` is canonical and complete;
+> specification v7.2, requirements, and `docs/decisions.md` D22 are derivative.
+> The approved sequence is `docs/d22-implementation-plan.md`, which may organize
+> the work but cannot amend the ruling. Do not fold D22 into an old issue by
+> analogy.
 
 This plan orders the enriched open issues so implementation can proceed without
 building features on unstable semantic ground. It is intentionally conservative:
@@ -113,7 +114,7 @@ is stable.
 - `#444` Borrow checker Rule 7: implicit drop is a use (§21.1)
 - `#362` Make ephemerality provenance-tracked and modular
 - `#378` Implement returned-view origin tracking (§21.1 Rule 6) with the §22.3 diagnostic contract
-- `D22` Extend origin tracking through transparent carriers (Rule 10), then implement contextual Copy and keyed-map conformance under the separately approved D22 plan
+- `D22` Follow `docs/d22-implementation-plan.md`: transparent origins, uniform keyed-map views, contextual Copy/joins, explicit ownership boundaries, diagnostics, and cross-backend verification
 - `#477` Make stdlib guards and borrowed-data iterators canonically ephemeral (§5.3)
 - `#355` Make unproven ephemeral task escape a hard error
 - `#350` Implement position-based Task disposition semantics

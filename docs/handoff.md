@@ -1,16 +1,27 @@
-# Handoff: current state
+# Handoff: historical state with current D22 override
 
-> **SUPERSEDED CURRENT-STATE NOTICE — D22 (2026-07-23): A new decision has been
-> made, but implementation is still in progress.** The normative current state
-> is specification v7.2 plus `docs/decisions.md` D22: `HashMap.get` and
+> **PARAMETER-MODE CORRECTION (2026-07-23).** Any historical SHARE-PLACE/D5
+> statement below about free-function parameters is superseded. Specification
+> §3.8 governs: `&T` borrows and plain `T` consumes. Receiver-mode by-place
+> semantics (D12/D21) remain current.
+
+> **CURRENT D22 OVERRIDE (2026-07-23): A new decision has been made, but
+> implementation is still in progress.** `docs/d22-Eric-Ruling.md` is the
+> canonical and complete ruling. The specification and `docs/decisions.md` D22
+> are derivative: `HashMap.get` and
 > `BTreeMap.get` return `Option[&V]` uniformly, `remove` transfers `Option[V]`,
 > Copy materialization is contextual rather than part of lookup's signature,
 > and transparent carriers preserve view origins. Historical sections below are
-> retained for provenance. Any statement that keyed-map `get` returns
-> `Option[V]`, or that origins may be lost through Option/Result elimination, is
-> superseded and must not guide new implementation work.
+> retained for provenance. Every conflicting statement below is false and must
+> not guide current work. In particular, statements that keyed-map `get` returns
+> `Option[V]` or that origins may be lost through Option/Result elimination are
+> superseded.
 
-Updated 2026-07-19. HEAD = the latest `main` doc commit, pushed.
+The remainder of this file is a 2026-07-19 historical snapshot. Its HEAD,
+queue, and “next” instructions are not current repository status.
+
+Historical snapshot updated 2026-07-19. HEAD = the then-latest `main` doc
+commit, pushed.
 **Both canonized rulings are now IMPLEMENTED: D11 (a80c38c0) and D12 in
 full — scalars (566bc58b), uniform bare-self (e101e7e7), str (e823026b);
 #630/#677/#678/#644 all closed, each battery-gated and reseeded.** The
@@ -185,7 +196,8 @@ not deferred.
 
 Confirmed: the full battery passed on bb31e86a (`GATES EXIT: 0` — all 9 targets,
 FIXPOINT, audit violations=0, EMIT-C smoke, last-green recorded). The historical
-fix made comptime `HashMap.get`/`remove` return `Option[V]`
+fix made comptime `HashMap.get`/`remove` return `Option[V]` (a contract now
+superseded for keyed-map `get` by D22)
 (was naked value — a per-phase type divergence); added `eval_option_method_call`
 in `src/ComptimeEval.w` for comptime Option receivers (unwrap/expect/is_some/
 is_none/unwrap_or). Closure-taking Option combinators (map/and_then/filter) and

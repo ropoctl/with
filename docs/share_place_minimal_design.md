@@ -1,4 +1,12 @@
-# Share-Place: The Minimal Design (clear-mind, greenfield)
+# Share-Place: The Minimal Design (Historical — Superseded)
+
+> **SUPERSEDED (2026-07-23).** Free-function SHARE-PLACE is not the current
+> language design. Specification §3.8 is authoritative: `&T` borrows and plain
+> `T` consumes. This file is retained only as design archaeology. Receiver-mode
+> by-place mutation remains current and is governed by D12/D21. Every
+> free-parameter SHARE-PLACE design or implementation directive below is void.
+> For D22,
+> `docs/d22-Eric-Ruling.md` is canonical and every conflict here is false.
 
 A from-scratch sketch of the *smallest* thing that is share-place, what each
 reference language already proves works, and what pieces of With must move to fit

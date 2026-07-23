@@ -18,6 +18,10 @@ implementation is still in progress; the compiler/stdlib are NON-COMPLIANT
 until the D22 requirements and pins pass.
 **Deciders:** Eric (BDFL)
 
+**Authority:** `docs/d22-Eric-Ruling.md` is the canonical and complete D22
+ruling. This entry is only a compact index and rationale summary; any omission
+or conflict here is false and must be repaired in favor of Eric's ruling.
+
 **Decision.** `HashMap[K, V].get` and `BTreeMap[K, V].get` return
 `Option[&V]` for every `V`. Their return shape never depends on whether `V` is
 `Copy`. Lookup observes map-owned storage; `remove` transfers ownership and
@@ -352,8 +356,9 @@ suffices for methods that hand a field to a consuming callee; the
 Alongside it, `move` applies to a place: `f(move self.r)` is the explicit
 spelling; the field is blanked through whatever pointer reaches the base
 (#697 machinery), so the caller's later drop skips it. POD-field moves are
-plain copies. The required-move rule for plain non-Copy args and §2.4's
-partial-move ban for Drop-impl owners are unchanged.
+plain copies. Under §3.8 a plain-`T` parameter consumes without an extra
+call-site `move`; explicit `move self.r` remains a legal intent spelling.
+Section 2.4's partial-move ban for Drop-impl owners is unchanged.
 
 **D21 boundary.** "A field transfer writes the root" does not mean "a mutable
 borrow may return an owned copy of the root." A transferred non-Copy projection
@@ -377,7 +382,7 @@ without the Copy guard breaks aliasing-escape contracts (the pin caught
 it). Threading `&mut`-style out-params instead is forbidden by §1.4/§3.3.
 
 **Enforced by:** the m-probe matrix in the D17 commit, `--dump-abi`
-verdicts (field-consuming receiver: eff=[write] SHARE-PLACE), drop-audit
+verdicts (field-consuming `mut fn` receiver: eff=[write], by-place), drop-audit
 field_take cells, and the #697/#698 debug-alloc fixtures. Would reopen on:
 per-field effect summaries (which could carry field-precise consume without
 promotion), or a change to reset-on-move that makes field blanks
@@ -394,19 +399,20 @@ change explicit `move` semantics.
 
 **Decision.** `move x` at a call site always moves: the value is materialized
 as a statement temporary and the source binding is reset immediately. An owned
-(consuming) callee consumes the temporary through the call; a share-place
+(plain `T`) callee consumes the temporary through the call; a borrowing (`&T`)
 callee borrows the temporary, which is destroyed at the end of the enclosing
 statement (§2.4's temporary rule). `move x`'s caller-visible contract is
 therefore callee-independent: after the statement, the binding is invalid and
-the value is gone. The required-move error for plain non-Copy args to owned
-params is unchanged; there is NO diagnostic for `move` into a borrowing callee
-— post-ruling it is meaningful (early destruction), not noise.
+the value is gone. Plain `T` already declares consumption and needs no
+call-site acknowledgment; there is likewise no diagnostic for `move` into a
+borrowing callee — it is meaningful early destruction, not noise.
 
-**Context.** Before this ruling, `f(move x)` into a share-place param
+**Context.** Before this ruling, `f(move x)` into a borrowing param
 borrowed: the binding was statically invalidated but the value silently lived
 until the caller's scope exit — a deferred-drop lie (a lock/fd moved into a
-consumer for deterministic release stayed held), contradicting mutability.md's
-satisfaction table ("move x … yes, owned"). Found while grounding #697/#691.
+consumer for deterministic release stayed held). Found while grounding
+#697/#691. The later D5 supersession made the borrowing mode explicit as `&T`;
+the rvalue-uniform temporary rule remains the same.
 
 **Alternatives weighed.**
 - *Make it illegal* (`move` iff callee consumes; Rust/Vale make the construct
@@ -430,11 +436,10 @@ ownership follows the contract (D6 stays intact). The implementation may later
 elide the temporary copy by aliasing the source storage; this entry fixes the
 semantics, not the materialization strategy.
 
-**Enforced by:** test/debug_alloc/da_move_into_shareplace_timing.w (timing),
+**Enforced by:** test/debug_alloc/da_move_into_shareplace_timing.w (legacy
+fixture name; timing),
 drop-audit cell move_into_borrow/bare (exactly-once). Would reopen on: a
-share-place ABI change that makes borrowing a doomed temporary unsound, or a
-future explicit parameter-mode syntax that makes callee modes visible at the
-declaration.
+borrowing ABI change that makes borrowing a doomed temporary unsound.
 
 ---
 
@@ -590,7 +595,7 @@ the exact user-visible version while keeping semantic build inputs truthful.
 
 ---
 
-## D12 — `mut fn` mutates in place on every owner type; the receiver MODE decides share-place, not the owner's type (primitives and str included)
+## D12 — `mut fn` mutates in place on every owner type; receiver MODE decides by-place semantics (primitives and str included)
 
 **Date:** 2026-07-17
 **Status:** Accepted — BDFL ruling. **Deciders:** Eric (BDFL)
@@ -601,13 +606,13 @@ A `mut fn` receiver borrows the caller's place and mutates it in place for
 **every** owner type — scalar primitives (`i32`, `u64`, `f64`, `bool`,
 `char`, …), `str`, distinct/newtypes over them, and aggregates alike.
 `extend i32: mut fn bump(): self += 1` works: `x.bump()` on a `var x`
-mutates `x`. The lowering is D5 share-place / `PassMode::IndirectPlace`
+mutates `x`. The lowering is a receiver-mode `PassMode::IndirectPlace`
 (a pointer to the caller's slot) computed once by `compute_fn_abi` (D6) —
 the same ABI aggregates already use — so no new mechanism is introduced;
 the previous restriction to STRUCT/GENERIC_INST/ENUM owners was an
 incompleteness, not a design.
 
-**The governing principle: the receiver MODE decides share-place, the
+**The governing principle: the receiver MODE decides by-place behavior, the
 owner's type does not.** `i32` is `Copy`, but `mut fn` still borrows in
 place, because mode wins over Copy-ness — exactly as it already does for
 Copy structs. `f(x)` (by-value param) copies; `x.bump()` (`mut fn`
@@ -651,11 +656,12 @@ Mission filter: §9.5 already promises "mut self mutates in place"
 generically with no primitive carve-out — so this is spec-leads-compiler
 (the spec is right, the impl was incomplete). Ergonomics-first wants
 `hp.damage(30)` over `hp = Health(hp.value - 30)`. "Safe as Rust" is a
-bar, not a compass — share-place on a primitive is exactly as safe (the
-borrow is exclusive for the call, D5); nothing becomes silently wrong.
+bar, not a compass — a by-place mutable receiver on a primitive is exactly as
+safe (the borrow is exclusive for the call); nothing becomes silently wrong.
 
-Builds on D5 (share-place calling convention), D6 (`FnAbi`/`PassMode`
-single source), D7 (receiver-mode keywords). Sibling of D11 (both are
+Builds on D6 (`FnAbi`/`PassMode` single source) and D7 (receiver-mode
+keywords). It is independent of D5's now-superseded free-parameter default.
+Sibling of D11 (both are
 core-type surface rulings taken in-scope for v0.16.0 rather than
 deferred).
 
@@ -671,8 +677,8 @@ ownership op × receiver mode) per the receiver-ABI-change rule.
 
 ### What would reopen this
 
-A drop/lifetime cell that cannot be made sound for a share-place scalar
-or fat-pointer receiver without violating D5's exclusive-borrow contract.
+A drop/lifetime cell that cannot be made sound for an exclusive by-place scalar
+or fat-pointer receiver.
 
 ---
 
@@ -900,7 +906,7 @@ A method's receiver is expressed by a keyword on the declaration, not by a
 parameter. `self` is never declared and its type is never spelled:
 
 - `fn m()` inside `impl`/`extend`/`type` — instance, **read borrow** (`self: &Self`)
-- `mut fn m()` inside a type — instance, **mutable share-place borrow** (`mut self: Self`)
+- `mut fn m()` inside a type — instance, **by-place mutable borrow** (`mut self: Self`)
 - `move fn m()` inside a type — instance, **consuming** (`move self: Self`)
 - top-level `fn Type.name()` — **associated**, no receiver (no `static` keyword)
 
@@ -960,7 +966,7 @@ the surface).
 Swift is the model: `SelfAccessKind` (`include/swift/AST/Decl.h:262` —
 `NonMutating`/`Mutating`/`Consuming`/`Borrowing`) is a **decl** property and
 `self` is a compiler-synthesised `getImplicitSelfDecl()`. `mutating ⇒ inout
-self` (OwnershipManifesto) is verbatim With's share-place (D5). Swift threads a
+self` (OwnershipManifesto) is verbatim With's by-place receiver mode (D12). Swift threads a
 persisted `SelfAccessKind`; we take a cheaper route (parser desugar to shapes
 sema already handles). Rust's `&self`/`&mut self`/`self` shorthand and Swift's
 implicit `self` both confirm "no receiver type annotation" as the ergonomic
@@ -992,10 +998,12 @@ truth** for both the callee prologue (`declare_function`) and every call site
 (`push_call_arg`). No code may re-derive "how is this argument passed" from the
 type or context on its own — it reads the descriptor.
 
-`PassMode` meanings: `Direct` = by value (Copy/scalar); `Indirect` = pointer to a
-callee-owned copy (byval); `IndirectPlace` = pointer to the CALLER's place
-(share-place — callee mutates the caller's data and does NOT drop it); `Fat` =
-dyn-trait fat pointer; `Ignore` = zero-sized.
+`PassMode` meanings: `Direct` = direct value; `Indirect` = pointer to a
+callee-owned value (byval); `IndirectPlace` = pointer to a borrowed caller place
+(used by in-place receiver modes; the callee does NOT drop it); `Fat` =
+dyn-trait fat pointer; `Ignore` = zero-sized. Source ownership is declared by
+the signature: an indirect physical ABI never turns plain consuming `T` into a
+borrow.
 
 ### Why (the reference consensus)
 
@@ -1020,81 +1028,60 @@ path, `T**` on the generic path, both "working") is the textbook symptom.
   `internal_abi_needs_indirect_param`, byval masks, `fn_ref_param_*`) are being
   consolidated into `FnAbi`; after consolidation, re-introducing a per-path ABI
   derivation is a regression.
-- Share-place (D5) is `PassMode::IndirectPlace`, driven by the effect (P0). The
-  callee-no-drop and the caller-address-passing are consistent because they read
-  the same `ArgAbi` — this is *why* the descriptor is the right home for it.
+- Explicit reference parameters use the ABI of their reference type. A
+  compiler-modeled borrowed place, such as an in-place receiver, uses the
+  appropriate by-place descriptor. Callee no-drop and caller address-passing
+  remain consistent because both read the same `ArgAbi` — this is *why* the
+  descriptor is the right home. Inferred body effects never change a declared
+  mode.
 
 ### Consequences (the rewire)
 
 Build `FnAbi`/`ArgAbi`/`PassMode` + `compute_fn_abi(sig)` (behavior-neutral —
 reproduce today's classifications, resolving the transparent divergence to one
 form) → route `declare_function` + one `push_call_arg` through it (the cathedral,
-descriptor-driven; the transparent bug fixed by unification) → flip
-`IndirectPlace` on for share-place. The landed `mir_ref_arg_ptr` brick is the
-`IndirectPlace` marshalling arm.
+descriptor-driven; the transparent bug fixed by unification). The landed
+`mir_ref_arg_ptr` brick is the `IndirectPlace` marshalling arm for declared
+by-place contracts.
 
 ---
 
-## D5 — The calling convention is SHARE-PLACE by default (restore mutability.md); do not revert to move
+## D5 — Historical SHARE-PLACE free-parameter design — SUPERSEDED
 
 **Date:** 2026-07-05
-**Status:** Accepted — CANONICAL, load-bearing, protected
-**Spec:** `docs/completed/mutability.md` (authoritative) · **Deciders:** Eric (BDFL, original author of the design)
+**Status:** Superseded. The current BDFL ruling is specification §3.8:
+`&T` borrows and plain `T` consumes; the signature states the mode.
+**Historical design:** `docs/completed/mutability.md` · **Deciders:** Eric (BDFL)
 
-### Decision
+### Supersession
 
-With's calling convention for a non-`Copy` value passed `f(x)` is an **ephemeral
-shared-place alias**: the callee operates on the **caller's** place (reads and
-mutations are caller-visible), the caller retains ownership, and the destructor
-runs in the caller's scope. `move`/`copy` at the call site are required **only**
-when the callee's inferred effect summary on that parameter is `consume` or
-`escape_value`; `escape_view` is governed by view-origin lifetime tracking. This
-is the full model in `docs/completed/mutability.md` (effect summaries, the
-Copy/non-Copy split, receiver modes `&self`/`mut self`/`move self`, `&T` niche,
-`@[effect(...)]` pinning). It is authoritative.
+Free-function SHARE-PLACE is retired. A read-only or view-producing parameter
+is declared `&T`; a plain `T` is owned by the callee and is consumed without a
+redundant call-site `move` annotation. Body-inferred effects remain analysis
+facts, but they do not reinterpret a declared ownership mode or silently move
+destructor timing between scopes. Auto-ref preserves the ergonomic call surface:
+callers write `peek(x)` for `peek(x: &T)` and `take(x)` for `take(x: T)`.
 
-### Why (Eric, verbatim intent)
+This supersession does **not** change receiver modes. `mut fn` still mutates its
+receiver place in place, `move fn` consumes it, and D21 pipeline place-threading
+remains current. `PassMode::IndirectPlace` remains an ABI mechanism for
+compiler-modeled borrowed places such as in-place receivers, never a
+source-level default for plain `T`; explicit `&T` has the ABI of its reference
+value.
 
-"mutability.md's shared-place design was my explicit design and will, and yes it
-was unique to With — a calling card, a statement of what With means. Subsequent
-agents have trampled it." The share-place default is the anti-ceremony mission
-made concrete: `bump(p)` mutates `p` with no `&mut` tax — Python-shaped
-ergonomics with static, borrow-checked safety. No systems reference does this
-(Vale/Rust move; Zig/Go copy); Python is the only prior art, and With makes it
-statically safe. This is the point of With.
+### Historical record — not current doctrine
 
-### The regression being corrected
+D5 previously made a plain non-`Copy` free parameter an inferred shared-place
+alias. The caller retained ownership, body effects selected borrowing versus
+transfer, and the design sought Python-shaped mutation without call-site
+reference syntax. That was an accepted design at the time and explains legacy
+effect summaries, `SHARE-PLACE` diagnostics, tests, and ABI comments.
 
-The implementation drifted to **move + callee-drop**: by-value non-`Copy` params
-are treated as consumed and dropped by the callee (`lower_fn_with_sig` schedules
-a value-drop for every non-Copy param; #605 treats a moved-in value as consumed;
-argument lowering `OK_MOVE`s non-Copy args). That is Rust/Vale semantics, not
-With's. It was a silent agent "simplification," and it is wrong.
-
-### Protection (this is the point of writing it down)
-
-- **Do not revert to move-by-default.** If a future agent finds by-value non-Copy
-  params being moved/consumed/callee-dropped by default, that is the bug to fix
-  toward share-place — never a behavior to preserve, extend, or re-introduce.
-- **Do not propose move-by-default or copy-by-default** as a "simplification,"
-  performance win, or Vale/Rust-alignment. The mission's "as safe as Rust" is a
-  safety bar; share-place meets it via effect summaries + borrow checking without
-  adopting Rust's move-by-default.
-- Before touching parameter passing, argument/call lowering, drop scheduling, or
-  effect inference, re-read `mutability.md` in full and preserve share-place.
-- CLAUDE.md "Language Design Philosophy" carries the standing guardrail.
-
-### Consequences (the implementation work)
-
-Restore the model end to end: infer per-parameter effect summaries
-(read/write/consume/escape_value/escape_view) from bodies; make the default
-non-Copy call a share-place borrow (pass a reference to the caller's place, no
-callee-drop, destructor in the caller's scope); require `move`/`copy` only for
-consume/escape_value; keep escape_view under view-origin tracking; the borrow
-checker enforces aliasing conflicts via effect summaries. Receiver modes and the
-`Copy` opt-in are already aligned (Cycle 1). Deferred follow-ons (the other
-receiver/param calls, queued bug fixes) are in
-`docs/resume_after_mutability_fixed.md`.
+That design is now void for free parameters. No instruction, protection,
+restoration task, or “canonical” claim from the former D5 text remains active.
+Do not restore it from history. The only retained lesson is provenance: source
+ownership must follow the current declared signature, while receiver modes and
+view-origin analysis continue under their own current rulings.
 
 ---
 

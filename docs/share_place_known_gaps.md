@@ -1,6 +1,12 @@
-# Share-place (D5) — known gaps
+# Share-place (D5) — Historical Gap Record (Superseded)
 
-Tracked gaps in the share-place calling-convention implementation. Each has a
+> **SUPERSEDED (2026-07-23).** Do not treat these D5 gaps as current language
+> requirements. Free functions use declared `&T` borrow / plain `T` consume
+> modes. The tasks and remedies below are archaeology, not a backlog.
+> Receiver-mode by-place behavior remains governed separately by D12. For D22,
+> `docs/d22-Eric-Ruling.md` is canonical and every conflict here is false.
+
+Historically tracked gaps in the share-place calling-convention implementation. Each has a
 deterministic repro and `--dump-abi` evidence. Verify fixes with the
 `/drop-audit` skill and `--dump-abi`, not by reasoning.
 
@@ -137,4 +143,3 @@ exact allocation site and both free call sites of the async entry, then decide
 which free path to drop (the borrowed-await reap, vs the owner's Task drop).
 Verify with `--debug-alloc` (no double free, leak count == 0) and that
 `spec_ss14_7` and behav_ephemeral_task_consuming_callee both pass.
-

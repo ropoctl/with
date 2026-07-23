@@ -2,6 +2,10 @@
 
 **Author:** Eric Hartford
 **Status:** Reference specification for prototype implementation
+**D22 authority:** `docs/d22-Eric-Ruling.md` is Eric's canonical and complete
+D22 ruling. This specification records its normative language, but cannot
+amend, narrow, or override it. Any D22 omission or conflict here is a
+specification defect to repair in favor of the ruling.
 **D22 implementation status (2026-07-23): A new decision has been made, but
 implementation is still in progress.** The D22 rules are normative now. The
 compiler, comptime evaluator, backends, standard library, diagnostics, and
@@ -3749,7 +3753,7 @@ the dotted `fn Type.name` — is associated / free (no receiver).
 | Declaration | Receiver semantics | Call syntax | Implicit receiver |
 |-------------|--------------------|-------------|-------------------|
 | `fn m()` inside `impl`/`extend`/`type` | borrows the receiver immutably | `x.m()` | `self: &Self` |
-| `mut fn m()` inside a type | mutates the receiver in place (share-place borrow) | `x.m()` | `mut self: Self` |
+| `mut fn m()` inside a type | mutates the receiver in place (by-place mutable borrow) | `x.m()` | `mut self: Self` |
 | `move fn m()` inside a type | moves (consumes) the receiver | `x.m()` | `move self: Self` |
 | `fn Type.m()` at top level | none (associated) | `Type.m()` | — |
 | `mut`/`move fn` at top level | *error* — mode with no receiver | — | — |
@@ -3783,7 +3787,7 @@ stdlib migrate to the keyword form; the parser desugars the keyword form to
 them. See `docs/eliminate-self.md` for the phased plan.
 
 **Any owner type may be extended, primitives and `str` included — the
-receiver mode decides share-place, not the owner's type (D12).** A `mut fn`
+receiver mode decides by-place behavior, not the owner's type (D12).** A `mut fn`
 mutates the caller's place for every owner, whether the owner is an
 aggregate, a scalar primitive, or `str`:
 
@@ -3801,7 +3805,7 @@ A scalar primitive is `Copy`, yet `mut fn` still borrows it in place: the
 receiver **mode** wins over the owner's Copy-ness, exactly as it does for a
 `Copy` struct. Passing the same value to a by-value parameter (`f(x)`)
 copies it; calling a `mut fn` on it (`x.bump()`) borrows the caller's place
-(share-place, D5). `move fn` on a primitive still consumes.
+(by-place receiver mode, D12). `move fn` on a primitive still consumes.
 
 The idiomatic use is a domain verb on a distinct/newtype, where the method
 names an operation the bare operator cannot:

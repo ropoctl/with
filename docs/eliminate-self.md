@@ -47,7 +47,7 @@ impl Drop for File:
   | declaration | receiver semantics | desugars to |
   |---|---|---|
   | `fn` inside `impl`/`extend`/`type` | read borrow | `self: &Self` |
-  | `mut fn` inside a type | mutable share-place borrow | `mut self: Self` |
+  | `mut fn` inside a type | by-place mutable borrow | `mut self: Self` |
   | `move fn` inside a type | consuming (owns `self`) | `move self: Self` |
   | `fn` / `fn Type.name` at top level | associated / free | *(no receiver)* |
   | `mut`/`move fn` at top level | **error** — mode with no receiver | — |
@@ -64,11 +64,11 @@ need to thread a new `SelfAccessKind` through sema/MIR/codegen the way Swift
 does. **We desugar in the parser to the existing shapes**, and everything
 downstream is unchanged.
 
-`mut fn` = "`self` is passed `inout`" is precisely With's share-place mutable
+`mut fn` = "`self` is passed `inout`" is precisely With's by-place mutable
 borrow (caller keeps ownership, callee mutates the caller's place). Swift's own
 rationale for `mutating = inout self` (OwnershipManifesto: the caller retains
-the storage, the borrow is statically checkable) is verbatim our share-place
-rationale (D5) — so this is the same ownership model with less ceremony, not a
+the storage, the borrow is statically checkable) is verbatim our receiver-mode
+rationale (D12) — so this is the same ownership model with less ceremony, not a
 new one.
 
 ### What this dissolves (not patches)
@@ -251,6 +251,7 @@ its flags. Regex will not survive 3,900 self-host-critical sites.
 - `getImplicitSelfDecl()` (AST) — `self` is a compiler-synthesised `ParamDecl`,
   never user-written. Our parser synthesises the receiver param.
 - `docs/OwnershipManifesto.md` — `mutating` ⇒ `inout self`, statically checkable
-  because the caller retains the storage. This is With's share-place (D5).
+  because the caller retains the storage. This is With's by-place receiver mode
+  (D12).
 - SE-0377 `consuming`/`borrowing` — Swift's later split of ownership on the
   receiver; our `move fn` is `consuming`, plain `fn` is `borrowing`.

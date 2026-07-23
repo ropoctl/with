@@ -1,8 +1,9 @@
 # With Language — Implementation Roadmap
 
 - Language: D22 uniform keyed-map views + transparent origins + contextual Copy
-  (**accepted 2026-07-23; implementation design and implementation still in
-  progress; see spec v7.2 and `docs/decisions.md` D22**)
+  (**accepted 2026-07-23; implementation in progress;
+  `docs/d22-Eric-Ruling.md` is canonical, and
+  `docs/d22-implementation-plan.md` is the conforming execution plan**)
 
 - App: Crux
 - App: Weld (depends on Crux)
