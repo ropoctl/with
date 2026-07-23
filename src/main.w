@@ -33,6 +33,7 @@ use BuildGraphCache
 use compiler.DriverOptions
 use Analysis
 use ReceiverMigration
+use TargetSpec
 
 extern fn with_arg_count() -> i32
 extern fn with_arg_at(idx: i32) -> str
@@ -2081,9 +2082,10 @@ fn build_command_validate_target(options: &BuildCommandOptions, cfg: &ProjectCon
     if options.target_kind < 0:
         with_eprint("error: invalid with.toml: unsupported target.default '" ++ cfg.target_default ++ "'")
         return 1
-    // §18.5: non-native target selections must fail loudly until
-    // cross-target codegen/linking exists; never fall back to native.
-    if not build_graph_target_is_host(options.target_kind):
+    // §18.5: a non-native target selection either has a real cross
+    // path (target_spec_cross_supported) or fails loudly; it never
+    // falls back to native output.
+    if not build_graph_target_is_host(options.target_kind) and not target_spec_cross_supported(options.target_kind):
         with_eprint("error: cross-target build for '" ++ build_graph_target_name(options.target_kind) ++ "' is not implemented yet; host is " ++ build_graph_target_name(build_graph_host_target_kind()))
         return 1
     0

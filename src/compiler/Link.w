@@ -1,5 +1,6 @@
 use Archive
 use compiler.Runtime
+use TargetSpec
 
 extern let with_embedded_cimport_stubs_o_start: u8
 extern let with_embedded_cimport_stubs_o_end: u8
@@ -324,53 +325,62 @@ fn link_stage_make_link_command(linker: str, obj_path: str, bin_path: str, extra
 fn link_stage_file_exists(path: str) -> bool:
     runtime_file_exists(path) != 0
 
-fn link_stage_linux_dynamic_linker() -> str:
-    if link_stage_file_exists("/lib64/ld-linux-x86-64.so.2"):
+// Sysroot prefix for Linux x86_64 link inputs. Native Linux hosts link
+// against the real root (""); a cross host must supply a Linux sysroot
+// (crt objects, libc, libgcc) via WITH_LINUX_SYSROOT.
+fn link_stage_linux_sysroot() -> str:
+    let explicit = runtime_getenv("WITH_LINUX_SYSROOT")
+    if explicit.len() > 0:
+        return explicit
+    ""
+
+fn link_stage_linux_dynamic_linker(sysroot: str) -> str:
+    if link_stage_file_exists(sysroot ++ "/lib64/ld-linux-x86-64.so.2"):
         return "/lib64/ld-linux-x86-64.so.2"
-    if link_stage_file_exists("/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"):
+    if link_stage_file_exists(sysroot ++ "/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"):
         return "/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"
     ""
 
-fn link_stage_linux_crt_object(name: str) -> str:
-    let usr = "/usr/lib/x86_64-linux-gnu/" ++ name
+fn link_stage_linux_crt_object(sysroot: str, name: str) -> str:
+    let usr = sysroot ++ "/usr/lib/x86_64-linux-gnu/" ++ name
     if link_stage_file_exists(usr):
         return usr
-    let lib = "/lib/x86_64-linux-gnu/" ++ name
+    let lib = sysroot ++ "/lib/x86_64-linux-gnu/" ++ name
     if link_stage_file_exists(lib):
         return lib
     ""
 
-fn link_stage_linux_gcc_dir() -> str:
+fn link_stage_linux_gcc_dir(sysroot: str) -> str:
     let candidates: Vec[str] = Vec.new()
-    candidates.push("/usr/lib/gcc/x86_64-linux-gnu/15")
-    candidates.push("/usr/lib/gcc/x86_64-linux-gnu/14")
-    candidates.push("/usr/lib/gcc/x86_64-linux-gnu/13")
-    candidates.push("/usr/lib/gcc/x86_64-linux-gnu/12")
-    candidates.push("/usr/lib/gcc/x86_64-linux-gnu/11")
-    candidates.push("/usr/lib/gcc/x86_64-linux-gnu/10")
-    candidates.push("/usr/lib/gcc/x86_64-linux-gnu/9")
+    candidates.push(sysroot ++ "/usr/lib/gcc/x86_64-linux-gnu/15")
+    candidates.push(sysroot ++ "/usr/lib/gcc/x86_64-linux-gnu/14")
+    candidates.push(sysroot ++ "/usr/lib/gcc/x86_64-linux-gnu/13")
+    candidates.push(sysroot ++ "/usr/lib/gcc/x86_64-linux-gnu/12")
+    candidates.push(sysroot ++ "/usr/lib/gcc/x86_64-linux-gnu/11")
+    candidates.push(sysroot ++ "/usr/lib/gcc/x86_64-linux-gnu/10")
+    candidates.push(sysroot ++ "/usr/lib/gcc/x86_64-linux-gnu/9")
     for i in 0..candidates.len() as i32:
         let dir = candidates.get(i as i64)
         if link_stage_file_exists(dir ++ "/crtbegin.o"):
             return dir
     ""
 
-fn link_stage_linux_system_lib_path(name: str) -> str:
+fn link_stage_linux_system_lib_path(sysroot: str, name: str) -> str:
     if name == "z":
-        if link_stage_file_exists("/usr/lib/x86_64-linux-gnu/libz.so"):
+        if link_stage_file_exists(sysroot ++ "/usr/lib/x86_64-linux-gnu/libz.so"):
             return ""
-        if link_stage_file_exists("/usr/lib/x86_64-linux-gnu/libz.so.1"):
-            return "/usr/lib/x86_64-linux-gnu/libz.so.1"
+        if link_stage_file_exists(sysroot ++ "/usr/lib/x86_64-linux-gnu/libz.so.1"):
+            return sysroot ++ "/usr/lib/x86_64-linux-gnu/libz.so.1"
     if name == "zstd":
-        if link_stage_file_exists("/usr/lib/x86_64-linux-gnu/libzstd.so"):
+        if link_stage_file_exists(sysroot ++ "/usr/lib/x86_64-linux-gnu/libzstd.so"):
             return ""
-        if link_stage_file_exists("/usr/lib/x86_64-linux-gnu/libzstd.so.1"):
-            return "/usr/lib/x86_64-linux-gnu/libzstd.so.1"
+        if link_stage_file_exists(sysroot ++ "/usr/lib/x86_64-linux-gnu/libzstd.so.1"):
+            return sysroot ++ "/usr/lib/x86_64-linux-gnu/libzstd.so.1"
     if name == "xml2":
-        if link_stage_file_exists("/usr/lib/x86_64-linux-gnu/libxml2.so"):
+        if link_stage_file_exists(sysroot ++ "/usr/lib/x86_64-linux-gnu/libxml2.so"):
             return ""
-        if link_stage_file_exists("/usr/lib/x86_64-linux-gnu/libxml2.so.16"):
-            return "/usr/lib/x86_64-linux-gnu/libxml2.so.16"
+        if link_stage_file_exists(sysroot ++ "/usr/lib/x86_64-linux-gnu/libxml2.so.16"):
+            return sysroot ++ "/usr/lib/x86_64-linux-gnu/libxml2.so.16"
     ""
 
 fn link_stage_make_darwin_llvm_link_command(llvm_ld: str, obj_path: str, bin_path: str, extras: Vec[str], link_libs: Vec[str], link_args: Vec[str]) -> LinkStageCommand:
@@ -410,13 +420,19 @@ fn link_stage_make_linux_llvm_link_command(llvm_ld: str, obj_path: str, bin_path
     let env: Vec[LinkStageEnvVar] = Vec.new()
     let inputs: Vec[str] = Vec.new()
     let outputs: Vec[str] = Vec.new()
-    let dynamic_linker = link_stage_linux_dynamic_linker()
-    let crt1 = link_stage_linux_crt_object("crt1.o")
-    let crti = link_stage_linux_crt_object("crti.o")
-    let crtn = link_stage_linux_crt_object("crtn.o")
-    let gcc_dir = link_stage_linux_gcc_dir()
+    let sysroot = link_stage_linux_sysroot()
+    let dynamic_linker = link_stage_linux_dynamic_linker(sysroot)
+    let crt1 = link_stage_linux_crt_object(sysroot, "crt1.o")
+    let crti = link_stage_linux_crt_object(sysroot, "crti.o")
+    let crtn = link_stage_linux_crt_object(sysroot, "crtn.o")
+    let gcc_dir = link_stage_linux_gcc_dir(sysroot)
     if dynamic_linker.len() == 0 or crt1.len() == 0 or crti.len() == 0 or crtn.len() == 0 or gcc_dir.len() == 0:
-        with_eprint("error: could not locate Linux x86_64 crt/linker files for direct ld.lld link")
+        if sysroot.len() > 0:
+            with_eprint("error: could not locate Linux x86_64 crt/linker files under sysroot " ++ sysroot)
+        else if runtime_sysinfo_os() == "Linux":
+            with_eprint("error: could not locate Linux x86_64 crt/linker files for direct ld.lld link")
+        else:
+            with_eprint("error: linking a Linux x86_64 binary from this host needs a Linux sysroot (crt1.o, libc, libgcc); set WITH_LINUX_SYSROOT=<dir>")
         return LinkStageCommand { linker: "", args, cwd: "", env, inputs, outputs, cleanup_files: Vec.new() }
 
     args.push("-m")
@@ -427,6 +443,10 @@ fn link_stage_make_linux_llvm_link_command(llvm_ld: str, obj_path: str, bin_path
     args.push("--gc-sections")
     args.push("--icf=all")
     args.push("--as-needed")
+    if sysroot.len() > 0:
+        // Keep every implicit library search inside the sysroot; the
+        // embedded dynamic-linker path below stays the target's own.
+        args.push("--sysroot=" ++ sysroot)
     args.push("-dynamic-linker")
     args.push(dynamic_linker)
     args.push("-o")
@@ -449,16 +469,16 @@ fn link_stage_make_linux_llvm_link_command(llvm_ld: str, obj_path: str, bin_path
         inputs.push(extra)
 
     args.push("-L" ++ gcc_dir)
-    args.push("-L/usr/lib/x86_64-linux-gnu")
-    args.push("-L/lib/x86_64-linux-gnu")
-    args.push("-L/usr/lib")
-    args.push("-L/lib")
+    args.push("-L" ++ sysroot ++ "/usr/lib/x86_64-linux-gnu")
+    args.push("-L" ++ sysroot ++ "/lib/x86_64-linux-gnu")
+    args.push("-L" ++ sysroot ++ "/usr/lib")
+    args.push("-L" ++ sysroot ++ "/lib")
     for i in 0..link_libs.len() as i32:
         let lib = link_libs.get(i as i64)
         if link_stage_framework_name(lib).len() > 0:
             with_eprint("error: link: \"" ++ lib ++ "\" — Apple frameworks are only available on macOS targets\n")
         else:
-            let fallback_lib = link_stage_linux_system_lib_path(lib)
+            let fallback_lib = link_stage_linux_system_lib_path(sysroot, lib)
             if fallback_lib.len() > 0:
                 args.push(fallback_lib)
                 inputs.push(fallback_lib)
@@ -532,7 +552,29 @@ fn link_stage_make_windows_llvm_link_command(llvm_ld: str, obj_path: str, bin_pa
     let cleanup_files = link_stage_collect_cleanup_files(&extras)
     LinkStageCommand { linker: llvm_ld, args, cwd: "", env, inputs, outputs, cleanup_files }
 
+// The lld flavor for a Linux ELF link. The build's llvm_ld metadata
+// records the host flavor (ld64.lld on macOS); the ELF driver ships
+// beside it in the same SDK bin directory.
+fn link_stage_elf_lld_for(llvm_ld: str) -> str:
+    if link_stage_basename(llvm_ld) == "ld.lld":
+        return llvm_ld
+    let sibling = link_stage_dirname(llvm_ld) ++ "/ld.lld"
+    if link_stage_file_exists(sibling):
+        return sibling
+    ""
+
 fn link_stage_make_llvm_link_command(llvm_ld: str, obj_path: str, bin_path: str, extras: Vec[str], link_libs: Vec[str], link_args: Vec[str]) -> LinkStageCommand:
+    // A --target selection overrides the host: pick the target's link
+    // recipe and lld flavor (§18.5 — cross-compilation is a normal mode).
+    if not target_spec_is_native():
+        if target_spec_active_kind() == 1:
+            let elf_ld = link_stage_elf_lld_for(llvm_ld)
+            if elf_ld.len() == 0:
+                with_eprint("error: cross link needs the ELF lld driver (ld.lld) next to " ++ llvm_ld)
+                return LinkStageCommand { linker: "", args: Vec.new(), cwd: "", env: Vec.new(), inputs: Vec.new(), outputs: Vec.new(), cleanup_files: Vec.new() }
+            return link_stage_make_linux_llvm_link_command(elf_ld, obj_path, bin_path, extras, link_libs, link_args)
+        with_eprint("error: unsupported cross link target: " ++ target_spec_name())
+        return LinkStageCommand { linker: "", args: Vec.new(), cwd: "", env: Vec.new(), inputs: Vec.new(), outputs: Vec.new(), cleanup_files: Vec.new() }
     let os = runtime_sysinfo_os()
     let arch = runtime_sysinfo_arch()
     if os == "Linux" and arch == "x86_64":
@@ -634,11 +676,16 @@ fn link_stage_link_with_extras_and_libs_plan(obj_path: str, bin_path: str, extra
     link_stage_link_with_extras_libs_args_plan(obj_path, bin_path, extras, link_libs, link_args)
 
 fn link_stage_link_with_extras_libs_args_plan(obj_path: str, bin_path: str, extras: Vec[str], link_libs: Vec[str], link_args: Vec[str]) -> LinkStagePlan:
-    if runtime_sysinfo_os() == "Windows":
+    // Cross links never go through the host cc driver: route to the
+    // LLVM linker plan, which dispatches on the active target.
+    if runtime_sysinfo_os() == "Windows" or not target_spec_is_native():
         let root = link_stage_resolve_runtime_root()
         let ld_path = link_stage_read_file_trimmed(root ++ "/llvm_ld")
         if ld_path.len() == 0:
-            with_eprint("error: missing Windows LLVM linker metadata")
+            if runtime_sysinfo_os() == "Windows":
+                with_eprint("error: missing Windows LLVM linker metadata")
+            else:
+                with_eprint("error: cross-target link requires LLVM linker metadata (" ++ root ++ "/llvm_ld)")
             return link_stage_plan_fail()
         return link_stage_link_with_llvm_args_plan(obj_path, bin_path, extras, link_libs, link_args, ld_path)
     let command = link_stage_make_link_command("cc", obj_path, bin_path, extras, link_libs, link_args)
@@ -699,6 +746,15 @@ fn link_stage_undefined_symbols_for_object(obj_path: str) -> str:
             nm_tool = link_stage_dirname(ld_path) ++ "/llvm-nm.exe"
         else:
             nm_tool = "llvm-nm.exe"
+    else if not target_spec_is_native():
+        // Cross objects are foreign to the host toolchain; use the
+        // SDK's llvm-nm (beside lld) when it's available.
+        let root = link_stage_resolve_runtime_root()
+        let ld_path = link_stage_read_file_trimmed(root ++ "/llvm_ld")
+        if ld_path.len() > 0:
+            let llvm_nm = link_stage_dirname(ld_path) ++ "/llvm-nm"
+            if link_stage_file_exists(llvm_nm):
+                nm_tool = llvm_nm
     argv = link_stage_argv_append(argv, nm_tool)
     argv = link_stage_argv_append(argv, "-u")
     argv = link_stage_argv_append(argv, obj_path)
@@ -815,6 +871,15 @@ fn link_stage_artifact_root() -> str:
 
 fn link_stage_find_runtime_object_path(name: str) -> str:
     let root = link_stage_resolve_runtime_root()
+    // Cross targets only ever link runtime objects built for the
+    // target; the embedded objects are host-built and never a valid
+    // fallback here (§18.5: fail loudly, never link native output).
+    if not target_spec_is_native():
+        let cross_path = root ++ "/cross/" ++ target_spec_name() ++ "/" ++ name
+        if runtime_read_file(cross_path).len() > 0:
+            return cross_path
+        with_eprint("error: missing " ++ target_spec_name() ++ " runtime object: " ++ cross_path ++ " (run `with build :cross-rt` first)")
+        return ""
     let p = root ++ "/" ++ name
     if runtime_read_file(p).len() > 0:
         return p
@@ -826,6 +891,16 @@ fn link_stage_find_runtime_object_path(name: str) -> str:
     if link_stage_extract_runtime_obj(name, tmp_path) == 0:
         return tmp_path
     ""
+
+// The platform runtime object for the ACTIVE target (native resolves
+// to the host's, exactly as before cross targets existed).
+fn link_stage_platform_runtime_object() -> str:
+    if not target_spec_is_native():
+        if target_spec_active_kind() == 1:
+            return "rt_linux_x86_64.o"
+        with_eprint("error: unsupported cross runtime platform: " ++ target_spec_name())
+        return ""
+    link_stage_host_platform_runtime_object()
 
 fn link_stage_host_platform_runtime_object() -> str:
     let os = runtime_sysinfo_os()
@@ -1014,7 +1089,7 @@ fn link_stage_link_object_to_binary_plan_with_units(obj_path: str, extra_objects
                 with_eprint("error: missing rt_core.o")
                 return link_stage_plan_fail()
             extras.push(rt_core_path)
-            let rt_platform_object = link_stage_host_platform_runtime_object()
+            let rt_platform_object = link_stage_platform_runtime_object()
             if rt_platform_object.len() == 0:
                 return link_stage_plan_fail()
             let rt_platform_path = link_stage_find_runtime_object_path(rt_platform_object)
@@ -1058,7 +1133,7 @@ fn link_stage_link_object_to_binary_plan_with_units(obj_path: str, extra_objects
                 with_eprint("error: missing rt_core.o")
                 return link_stage_plan_fail()
             extras.push(rt_core_path)
-            let rt_platform_object = link_stage_host_platform_runtime_object()
+            let rt_platform_object = link_stage_platform_runtime_object()
             if rt_platform_object.len() == 0:
                 return link_stage_plan_fail()
             let rt_platform_path = link_stage_find_runtime_object_path(rt_platform_object)
@@ -1102,7 +1177,7 @@ fn link_stage_link_object_to_binary_plan_with_units(obj_path: str, extra_objects
                 with_eprint("error: missing rt_core.o")
                 return link_stage_plan_fail()
             extras.push(rt_core_path)
-            let rt_platform_object = link_stage_host_platform_runtime_object()
+            let rt_platform_object = link_stage_platform_runtime_object()
             if rt_platform_object.len() == 0:
                 return link_stage_plan_fail()
             let rt_platform_path = link_stage_find_runtime_object_path(rt_platform_object)

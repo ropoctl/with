@@ -9,15 +9,16 @@ use Span
 use Lexer
 use InternPool
 use Diagnostic
+use TargetSpec
 
 extern fn with_parse_i64(s: str) -> i64
 extern fn str_from_byte(b: i32) -> str
-extern fn with_sysinfo_arch() -> str
 
 // Canonical active target architecture for @[target("arch")] guards.
-// Until CLI-selected cross targets land (#425) this is the host arch.
+// Resolved from the driver-selected --target (§18.5); native builds
+// resolve to the host arch as before.
 fn parser_active_arch() -> str:
-    let a = with_sysinfo_arch()
+    let a = target_spec_arch()
     if a == "x86_64" or a == "amd64": "x86_64" else: "aarch64"
 pub type Parser {
     tokens: TokenList,

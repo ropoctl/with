@@ -14,6 +14,7 @@ use std.crypto.sha256
 use render
 use CiMigrate
 use Overflow
+use TargetSpec
 
 extern fn with_eprint(s: str) -> Unit
 extern fn with_fs_read_file(path: str) -> str
@@ -65,8 +66,6 @@ extern fn with_str_from_byte(byte: i32) -> str
 extern fn with_str_starts_with(s: str, prefix: str) -> i32
 extern fn with_str_ends_with(s: str, suffix: str) -> i32
 extern fn with_str_replace(s: str, old: str, new_s: str) -> str
-extern fn with_sysinfo_os() -> str
-extern fn with_sysinfo_arch() -> str
 extern fn with_sysinfo_hostname() -> str
 
 const COMPTIME_RECURSION_LIMIT: i32 = 256
@@ -6723,10 +6722,13 @@ impl ComptimeEvaluator:
         if fn_name == "with_sysinfo_os" or fn_name == "with_sysinfo_arch" or fn_name == "with_sysinfo_hostname":
             if arg_values.len() as i32 != 0:
                 return self.fail(node, "sysinfo runtime call takes no arguments")
+            // os/arch reflect the --target selection so comptime platform
+            // dispatch bakes target values, never the host's (§18.5).
+            // hostname is inherently a host property and stays host.
             if fn_name == "with_sysinfo_os":
-                return comptime_control_value(comptime_value_str(with_sysinfo_os()))
+                return comptime_control_value(comptime_value_str(target_spec_os()))
             if fn_name == "with_sysinfo_arch":
-                return comptime_control_value(comptime_value_str(with_sysinfo_arch()))
+                return comptime_control_value(comptime_value_str(target_spec_arch()))
             return comptime_control_value(comptime_value_str(with_sysinfo_hostname()))
         comptime_control_error()
 

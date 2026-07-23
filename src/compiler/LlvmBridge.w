@@ -528,7 +528,30 @@ fn codegen_level(level: i32) -> i32:
     if level == 3: return LLVM_CodeGenLevelAggressive
     LLVM_CodeGenLevelDefault
 
-fn llvm_host_object_triple(default_triple: *mut u8) -> *const u8:
+// Active target triple override, set once by the driver for --target
+// cross builds (§18.5). Fixed buffer because the bridge is compiled as
+// a standalone object (llvm_bridge.o) and stays import-free. Empty =
+// native: keep the historical host-triple behavior.
+var wl_active_triple_buf: [128]u8 = [0 as u8; 128]
+var wl_active_triple_len: i32 = 0
+
+pub fn wl_set_active_target_triple(triple: str) -> Unit:
+    var n = triple.len() as i32
+    if n > 127:
+        n = 127
+    var i = 0
+    while i < n:
+        wl_active_triple_buf[i as i64] = triple.byte_at(i as i64)
+        i = i + 1
+    wl_active_triple_buf[n as i64] = 0 as u8
+    wl_active_triple_len = n
+
+// The triple every emission path (target machine, .s assembly, IR
+// compile) targets: the driver's --target override when set, else the
+// host object triple.
+fn llvm_object_triple(default_triple: *mut u8) -> *const u8:
+    if wl_active_triple_len > 0:
+        return &wl_active_triple_buf as *const u8
     if rt_sysinfo_os() == "Macos" and (rt_sysinfo_arch() == "armv8" or rt_sysinfo_arch() == "aarch64"):
         return c"arm64-apple-macosx11.0.0".ptr
     default_triple as *const u8
@@ -536,7 +559,7 @@ fn llvm_host_object_triple(default_triple: *mut u8) -> *const u8:
 pub fn wl_init_target_machine(mod_ref: i64, level: i32) -> i64:
     unsafe:
         let default_triple = LLVMGetDefaultTargetTriple()
-        let triple = llvm_host_object_triple(default_triple)
+        let triple = llvm_object_triple(default_triple)
         var target: *mut u8 = 0 as *mut u8
         var err: *mut u8 = 0 as *mut u8
         if LLVMGetTargetFromTriple(triple, &raw mut target, &raw mut err) != 0:
@@ -1489,7 +1512,7 @@ pub fn wl_assemble_to_object(source_path: str, output_path: str) -> i32:
         let ctx = LLVMContextCreate()
         let m = LLVMModuleCreateWithNameInContext("asm\0" as *const u8, ctx)
         let default_triple = LLVMGetDefaultTargetTriple()
-        let triple = llvm_host_object_triple(default_triple)
+        let triple = llvm_object_triple(default_triple)
         LLVMSetTarget(m, triple)
         LLVMSetModuleInlineAsm2(m, asm_ptr, asm_len)
         LLVMDisposeMemoryBuffer(mem_buf)
@@ -1538,7 +1561,7 @@ pub fn wl_compile_ir_to_object(source_path: str, output_path: str) -> i32:
             LLVMContextDispose(ctx)
             return 1
         let default_triple = LLVMGetDefaultTargetTriple()
-        let triple = llvm_host_object_triple(default_triple)
+        let triple = llvm_object_triple(default_triple)
         LLVMSetTarget(m, triple)
         var target: *mut u8 = 0 as *mut u8
         var terr: *mut u8 = 0 as *mut u8
