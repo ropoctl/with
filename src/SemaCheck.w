@@ -8884,8 +8884,9 @@ impl Sema:
                 self.record_effect_edge(sig_idx, param_i, arg_node)
                 // D5/P1 §3.8: method arguments use the same deferred ownership
                 // decision as ordinary calls. A plain value is share-place unless
-                // the callee's FINAL effect makes the parameter owned; only then
-                // does finalize_call_site_ownership require explicit move/copy.
+                // the callee's FINAL effect makes the parameter owned; then the
+                // consuming signature itself authorizes the transfer (§3.8 — no
+                // call-site `move` ceremony).
                 let arg_kind = self.ast.kind(arg_node)
                 if arg_kind == NodeKind.NK_MOVE_ARG:
                     if self.slice_coerce_args.contains(arg_node) == 0:
@@ -13807,11 +13808,11 @@ impl Sema:
                 // when this callee is a forward reference (its body not yet checked).
                 self.record_effect_edge(sig_idx, param_i, trans_nd)
                 // #D5/P1 share-place (§3.8): a plain (non-move/copy) non-Copy value
-                // argument is NOT consumed — the caller keeps ownership and drops it
-                // in its own scope. Only an explicit `move`/`copy` transfers. A plain
-                // argument passed to an OWNED (consume/escape_value) parameter is a
-                // compile error requiring `move`/`copy`, enforced post-fixpoint by
-                // finalize_call_site_ownership with COMPLETE effects (recorded here so
+                // argument to a share-place param is NOT consumed — the caller keeps
+                // ownership and drops it in its own scope. A plain argument passed
+                // to an OWNED (consume/escape_value) parameter transfers ownership
+                // on the authority of the consuming signature itself (§3.8); the
+                // post-fixpoint pass only stamps move-site liveness (recorded here so
                 // a forward-reference owned param cannot slip through as share-place).
                 // Extern/C params receive a bit-copy and do not own — no transfer.
                 let eff_arg_nd = if has_resolved != 0: self.get_resolved_call_arg(node, ai) else: self.ast.get_extra(resolved_extra_start + ai)

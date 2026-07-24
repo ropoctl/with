@@ -449,18 +449,16 @@ type Sema {
     effect_flow_edges: Vec[i32],
     effect_flow_projections: Vec[i32],
 
-    // #D5/P1 share-place: recorded plain (non-move/copy) non-Copy value arguments,
-    // flattened as 3-tuples [arg_node, callee_sig, callee_pi]. A plain argument is
-    // share-place (the caller keeps ownership); after effects finalize,
-    // `finalize_call_site_ownership` errors on any whose param is OWNED
-    // (consume/escape_value → not value_ref_abi), requiring an explicit
-    // `move`/`copy`. Recorded in pass 1, resolved post-fixpoint so the ownership
-    // verdict uses COMPLETE effects (a forward-ref owned param must not slip
-    // through as share-place — that would be a double-free).
-    // Stride-8 records: [arg_node, callee_sig, callee_pi, file_id, root_sym,
-    // use_seq, loop_depth, liveness] — liveness stamped at body end (0=unknown,
-    // 1=last-use, 2=live-after); backs the `move-sites` analysis request
-    // (docs/deep-debugging-tools.md).
+    // #D5/P1 share-place: recorded plain (non-move/copy) non-Copy value arguments.
+    // A plain argument to a share-place param leaves ownership with the caller;
+    // a plain argument to an OWNED param (consume/escape_value → not
+    // value_ref_abi) is an ordinary ownership transfer per §3.8 — the consuming
+    // signature is the contract, so no call-site `move` spelling is required.
+    // Recorded in pass 1; liveness resolved post-fixpoint with COMPLETE effects.
+    // Stride-9 records: [arg_node, callee_sig, callee_pi, file_id, root_sym,
+    // field_sym, use_seq, loop_depth, liveness] — liveness stamped at body end
+    // (0=unknown, 1=last-use, 2=live-after); backs the `move-sites` analysis
+    // request (docs/deep-debugging-tools.md).
     consume_call_sites: Vec[i32],
     // move-sites: use sequencing. ONE persistent map per key kind, one owner —
     // bodies are separated by an epoch packed into every value (epoch*2^32 +
@@ -5363,8 +5361,12 @@ impl Sema:
             else if declared == ReceiverMode.Read and required_mode != "read":
                 let keyword = if required_mode == "mut": "mut fn" else: "move fn"
                 self.emit_error(f"read receiver is too weak; compiler effects require `{keyword}` for '{name}'", node)
-            else if declared == ReceiverMode.Mut and required_mode == "move":
-                self.emit_error(f"mut receiver is too weak; compiler effects require `move fn` for '{name}'", node)
+            // D21: a `mut fn` receiver may thread its place through consuming
+            // pipeline calls (take-and-return stays an in-place update of the
+            // receiver place), so a declared Mut receiver is never escalated to
+            // `move fn` here. The current effect fixpoint over-approximates
+            // those pipelines as consume/escape; the place-threading analysis
+            // that re-tightens this check lands with the D21 implementation.
 
 fn receiver_required_mode_text(eff: i32) -> str:
     if (eff & (EFF_CONSUME | EFF_ESCAPE_VALUE)) != 0: return "move"
@@ -5579,28 +5581,12 @@ impl Sema:
                     self.consume_call_sites.set_i32((i + 8) as i64, verdict)
             i = i + 9
 
-    // #D5/P1: with effects + share-place ABI final, a plain non-Copy argument passed
-    // to an OWNED parameter (consume/escape_value → not share-place) must be given up
-    // explicitly. Emit the "requires move/copy" error for each such NAMED binding
-    // (an rvalue is consumed directly and needs nothing). Runs after
-    // assign_share_place_abi so the share-place verdict is complete — never
-    // mis-classifying a forward-reference owned param as share-place.
-    mut fn finalize_call_site_ownership():
-        let n = self.consume_call_sites.len() as i32
-        var i = 0
-        while i + 8 < n:
-            let arg_node = self.consume_call_sites.get(i as i64)
-            let callee_sig = self.consume_call_sites.get((i + 1) as i64)
-            let callee_pi = self.consume_call_sites.get((i + 2) as i64)
-            let file_id = self.consume_call_sites.get((i + 3) as i64)
-            i = i + 9
-            // share-place param: the caller keeps ownership; no transfer needed.
-            // (Only movable named bindings were recorded, so an owned param here is a
-            // genuine ownership transfer that must be made explicit.)
-            if self.sig_param_uses_value_ref_abi(callee_sig, callee_pi) != 0:
-                continue
-            self.local_file_id = file_id
-            self.emit_error("this parameter takes ownership of a non-Copy value (it is consumed or escapes the call); pass `move x` to transfer ownership, or `copy x` for an independent copy (§3.8)", arg_node)
+    // #D5 superseded (§3.8): the consuming signature is the authoritative
+    // ownership contract, so a plain non-Copy argument to an owned parameter
+    // is an ordinary ownership transfer — `move x`/`copy x` remain explicit
+    // spellings of intent, never required ceremony. The recorded stride-9
+    // sites still carry the liveness verdicts that back the `move-sites`
+    // analysis request; no call-site diagnostic is emitted.
 
     fn get_sig(name: i32) -> i32:
         if self.sig_lookup.contains(name):
@@ -5874,10 +5860,11 @@ impl Sema:
         self.fixpoint_effect_flow()
         self.finalize_receiver_requirements()
         self.enforce_receiver_modes()
-        // #D5/P1: classify share-place params (IndirectPlace) from the final effect,
-        // then require explicit move/copy for plain args to owned params.
+        // #D5/P1: classify share-place params (IndirectPlace) from the final
+        // effect. §3.8: the consuming signature is the ownership contract, so
+        // plain args to owned params transfer ownership without call-site
+        // `move` ceremony — no post-fixpoint call-site diagnostic runs.
         self.assign_share_place_abi()
-        self.finalize_call_site_ownership()
         self.check_reachable_comptime_errors()
 
     mut fn prepare_for_comptime_transform():
