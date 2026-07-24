@@ -11837,11 +11837,16 @@ impl Sema:
         let index = self.enum_variant_index_for_type(enum_decl, bare_variant_sym)
         if index < 0:
             return -1
+        // Only a qualified (enum-scoped) key may be trusted: disc_values is keyed
+        // by variant name, so a bare-name lookup returns whichever enum registered
+        // that name last. A DiscEnum variant `None = 0` would otherwise shadow
+        // `Option.None` (a payload enum whose implicit discriminant is its index).
+        // Both enum kinds register their qualified variant in variant_lookup, so
+        // qualified_enum_variant_sym always yields the genuine `Enum.Variant` key;
+        // payload enums (no disc_values entry) correctly fall through to `index`.
         let qualified = self.qualified_enum_variant_sym(enum_decl, bare_variant_sym)
         if self.disc_values.contains(qualified):
             return self.disc_values.get(qualified).unwrap()
-        if self.disc_values.contains(bare_variant_sym):
-            return self.disc_values.get(bare_variant_sym).unwrap()
         index
 
     mut fn enum_accessor_return_type(enum_tid: i32, variant_sym: i32, accessor_kind: i32) -> i32:
@@ -19680,12 +19685,12 @@ impl Sema:
         if type_name_sym != 0:
             let qual_name = self.pool_resolve(type_name_sym) ++ "." ++ self.pool_resolve(name_sym)
             // Enum checking interns qualified variants before storing disc_values;
-            // reflection and codegen only look them up.
+            // reflection and codegen only look them up. A bare-name fallback is
+            // unsafe: disc_values is name-keyed, so a DiscEnum `None = 0` would
+            // shadow a payload enum's `Option.None` (implicit disc = index).
             let qual_sym = self.pool_lookup_symbol(qual_name)
             if qual_sym != 0 and self.disc_values.contains(qual_sym):
                 return self.disc_values.get(qual_sym).unwrap() as i64
-        if self.disc_values.contains(name_sym):
-            return self.disc_values.get(name_sym).unwrap() as i64
         variant_index as i64
 
     mut fn type_reflection_variant_payload_type(tid: i32, variant_index: i32, payload_index: i32) -> i32:
