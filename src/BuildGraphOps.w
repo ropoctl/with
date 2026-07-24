@@ -300,10 +300,14 @@ pub fn build_graph_embed_object_files(root: str, target: &BuildGraphTarget) -> i
     // The embed target's entry names the PLATFORM the assembly is for
     // (e.g. "linux_x86_64" for a cross-built compiler); empty = host.
     var macho_sections = build_graph_host_target_kind() == 3 or build_graph_host_target_kind() == 4
+    var coff_sections = build_graph_host_target_kind() == 5
     if target.entry.len() > 0:
         macho_sections = target.entry.starts_with("darwin")
+        coff_sections = target.entry.starts_with("windows")
     if macho_sections:
         asm_text = asm_text ++ ".section __TEXT,__const\n.subsections_via_symbols\n\n"
+    else if coff_sections:
+        asm_text = asm_text ++ ".section .rdata,\"dr\"\n\n"
     else:
         asm_text = asm_text ++ ".section .rodata\n\n"
     for ii in 0..target.inputs.len() as i32:
