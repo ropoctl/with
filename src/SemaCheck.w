@@ -8488,16 +8488,20 @@ impl Sema:
             else if else_is_never != 0 and then_type != 0:
                 result_type = then_type
             else if then_type != 0 and else_type != 0:
-                if self.types_compatible(then_type as i32, else_type as i32) != 0:
+                // D22 contextual-Copy join FIRST, before ordinary compatibility:
+                // when exactly one arm is an owned Copy anchor and the other a
+                // compatible &Copy view, the view materializes to the owned value
+                // (arm-order-independent). Checking this ahead of types_compatible
+                // prevents preferred_compatible_type from picking the &Copy view as
+                // the join type (which then materializes inconsistently across the
+                // branch/join/return and double-derefs).
+                let joined = self.join_contextual_copy(then_body, then_type as i32, else_body, else_type as i32)
+                if joined != 0:
+                    result_type = joined as TypeId
+                else if self.types_compatible(then_type as i32, else_type as i32) != 0:
                     result_type = self.preferred_compatible_type(then_type, else_type)
                 else:
                     result_type = self.arithmetic_result_type(then_type, else_type)
-                    if result_type == 0:
-                        // D22 contextual-Copy join: an owned Copy anchor lets a
-                        // compatible &Copy arm materialize to the owned value.
-                        let joined = self.join_contextual_copy(then_body, then_type as i32, else_body, else_type as i32)
-                        if joined != 0:
-                            result_type = joined as TypeId
                     if result_type == 0 and in_value_context:
                         // #549: a value-position if must not silently poison to
                         // <error>. Distinct types compare by base first, so
