@@ -3980,7 +3980,12 @@ impl Codegen:
         var byval_types: Vec[i64] = Vec.new()
         let byval_types_opt = self.extern_fn_byval_types.get(concrete.sym)
         if byval_types_opt.is_some():
-            byval_types = byval_types_opt.unwrap()
+            // D22: copy the Copy elements; `get` returns a borrow of the map's Vec.
+            let bt_src = byval_types_opt.unwrap()
+            var bt_i = 0
+            while bt_i < bt_src.len() as i32:
+                byval_types.push(bt_src.get(bt_i as i64))
+                bt_i = bt_i + 1
         self.apply_c_abi_call_attrs(call, 0, 0, byval_mask, byval_types, 1, 0)
 
     mut fn mir_emit_guarded_concrete_drop(ptr: i64, ty: i64, concrete: ConcreteMirFunction):
@@ -14504,13 +14509,21 @@ impl Codegen:
                 abi_byval_mask = bv_opt.unwrap() as i64
             let bvt_opt = self.extern_fn_byval_types.get(callee_fn_sym)
             if bvt_opt.is_some():
-                abi_byval_types = bvt_opt.unwrap()
+                let bvt_src = bvt_opt.unwrap()
+                var bvt_i = 0
+                while bvt_i < bvt_src.len() as i32:
+                    abi_byval_types.push(bvt_src.get(bvt_i as i64))
+                    bvt_i = bvt_i + 1
             let dp_opt = self.extern_fn_direct_params.get(callee_fn_sym)
             if dp_opt.is_some():
                 abi_direct_mask = dp_opt.unwrap() as i64
             let dpt_opt = self.extern_fn_direct_param_types.get(callee_fn_sym)
             if dpt_opt.is_some():
-                abi_direct_types = dpt_opt.unwrap()
+                let dpt_src = dpt_opt.unwrap()
+                var dpt_i = 0
+                while dpt_i < dpt_src.len() as i32:
+                    abi_direct_types.push(dpt_src.get(dpt_i as i64))
+                    dpt_i = dpt_i + 1
             let drt_opt = self.extern_fn_direct_ret_type.get(callee_fn_sym)
             if drt_opt.is_some():
                 abi_direct_ret_ty = drt_opt.unwrap() as i64
@@ -15073,13 +15086,21 @@ impl Codegen:
         var fn_byval_types: Vec[i64] = Vec.new()
         let fn_byval_types_opt = self.extern_fn_byval_types.get(name_sym)
         if fn_byval_types_opt.is_some():
-            fn_byval_types = fn_byval_types_opt.unwrap()
+            let fn_bt_src = fn_byval_types_opt.unwrap()
+            var fn_bt_i = 0
+            while fn_bt_i < fn_bt_src.len() as i32:
+                fn_byval_types.push(fn_bt_src.get(fn_bt_i as i64))
+                fn_bt_i = fn_bt_i + 1
         let fn_direct_mask_opt = self.extern_fn_direct_params.get(name_sym)
         let fn_direct_mask = if fn_direct_mask_opt.is_some(): fn_direct_mask_opt.unwrap() as i64 else: 0
         var fn_direct_types: Vec[i64] = Vec.new()
         let fn_direct_types_opt = self.extern_fn_direct_param_types.get(name_sym)
         if fn_direct_types_opt.is_some():
-            fn_direct_types = fn_direct_types_opt.unwrap()
+            let fn_dt_src = fn_direct_types_opt.unwrap()
+            var fn_dt_i = 0
+            while fn_dt_i < fn_dt_src.len() as i32:
+                fn_direct_types.push(fn_dt_src.get(fn_dt_i as i64))
+                fn_dt_i = fn_dt_i + 1
 
         var method_owner_sym = 0
         for di in 0..name_str.len() as i32:
@@ -15525,13 +15546,21 @@ impl Codegen:
         var fn_byval_types: Vec[i64] = Vec.new()
         let fn_byval_types_opt = self.extern_fn_byval_types.get(mono_sym)
         if fn_byval_types_opt.is_some():
-            fn_byval_types = fn_byval_types_opt.unwrap()
+            let fn_bt_src = fn_byval_types_opt.unwrap()
+            var fn_bt_i = 0
+            while fn_bt_i < fn_bt_src.len() as i32:
+                fn_byval_types.push(fn_bt_src.get(fn_bt_i as i64))
+                fn_bt_i = fn_bt_i + 1
         let fn_direct_mask_opt = self.extern_fn_direct_params.get(mono_sym)
         let fn_direct_mask = if fn_direct_mask_opt.is_some(): fn_direct_mask_opt.unwrap() as i64 else: 0
         var fn_direct_types: Vec[i64] = Vec.new()
         let fn_direct_types_opt = self.extern_fn_direct_param_types.get(mono_sym)
         if fn_direct_types_opt.is_some():
-            fn_direct_types = fn_direct_types_opt.unwrap()
+            let fn_dt_src = fn_direct_types_opt.unwrap()
+            var fn_dt_i = 0
+            while fn_dt_i < fn_dt_src.len() as i32:
+                fn_direct_types.push(fn_dt_src.get(fn_dt_i as i64))
+                fn_dt_i = fn_dt_i + 1
 
         // Detect method owner from mangled name (e.g. "Vec__i32.push")
         var method_owner_sym = 0

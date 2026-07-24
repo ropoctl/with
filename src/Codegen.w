@@ -2217,7 +2217,13 @@ impl Codegen:
         var byval_types: Vec[i64] = Vec.new()
         let byval_types_opt = self.extern_fn_byval_types.get(fn_sym)
         if byval_types_opt.is_some():
-            byval_types = byval_types_opt.unwrap()
+            // D22: `get` yields Option[&Vec]; copy the Copy elements into an
+            // owned Vec rather than aliasing the map's stored value.
+            let bt_src = byval_types_opt.unwrap()
+            var bt_i = 0
+            while bt_i < bt_src.len() as i32:
+                byval_types.push(bt_src.get(bt_i as i64))
+                bt_i = bt_i + 1
         let param_offset = if has_sret != 0: 1 else: 0
         for ai in 0..arg_count:
             var arg_val = args.get(ai as i64)
@@ -2275,7 +2281,13 @@ impl Codegen:
             byval_mask = byval_opt.unwrap() as i64
         let byval_types_opt = self.extern_fn_byval_types.get(fn_sym)
         if byval_types_opt.is_some():
-            byval_types = byval_types_opt.unwrap()
+            // D22: `get` yields Option[&Vec]; copy the Copy elements into an
+            // owned Vec rather than aliasing the map's stored value.
+            let bt_src = byval_types_opt.unwrap()
+            var bt_i = 0
+            while bt_i < bt_src.len() as i32:
+                byval_types.push(bt_src.get(bt_i as i64))
+                bt_i = bt_i + 1
         self.apply_c_abi_call_attrs(call_val, has_sret, sret_ty, byval_mask, byval_types, arg_count, 0)
         if has_sret != 0 and sret_buf != 0 and sret_ty != 0:
             return wl_build_load(self.builder, sret_ty, sret_buf)
