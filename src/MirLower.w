@@ -8450,13 +8450,12 @@ impl MirBuilder:
         let adjustment = self.sema.contextual_copy_adjustment(arg_node)
         if adjustment.target_type != expected_ty:
             return -1
-        var source = arg_node
-        while self.ast.kind(source) == NodeKind.NK_GROUPED or self.ast.kind(source) == NodeKind.NK_NO_SUSPEND:
-            source = self.ast.get_data0(source)
-        if self.ast.kind(source) == NodeKind.NK_UNARY and self.ast.get_data0(source) == UnaryOp.UOP_REF:
-            return self.body.new_operand(OperandKind.OK_COPY, self.lower_expr_place(self.ast.get_data1(source)))
-        let place = self.lower_expr_place(arg_node)
-        self.body.new_operand(OperandKind.OK_COPY, self.new_deref_place(place))
+        // Delegate to the single guarded materialization path. Duplicating the
+        // lower_expr_place+deref here (without setting materializing_copy_node)
+        // let lower_expr_place's fallback re-enter lower_expr, which materializes
+        // the &V→V copy a second time, then this path dereferenced the resulting
+        // owned value as if it were the &V — reading a bad address.
+        self.materialize_contextual_copy(arg_node)
 
     // D22 Stage 5: materialize the owned Copy pointee of a shared-reference
     // node whose Sema record marks a contextual-Copy adjustment. Reuses the
