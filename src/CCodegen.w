@@ -8309,6 +8309,78 @@ impl CCodegen:
         let init = self.global_init_text(self.ast.get_data1(decl), tid, self.decl_source_text(decl))
         "static " ++ self.c_decl(tid, name) ++ " = " ++ init ++ ";\n"
 
+    // Runtime initializer for a global whose value cannot be a C static
+    // initializer. The LLVM backend synthesizes __with_init_const_* helpers
+    // and stores their results from the main wrapper; the C backend mirrors
+    // that for the initializer forms it can prove (Vec.new / HashMap.new /
+    // HashSet.new) and fails loudly on anything else — a zero-initialized
+    // hashmap handle faults on first insert, and a zero elem_size vec
+    // silently corrupts pushes.
+    mut fn global_runtime_init_stmt(decl: NodeId) -> str:
+        let tid = self.global_decl_tid(decl)
+        if tid == 0:
+            return ""
+        var expr = self.ast.get_data1(decl)
+        while expr != 0:
+            let k = self.ast.kind(expr)
+            if k != NodeKind.NK_COMPTIME and k != NodeKind.NK_GROUPED:
+                break
+            expr = self.ast.get_data0(expr)
+        if expr == 0:
+            return ""
+        let kind = self.ast.kind(expr)
+        if kind == NodeKind.NK_INT_LIT or kind == NodeKind.NK_UNARY or kind == NodeKind.NK_BOOL_LIT or
+            kind == NodeKind.NK_FLOAT_LIT or kind == NodeKind.NK_STRING_LIT or
+            kind == NodeKind.NK_C_STRING_LIT or kind == NodeKind.NK_NULL_LIT or
+            kind == NodeKind.NK_STRUCT_LIT:
+            return ""
+        let resolved = self.sema.resolve_alias(tid)
+        if self.sema.get_type_kind(resolved) == TypeKind.TY_ARRAY:
+            return ""
+        let name = self.global_c_name(self.ast.get_data0(decl))
+        if kind == NodeKind.NK_CALL and self.ast.get_data2(expr) == 0:
+            let callee = self.ast.get_data0(expr)
+            if self.ast.kind(callee) == NodeKind.NK_FIELD_ACCESS and cc_intern_resolve(self.intern, self.ast.get_data1(callee)) == "new":
+                var key_tid = self.hashmap_key_tid(tid)
+                if key_tid != 0:
+                    if self.is_void_tid(key_tid) != 0:
+                        key_tid = self.sema.ty_i64 as i32
+                    var val_tid = self.hashmap_value_tid(tid)
+                    if val_tid == 0 or self.is_void_tid(val_tid) != 0:
+                        val_tid = self.sema.ty_i64 as i32
+                    return "    " ++ name ++ " = (int64_t)(intptr_t)with_hashmap_new(sizeof(" ++ self.c_type(key_tid, 0) ++ "), sizeof(" ++ self.c_type(val_tid, 0) ++ "));\n"
+                if self.sema.get_type_kind(resolved) == TypeKind.TY_GENERIC_INST and
+                    self.generic_inst_base_name(resolved as i32) == "Vec" and
+                    self.sema.get_generic_inst_arg_count(resolved as i32) >= 1:
+                    let elem_tid = self.sema.get_generic_inst_arg(resolved as i32, 0)
+                    if elem_tid != 0 and self.is_void_tid(elem_tid) == 0:
+                        return "    " ++ name ++ " = (with_vec)" ++ cc_lbrace() ++ " .ptr = NULL, .len = 0, .cap = 0, .elem_size = sizeof(" ++ self.c_type(elem_tid, 0) ++ ") " ++ cc_rbrace() ++ ";\n"
+        self.fail("emit-c: unsupported global runtime initializer for '" ++ cc_intern_resolve(self.intern, self.ast.get_data0(decl)) ++ "'")
+        ""
+
+    mut fn global_runtime_init_stmts() -> str:
+        var out = ""
+        let used_globals = self.collect_referenced_global_syms()
+        if self.had_error != 0:
+            return ""
+        for di in 0..self.ast.decl_count():
+            if self.check_interrupted() != 0:
+                return ""
+            let decl = self.ast.get_decl(di)
+            if self.ast.kind(decl) != NodeKind.NK_LET_DECL:
+                continue
+            let sym = self.ast.get_data0(decl)
+            let flags = self.ast.get_data2(decl)
+            if flags % 2 == 0 and not used_globals.contains(sym):
+                continue
+            out = out ++ self.global_runtime_init_stmt(decl)
+            if self.had_error != 0:
+                return ""
+        if out.len() > 0 and self.find_main_sym() == 0:
+            self.fail("emit-c: global runtime initializers require a main entry point")
+            return ""
+        out
+
     mut fn collect_referenced_global_syms() -> HashMap[i32, i32]:
         let used = HashMap[i32, i32].new()
         for bi in 0..self.mir_mod.bodies.len() as i32:
@@ -8998,7 +9070,7 @@ impl CCodegen:
         "        with_panic(WITH_STR_LIT(\"runtime fiber configuration cannot change after fibers exist\"), WITH_STR_LIT(\"\"), 0);\n" ++
         "    }\n"
 
-    fn emit_main_wrapper() -> str:
+    mut fn emit_main_wrapper() -> str:
         let main_sym = self.find_main_sym()
         if main_sym == 0:
             return ""
@@ -9009,6 +9081,9 @@ impl CCodegen:
         out = out ++ "    with_runtime_set_argv(argc, argv);\n"
         out = out ++ self.emit_runtime_fiber_config_call()
         out = out ++ "    with_runtime_init();\n"
+        out = out ++ self.global_runtime_init_stmts()
+        if self.had_error != 0:
+            return ""
         if self.is_void_tid(ret_tid) != 0:
             out = out ++ "    " ++ main_name ++ "();\n"
             out = out ++ "    with_runtime_shutdown();\n"
