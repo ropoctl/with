@@ -33,6 +33,7 @@ use BuildGraphCache
 use compiler.DriverOptions
 use Analysis
 use ReceiverMigration
+use TargetSpec
 
 extern fn with_arg_count() -> i32
 extern fn with_arg_at(idx: i32) -> str
@@ -805,6 +806,11 @@ fn run_cli(argc: i32) -> i32:
         comp.configure(opt_level, no_std, alloc_mode, runtime_available)
         comp.set_prelude_mode(prelude_mode)
         comp.set_overflow_mode(driver_internal_overflow_mode())
+        let ir_target = driver_parse_build_target(argc)
+        if not ir_target.ok:
+            with_eprint("error: " ++ ir_target.error_msg)
+            return 1
+        comp.set_target_kind(ir_target.kind)
         let pool = comp.compile_file(source)
         if pool.decl_count() == 0:
             with_eprint("error: IR generation failed during compilation")
@@ -2128,9 +2134,10 @@ fn build_command_validate_target(options: &BuildCommandOptions, cfg: &ProjectCon
     if options.target_kind < 0:
         with_eprint("error: invalid with.toml: unsupported target.default '" ++ cfg.target_default ++ "'")
         return 1
-    // §18.5: non-native target selections must fail loudly until
-    // cross-target codegen/linking exists; never fall back to native.
-    if not build_graph_target_is_host(options.target_kind):
+    // §18.5: a non-native target selection either has a real cross
+    // path (target_spec_cross_supported) or fails loudly; it never
+    // falls back to native output.
+    if not build_graph_target_is_host(options.target_kind) and not target_spec_cross_supported(options.target_kind):
         with_eprint("error: cross-target build for '" ++ build_graph_target_name(options.target_kind) ++ "' is not implemented yet; host is " ++ build_graph_target_name(build_graph_host_target_kind()))
         return 1
     0

@@ -17,6 +17,7 @@ use Source
 use Resolve
 use compiler.LlvmBridge.*
 use Overflow
+use TargetSpec
 use AnalysisTypes
 
 extern fn exit(code: i32) -> Unit
@@ -75,8 +76,6 @@ enum AtomicOrdering: i32:
 extern fn with_str_concat(a: str, b: str) -> str
 extern fn with_str_eq(a: str, b: str) -> i32
 extern fn with_write(s: str) -> Unit
-extern fn with_sysinfo_os() -> str
-extern fn with_sysinfo_arch() -> str
 
 // ── Codegen state ─────────────────────────────────────────────────
 
@@ -4868,18 +4867,18 @@ fn codegen_extern_uses_internal_abi(name: str, cc_name: str) -> bool:
     codegen_is_runtime_abi_symbol(name)
 
 fn codegen_c_abi_needs_byval_attr() -> bool:
-    let os = with_sysinfo_os()
-    let arch = with_sysinfo_arch()
+    let os = target_spec_os()
+    let arch = target_spec_arch()
     arch == "x86_64" and (os == "Linux" or os == "Macos")
 
 fn codegen_c_abi_darwin_arm64() -> bool:
-    let os = with_sysinfo_os()
-    let arch = with_sysinfo_arch()
+    let os = target_spec_os()
+    let arch = target_spec_arch()
     os == "Macos" and (arch == "armv8" or arch == "aarch64")
 
 fn codegen_windows_x86_64() -> bool:
-    let os = with_sysinfo_os()
-    let arch = with_sysinfo_arch()
+    let os = target_spec_os()
+    let arch = target_spec_arch()
     os == "Windows" and arch == "x86_64"
 
 impl Codegen:

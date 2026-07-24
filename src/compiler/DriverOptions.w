@@ -262,14 +262,14 @@ pub fn driver_target_triple_kind(triple: str) -> i32:
         return 5
     -1
 
-type DriverTargetParseResult {
+pub type DriverTargetParseResult {
     ok: bool,
     kind: i32,
     explicit: bool,
     error_msg: str,
 }
 
-fn driver_parse_build_target(argc: i32) -> DriverTargetParseResult:
+pub fn driver_parse_build_target(argc: i32) -> DriverTargetParseResult:
     var kind = 0
     var explicit = false
     var i = 2
@@ -292,7 +292,7 @@ fn driver_parse_build_target(argc: i32) -> DriverTargetParseResult:
         if seen:
             let parsed = driver_target_triple_kind(value)
             if parsed < 0:
-                return DriverTargetParseResult { false, 0, true, "unsupported target triple '" ++ value ++ "'; cross-target codegen/linking is not implemented yet" }
+                return DriverTargetParseResult { false, 0, true, "unsupported target triple '" ++ value ++ "'; see §18.5 for the accepted triples" }
             kind = parsed
             explicit = true
     DriverTargetParseResult { true, kind, explicit, "" }
