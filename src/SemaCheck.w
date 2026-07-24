@@ -367,7 +367,23 @@ impl Sema:
         self.builtin_arg_type_compatible(expected, pointee)
 
     mut fn record_contextual_copy_adjustment(source_node: i32, expected: i32, actual: i32) -> i32:
-        if source_node <= 0 or self.can_contextually_copy_ref(expected, actual) == 0:
+        if source_node <= 0:
+            return 0
+        // D22: value-carriers are transparent to a Copy-view origin. Record the
+        // adjustment on the carried value leaf, never on the carrier node itself.
+        // A carrier that also held an adjustment would be materialized a second
+        // time on top of its leaf's materialization (a double deref of the &V
+        // pointee → a bad-address load). The carrier's type equals its value
+        // leaf's type, so the same demand applies unchanged to the leaf.
+        let sk = self.ast.kind(source_node)
+        if sk == NodeKind.NK_GROUPED or sk == NodeKind.NK_NO_SUSPEND:
+            return self.record_contextual_copy_adjustment(self.ast.get_data0(source_node), expected, actual)
+        if sk == NodeKind.NK_BLOCK:
+            let tail = self.ast.get_data2(source_node)
+            if tail == 0:
+                return 0
+            return self.record_contextual_copy_adjustment(tail, expected, actual)
+        if self.can_contextually_copy_ref(expected, actual) == 0:
             return 0
         let actual_resolved = self.resolve_alias(actual as TypeId)
         let pointee = self.get_type_d0(actual_resolved)
@@ -4926,7 +4942,7 @@ impl Sema:
                     self.emit_error(msg, node)
                     return 0
             return 1
-        if value_path != 0:
+        if value_path != 0 and kind != NodeKind.NK_BLOCK and kind != NodeKind.NK_IF_EXPR and kind != NodeKind.NK_MATCH and kind != NodeKind.NK_MATCH_ARM:
             let actual = self.recorded_expr_type_or_zero(node)
             if actual != 0 and actual != self.ty_void and actual != self.ty_never:
                 if self.expr_mutates_any_current_binding(node) != 0:
