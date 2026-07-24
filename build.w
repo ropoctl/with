@@ -1351,8 +1351,6 @@ pub fn build(ctx: BuildCtx) -> Build:
     package_bootstrap_c = package_bootstrap_c.input("out/release/bin/with")
     package_bootstrap_c = package_bootstrap_c.input("out/bootstrap-c/src/with_compiler.c")
     package_bootstrap_c = package_bootstrap_c.input("out/gen/wl_decls.h")
-    package_bootstrap_c = package_bootstrap_c.input("src/compiler/LlvmBridge.w")
-    package_bootstrap_c = package_bootstrap_c.input("src/compiler/ClangBridge.w")
     package_bootstrap_c = package_bootstrap_c.input("rt/rt_core.w")
     package_bootstrap_c = package_bootstrap_c.input("rt/panic_runtime.w")
     package_bootstrap_c = package_bootstrap_c.input("rt/regex_runtime.w")

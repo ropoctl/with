@@ -375,10 +375,8 @@ fn pkg_readme(version: str) -> str:
     "    mkdir -p obj\n\n" ++
     "    \"$CLANG\" -std=gnu11 -O2 -D_GNU_SOURCE -Iruntime -I\"$LLVM_PREFIX/include\" \\\n" ++
     "      -include runtime/wl_decls.h -c src/with_compiler.c -o obj/with_compiler.o\n\n" ++
-    "    for file in src/llvm_bridge.c src/clang_bridge.c src/linux_platform.c; do\n" ++
-    "      \"$CLANG\" -std=gnu11 -O2 -D_GNU_SOURCE -Iruntime -I\"$LLVM_PREFIX/include\" \\\n" ++
-    "        -c \"$file\" -o \"obj/$(basename \"$file\" .c).o\"\n" ++
-    "    done\n\n" ++
+    "    \"$CLANG\" -std=gnu11 -O2 -D_GNU_SOURCE -Iruntime -I\"$LLVM_PREFIX/include\" \\\n" ++
+    "      -c src/linux_platform.c -o obj/linux_platform.o\n\n" ++
     "    for file in src/rt_core.c src/panic_runtime.c src/regex_runtime.c src/fiber_stubs.c src/compat_runtime.c; do\n" ++
     "      \"$CLANG\" -std=gnu11 -O2 -D_GNU_SOURCE -DWITH_RUNTIME_H -Iruntime -I\"$LLVM_PREFIX/include\" \\\n" ++
     "        -include runtime/bootstrap_types.h -c \"$file\" -o \"obj/$(basename \"$file\" .c).o\"\n" ++
@@ -509,10 +507,9 @@ pub fn run_package_bootstrap_c_action(ctx: ActionCtx) -> i32:
 
     var rc = pkg_copy_file(ctx, "out/bootstrap-c/src/with_compiler.c", pkg_join(stage_root, "src/with_compiler.c"))
     if rc != 0: return rc
-    rc = pkg_emit_c(ctx, compiler_path, "src/compiler/LlvmBridge.w", pkg_join(stage_root, "src/llvm_bridge.c"), "llvm-bridge")
-    if rc != 0: return rc
-    rc = pkg_emit_c(ctx, compiler_path, "src/compiler/ClangBridge.w", pkg_join(stage_root, "src/clang_bridge.c"), "clang-bridge")
-    if rc != 0: return rc
+    // The LLVM/Clang bridges are compiler modules, so they are already part of
+    // the emitted with_compiler.c; shipping them as separate C files made the
+    // bundle link fail with multiple definitions.
     rc = pkg_emit_c(ctx, compiler_path, "rt/rt_core.w", pkg_join(stage_root, "src/rt_core.c"), "rt-core")
     if rc != 0: return rc
     rc = pkg_emit_c(ctx, compiler_path, "rt/panic_runtime.w", pkg_join(stage_root, "src/panic_runtime.c"), "panic-runtime")
