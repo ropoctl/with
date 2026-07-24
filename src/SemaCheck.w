@@ -8403,6 +8403,26 @@ impl Sema:
             self.emit_error(f"{what} condition must be bool", cond)
         t
 
+    // D22 join: when one branch is an owned Copy value and the other is a
+    // shared reference to the same Copy pointee, the owned branch anchors the
+    // join and the reference arm materializes its pointee. Reference-only joins
+    // (handled elsewhere) keep their references; this only fires when exactly
+    // one owned Copy anchor is present.
+    mut fn join_contextual_copy(then_node: i32, then_ty: i32, else_node: i32, else_ty: i32) -> i32:
+        if then_ty == 0 or else_ty == 0:
+            return 0
+        let then_pointee = self.shared_copy_pointee(then_ty)
+        let else_pointee = self.shared_copy_pointee(else_ty)
+        // then owned Copy, else &then
+        if then_pointee == 0 and else_pointee != 0 and self.is_copy(then_ty as TypeId) != 0:
+            if self.record_contextual_copy_adjustment(else_node, then_ty, else_ty) != 0:
+                return then_ty
+        // else owned Copy, then &else
+        if else_pointee == 0 and then_pointee != 0 and self.is_copy(else_ty as TypeId) != 0:
+            if self.record_contextual_copy_adjustment(then_node, else_ty, then_ty) != 0:
+                return else_ty
+        0
+
     mut fn check_if_expr(node: i32) -> i32:
         let cond = self.ast.get_data0(node)
         let then_body = self.ast.get_data1(node)
@@ -8472,6 +8492,12 @@ impl Sema:
                     result_type = self.preferred_compatible_type(then_type, else_type)
                 else:
                     result_type = self.arithmetic_result_type(then_type, else_type)
+                    if result_type == 0:
+                        // D22 contextual-Copy join: an owned Copy anchor lets a
+                        // compatible &Copy arm materialize to the owned value.
+                        let joined = self.join_contextual_copy(then_body, then_type as i32, else_body, else_type as i32)
+                        if joined != 0:
+                            result_type = joined as TypeId
                     if result_type == 0 and in_value_context:
                         // #549: a value-position if must not silently poison to
                         // <error>. Distinct types compare by base first, so
@@ -12854,8 +12880,19 @@ impl Sema:
         var elem_type: TypeId = self.ty_i32
         if start != 0:
             elem_type = self.check_expr(start)
+            // A range bound is an independently established owned scalar demand.
+            // A shared &Copy bound (e.g. a map `get(k).unwrap()` of a Copy value)
+            // materializes its pointee here; inference of the bound stays exact.
+            let start_pointee = self.shared_copy_pointee(elem_type as i32)
+            if start_pointee != 0:
+                let _ = self.record_contextual_copy_adjustment(start, start_pointee, elem_type as i32)
+                elem_type = start_pointee as TypeId
         if end != 0:
-            let end_ty = self.check_expr(end)
+            var end_ty = self.check_expr(end)
+            let end_pointee = self.shared_copy_pointee(end_ty as i32)
+            if end_pointee != 0:
+                let _ = self.record_contextual_copy_adjustment(end, end_pointee, end_ty as i32)
+                end_ty = end_pointee as TypeId
             if start == 0:
                 elem_type = end_ty
             else if self.types_compatible(elem_type, end_ty) == 0:
@@ -17368,6 +17405,12 @@ impl Sema:
         if owner_sym == self.syms.vec:
             if (field == self.syms.push or field == self.syms.contains) and arg_index == 0:
                 return self.get_generic_inst_arg(resolved as i32, 0)
+            // set_i32(idx: i64, val: i32) is the raw i32-storage setter; its
+            // value operand is always i32. Publish that so an owned-value demand
+            // is established (a shared &i32 argument then materializes its Copy
+            // pointee rather than storing the reference).
+            if field == self.syms.set_i32 and arg_index == 1:
+                return self.ty_i32 as i32
             // `map`/`traverse` closure parameters are the element type; push `fn(elem) -> _`
             // as the expected arg type so the closure param is typed from the Vec's
             // element instead of defaulting to i32 (#306). The closure return is

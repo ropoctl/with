@@ -136,6 +136,10 @@ type MirBuilder = ephemeral {
     // call against this exact place. The override is scoped by lower_pipeline.
     pipeline_receiver_override_node: i32,
     pipeline_receiver_override_place: i32,
+    // D22: node currently being contextual-Copy materialized, so the deref
+    // path's re-entry into lower_expr for the same node lowers the exact &V
+    // value instead of recursing into materialization again.
+    materializing_copy_node: i32,
     in_generator: i32,
     generator_yield_count: i32,
 
@@ -214,6 +218,7 @@ fn MirBuilder.init(sema: &Sema, ast: AstPool, pool: InternPool, fn_sym: i32) -> 
         expected_type: 0,
         pipeline_receiver_override_node: 0,
         pipeline_receiver_override_place: -1,
+        materializing_copy_node: 0,
         in_generator: 0,
         generator_yield_count: 0,
         regex_capture_pat_nodes: Vec.new(),
@@ -2171,9 +2176,9 @@ impl MirBuilder:
             let range_inclusive = self.ast.get_data2(node)
             var range_elem = self.sema.ty_i32 as i32
             if range_start != 0:
-                range_elem = self.expr_type(range_start)
+                range_elem = self.materialized_operand_type(range_start)
             else if range_end != 0:
-                range_elem = self.expr_type(range_end)
+                range_elem = self.materialized_operand_type(range_end)
             let range_found = self.sema.find_range_type(range_elem, range_inclusive) as i32
             if range_found != 0:
                 return range_found
@@ -5582,7 +5587,7 @@ impl MirBuilder:
         self.field_move_in_branch = self.field_move_in_branch + 1
         if regex_capture_node != 0:
             self.lower_regex_capture_bindings_from_option(regex_capture_node, regex_captures_opt_place)
-        let then_op = if want_result != 0: self.lower_expr(then_expr) else: self.lower_expr_discard(then_expr)
+        let then_op = if want_result != 0: self.lower_operand_materialized(then_expr) else: self.lower_expr_discard(then_expr)
         if want_result != 0:
             self.assign_operand_to_place(result_place, then_op, self.ast.get_start(then_expr))
         // Reset-on-move (spec §2.5.1): flush this branch's pending source-resets
@@ -5598,7 +5603,7 @@ impl MirBuilder:
         self.switch_to(else_bb)
         self.field_move_in_branch = self.field_move_in_branch + 1
         let else_op = if else_expr_opt != 0:
-            if want_result != 0: self.lower_expr(else_expr_opt) else: self.lower_expr_discard(else_expr_opt)
+            if want_result != 0: self.lower_operand_materialized(else_expr_opt) else: self.lower_expr_discard(else_expr_opt)
         else:
             self.unit_operand()
         if want_result != 0:
@@ -6533,8 +6538,8 @@ impl MirBuilder:
         let elem_ty = self.sema.infer_for_element_type_frozen(self.expr_type(range_node))
 
         // Evaluate start and end
-        let start_op = if start_node != 0: self.lower_expr(start_node) else: self.int_const_operand(0, elem_ty)
-        let end_op = self.lower_expr(end_node)
+        let start_op = if start_node != 0: self.lower_operand_materialized(start_node) else: self.int_const_operand(0, elem_ty)
+        let end_op = self.lower_operand_materialized(end_node)
 
         // Create counter local
         let counter_local = self.new_temp(elem_ty)
@@ -8452,6 +8457,40 @@ impl MirBuilder:
             return self.body.new_operand(OperandKind.OK_COPY, self.lower_expr_place(self.ast.get_data1(source)))
         let place = self.lower_expr_place(arg_node)
         self.body.new_operand(OperandKind.OK_COPY, self.new_deref_place(place))
+
+    // D22 Stage 5: materialize the owned Copy pointee of a shared-reference
+    // node whose Sema record marks a contextual-Copy adjustment. Reuses the
+    // exact call-argument mechanism (OK_COPY of the deref place). The re-entry
+    // guard makes the deref's own place lowering read the exact &V value when a
+    // node kind falls back to value materialization inside lower_expr_place.
+    mut fn materialize_contextual_copy(node: i32) -> i32:
+        var source = node
+        while self.ast.kind(source) == NodeKind.NK_GROUPED or self.ast.kind(source) == NodeKind.NK_NO_SUSPEND:
+            source = self.ast.get_data0(source)
+        if self.ast.kind(source) == NodeKind.NK_UNARY and self.ast.get_data0(source) == UnaryOp.UOP_REF:
+            return self.body.new_operand(OperandKind.OK_COPY, self.lower_expr_place(self.ast.get_data1(source)))
+        let saved = self.materializing_copy_node
+        self.materializing_copy_node = node
+        let place = self.lower_expr_place(node)
+        self.materializing_copy_node = saved
+        self.body.new_operand(OperandKind.OK_COPY, self.new_deref_place(place))
+
+    // Lower an owned-demand operand, materializing a contextual-Copy adjustment
+    // when present. Kept for call sites that lower a specific owned-demand
+    // position (range bounds, if/match joins); lower_expr also materializes
+    // adjusted nodes so every value position is covered uniformly.
+    mut fn lower_operand_materialized(node: i32) -> i32:
+        if node == 0 or self.sema.has_contextual_copy_adjustment(node) == 0:
+            return self.lower_expr(node)
+        self.materialize_contextual_copy(node)
+
+    // The owned value type an owned-demand position observes for `node`: the
+    // materialized Copy pointee when a contextual-Copy adjustment applies,
+    // otherwise the node's exact expression type.
+    mut fn materialized_operand_type(node: i32) -> i32:
+        if node != 0 and self.sema.has_contextual_copy_adjustment(node) != 0:
+            return self.sema.contextual_copy_adjustment(node).owned_value_type
+        self.expr_type(node)
 
     mut fn lower_auto_deref_call_arg(arg_node: i32, expected_ty: i32) -> i32:
         if arg_node == 0 or expected_ty == 0:
@@ -11499,6 +11538,14 @@ impl MirBuilder:
         if node == self.pipeline_receiver_override_node and self.pipeline_receiver_override_place >= 0:
             return self.body.new_operand(OperandKind.OK_COPY, self.pipeline_receiver_override_place)
 
+        // D22 Stage 5: an owned-demand position recorded a contextual-Copy
+        // adjustment on this node (binary/unary operands, receivers, enum
+        // payloads, casts, joins, range bounds, …). Materialize the owned Copy
+        // pointee here so every value position is covered by one MIR path; the
+        // guard lets the deref's place lowering read the exact &V value.
+        if self.materializing_copy_node != node and self.sema.has_contextual_copy_adjustment(node) != 0:
+            return self.materialize_contextual_copy(node)
+
         self.cur_node = node
         let kind = self.ast.kind(node)
 
@@ -12173,11 +12220,11 @@ impl MirBuilder:
             let range_inclusive = self.ast.get_data2(node)
             var range_elem = self.sema.ty_i32 as i32
             if range_start_node != 0:
-                range_elem = self.expr_type(range_start_node)
+                range_elem = self.materialized_operand_type(range_start_node)
             else if range_end_node != 0:
-                range_elem = self.expr_type(range_end_node)
-            let start_op = if range_start_node != 0: self.lower_expr(range_start_node) else: self.int_const_operand(0, range_elem)
-            let end_op = self.lower_expr(range_end_node)
+                range_elem = self.materialized_operand_type(range_end_node)
+            let start_op = if range_start_node != 0: self.lower_operand_materialized(range_start_node) else: self.int_const_operand(0, range_elem)
+            let end_op = self.lower_operand_materialized(range_end_node)
             let incl_op = self.int_const_operand(range_inclusive, self.sema.ty_bool)
             let range_fields: Vec[i32] = Vec.new()
             let range_names: Vec[i32] = Vec.new()
