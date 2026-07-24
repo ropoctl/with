@@ -8436,18 +8436,16 @@ impl MirBuilder:
         self.body.push_stmt(self.cur_bb, StmtKind.Assign, temp_place, rv, self.ast.get_start(arg_node))
         self.body.new_operand(OperandKind.OK_COPY, temp_place)
 
-    // TODO(D22): this lowers only the pre-D22 call-argument case. The future
-    // design must lower one Sema-owned contextual-materialization decision for
-    // every owned-demand context; do not re-derive Copy demand independently in
-    // each MIR path.
+    // D22 Stage 2 retains the already-supported call-argument lowering while
+    // consuming the new Sema record. Other owned-demand positions are lowered
+    // only in Stage 5; no MIR path re-derives Copy-ness or demand.
     mut fn lower_auto_copy_ref_call_arg(arg_node: i32, expected_ty: i32) -> i32:
         if arg_node == 0 or expected_ty == 0:
             return -1
-        let recorded_ty = self.sema.auto_copy_ref_args.get(arg_node)
-        if not recorded_ty.is_some():
+        if self.sema.has_contextual_copy_adjustment(arg_node) == 0:
             return -1
-        let actual_ty = recorded_ty.unwrap()
-        if self.sema.can_auto_copy_ref_arg_frozen(expected_ty, actual_ty) == 0:
+        let adjustment = self.sema.contextual_copy_adjustment(arg_node)
+        if adjustment.target_type != expected_ty:
             return -1
         var source = arg_node
         while self.ast.kind(source) == NodeKind.NK_GROUPED or self.ast.kind(source) == NodeKind.NK_NO_SUSPEND:
