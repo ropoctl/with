@@ -129,6 +129,68 @@ fn run_cross_linux_llvm_link_metadata_action(ctx: ActionCtx) -> i32:
         return 1
     0
 
+// ── Cross-target (windows_x86_64) helpers ───────────────────────────
+
+fn cross_windows_dir() -> str:
+    "out/lib/cross/windows_x86_64"
+
+fn cross_windows_triple() -> str:
+    "x86_64-pc-windows-msvc"
+
+fn cross_windows_llvm_prefix() -> str:
+    ".deps/llvm-" ++ compiler_llvm_version() ++ "-windows-x86_64-msvc"
+
+fn cross_windows_object_target_named(name: str, source: str, obj_name: str, opt: str) -> Target:
+    var target = with_object_target(name, release_compiler_bin("with"), source, cross_windows_dir() ++ "/" ++ obj_name, opt, "build")
+    target = target.arg("--target=" ++ cross_windows_triple())
+    target
+
+fn cross_windows_object_target(name: str, source: str, opt: str) -> Target:
+    let base = comp_path_basename(source)
+    let stem = if base.ends_with(".w"): base.slice(0, base.len() - 2) else: base
+    cross_windows_object_target_named(name, source, stem ++ ".o", opt)
+
+// Generate cross/windows_x86_64/llvm_ld.rsp: the windows LLVM SDK's
+// static clang+LLVM import/static archives, in lld-link positional
+// form (one .lib per line, no GNU flags). The MSVC CRT and Windows
+// SDK import libraries are appended by the windows link recipe
+// (link_stage_make_windows_llvm_link_command) from the WITH_WINDOWS_*
+// lib dirs, so they are not repeated here.
+fn run_cross_windows_llvm_link_metadata_action(ctx: ActionCtx) -> i32:
+    let fs = ctx.fs()
+    let output_path = ctx.output()
+    let lib_dir = cross_windows_llvm_prefix() ++ "/lib"
+    let libclang = lib_dir ++ "/libclang.lib"
+    if not fs.host_exists(libclang):
+        ctx.diagnostics().error("cross-windows-llvm-link-metadata: missing " ++ libclang ++ "; extract the with-llvm-sdk-" ++ compiler_llvm_version() ++ "-windows-x86_64 release asset into .deps/")
+        return 1
+    let lib_files = fs.host_list_files(lib_dir)
+    if lib_files.len() == 0:
+        ctx.diagnostics().error("cross-windows-llvm-link-metadata: could not list: " ++ lib_dir)
+        return 1
+    var clang_archives: Vec[str] = Vec.new()
+    var llvm_archives: Vec[str] = Vec.new()
+    for i in 0..lib_files.len() as i32:
+        let path = lib_files.get(i as i64)
+        let name = comp_path_basename(path)
+        if name.ends_with(".lib"):
+            if (name.starts_with("clang") or name.starts_with("libclang")) and path != libclang:
+                clang_archives.push(path)
+            else:
+                if name.starts_with("LLVM"):
+                    llvm_archives.push(path)
+    var ld_rsp = comp_rsp_path(libclang) ++ "\n"
+    let sorted_clang = comp_sort_strings(clang_archives)
+    for i in 0..sorted_clang.len() as i32:
+        ld_rsp = ld_rsp ++ comp_rsp_path(sorted_clang.get(i as i64)) ++ "\n"
+    let sorted_llvm = comp_sort_strings(llvm_archives)
+    for i in 0..sorted_llvm.len() as i32:
+        ld_rsp = ld_rsp ++ comp_rsp_path(sorted_llvm.get(i as i64)) ++ "\n"
+    if fs.write_text(output_path, ld_rsp) != 0:
+        ctx.diagnostics().error("cross-windows-llvm-link-metadata: could not write: " ++ output_path)
+        return 1
+    0
+
 fn empty_file_target(name: str, output: str) -> Target:
     var target = target_new(.Action, name, "").output(output)
     target.action = run_write_empty_file_action
@@ -1565,7 +1627,7 @@ pub fn build(ctx: BuildCtx) -> Build:
     // freshly built native compiler's --target support. The link stage
     // resolves cross links exclusively from that directory (§18.5).
     out = out.add_target(cross_object_target("cross-rt-core-object", "rt/rt_core.w", "-O2"))
-    out = out.add_target(cross_object_target("cross-rt-platform-object", "rt/linux_x86_64.w", "-O2"))
+    out = out.add_target(cross_object_target_named("cross-rt-platform-object", "rt/linux_x86_64.w", "rt_linux_x86_64.o", "-O2"))
     out = out.add_target(cross_object_target("cross-cimport-stubs-object", "rt/cimport_stubs.w", "-O1"))
     var cross_compat = cross_object_target_named("cross-compat-runtime-object", "out/gen/compat_runtime.w", "compat_runtime.o", "-O1")
     cross_compat = cross_compat.dep("compat-runtime-source")
@@ -1645,6 +1707,91 @@ pub fn build(ctx: BuildCtx) -> Build:
     cross_rt = cross_rt.dep("cross-clang-bridge-object")
     cross_rt = cross_rt.dep("cross-llvm-link-metadata")
     out = out.add_target(cross_rt)
+
+    // ── Cross-target runtime (windows_x86_64) ───────────────────────
+    // `with build :cross-rt-windows` builds the full windows_x86_64
+    // runtime + compiler link inputs into out/lib/cross/windows_x86_64/
+    // (COFF objects, windows triple) so a `--target x86_64-pc-windows-msvc`
+    // link resolves entirely from that directory (§18.5). Mirrors the
+    // linux cross-rt set; fiber core/asm are the windows variants.
+    out = out.add_target(cross_windows_object_target("cross-win-rt-core-object", "rt/rt_core.w", "-O2"))
+    out = out.add_target(cross_windows_object_target_named("cross-win-rt-platform-object", "rt/windows_x86_64.w", "rt_windows_x86_64.o", "-O2"))
+    out = out.add_target(cross_windows_object_target("cross-win-cimport-stubs-object", "rt/cimport_stubs.w", "-O1"))
+    var cross_win_compat = cross_windows_object_target_named("cross-win-compat-runtime-object", "out/gen/compat_runtime.w", "compat_runtime.o", "-O1")
+    cross_win_compat = cross_win_compat.dep("compat-runtime-source")
+    out = out.add_target(cross_win_compat)
+    out = out.add_target(cross_windows_object_target("cross-win-panic-runtime-object", "rt/panic_runtime.w", "-O1"))
+    out = out.add_target(cross_windows_object_target("cross-win-fiber-stubs-object", "rt/fiber_stubs.w", "-O1"))
+    out = out.add_target(cross_windows_object_target("cross-win-channel-runtime-object", "rt/channel_runtime.w", "-O1"))
+    out = out.add_target(cross_windows_object_target("cross-win-fiber-runtime-object", "rt/fiber_runtime.w", "-O1"))
+    out = out.add_target(cross_windows_object_target_named("cross-win-fiber-core-object", "rt/fiber_core_windows.w", "fiber.o", "-O1"))
+    out = out.add_target(cross_windows_object_target_named("cross-win-llvm-bridge-object", "src/compiler/LlvmBridge.w", "llvm_bridge.o", "-O1"))
+    out = out.add_target(cross_windows_object_target_named("cross-win-clang-bridge-object", "src/compiler/ClangBridge.w", "clang_bridge.o", "-O1"))
+
+    var cross_win_regex_ir = with_ir_target_overflow("cross-win-regex-runtime-ir", release_compiler_bin("with"), "rt/regex_runtime.w", "out/tmp/cross_win_regex_runtime.ll", "build", "wrap")
+    cross_win_regex_ir = cross_win_regex_ir.arg("--target=" ++ cross_windows_triple())
+    out = out.add_target(cross_win_regex_ir)
+    var cross_win_regex = target_new(.CompileLlvmIrObject, "cross-win-regex-runtime-object", "out/tmp/cross_win_regex_runtime.ll").output(cross_windows_dir() ++ "/regex_runtime.o")
+    cross_win_regex = cross_win_regex.dep("cross-win-regex-runtime-ir")
+    out = out.add_target(cross_win_regex)
+
+    var cross_win_fiber_asm = target_new(.CompileAsmObject, "cross-win-fiber-asm-object", "runtime/fiber_asm_windows_x86_64.s").output(cross_windows_dir() ++ "/fiber_asm.o")
+    cross_win_fiber_asm = cross_win_fiber_asm.arg("triple=" ++ cross_windows_triple())
+    out = out.add_target(cross_win_fiber_asm)
+
+    var cross_win_embedded = target_new(.EmbedObjectFiles, "cross-win-embedded-objects-asm", "windows_x86_64").output(cross_windows_dir() ++ "/embedded_objects.s")
+    cross_win_embedded = cross_win_embedded.input(cross_windows_dir() ++ "/cimport_stubs.o")
+    cross_win_embedded = cross_win_embedded.arg("cimport_stubs_o")
+    cross_win_embedded = cross_win_embedded.input(cross_windows_dir() ++ "/compat_runtime.o")
+    cross_win_embedded = cross_win_embedded.arg("compat_runtime_o")
+    cross_win_embedded = cross_win_embedded.input(cross_windows_dir() ++ "/panic_runtime.o")
+    cross_win_embedded = cross_win_embedded.arg("panic_runtime_o")
+    cross_win_embedded = cross_win_embedded.input(cross_windows_dir() ++ "/regex_runtime.o")
+    cross_win_embedded = cross_win_embedded.arg("regex_runtime_o")
+    cross_win_embedded = cross_win_embedded.input(cross_windows_dir() ++ "/fiber_stubs.o")
+    cross_win_embedded = cross_win_embedded.arg("fiber_stubs_o")
+    cross_win_embedded = cross_win_embedded.input(cross_windows_dir() ++ "/channel_runtime.o")
+    cross_win_embedded = cross_win_embedded.arg("channel_runtime_o")
+    cross_win_embedded = cross_win_embedded.input(cross_windows_dir() ++ "/fiber_runtime.o")
+    cross_win_embedded = cross_win_embedded.arg("fiber_runtime_o")
+    cross_win_embedded = cross_win_embedded.input(cross_windows_dir() ++ "/fiber.o")
+    cross_win_embedded = cross_win_embedded.arg("fiber_o")
+    cross_win_embedded = cross_win_embedded.input(cross_windows_dir() ++ "/fiber_asm.o")
+    cross_win_embedded = cross_win_embedded.arg("fiber_asm_o")
+    cross_win_embedded = cross_win_embedded.input(cross_windows_dir() ++ "/rt_core.o")
+    cross_win_embedded = cross_win_embedded.arg("rt_core_o")
+    cross_win_embedded = cross_win_embedded.input(cross_windows_dir() ++ "/rt_windows_x86_64.o")
+    cross_win_embedded = cross_win_embedded.arg("rt_windows_x86_64_o")
+    cross_win_embedded = cross_win_embedded.dep("cross-win-cimport-stubs-object")
+    cross_win_embedded = cross_win_embedded.dep("cross-win-compat-runtime-object")
+    cross_win_embedded = cross_win_embedded.dep("cross-win-panic-runtime-object")
+    cross_win_embedded = cross_win_embedded.dep("cross-win-regex-runtime-object")
+    cross_win_embedded = cross_win_embedded.dep("cross-win-fiber-stubs-object")
+    cross_win_embedded = cross_win_embedded.dep("cross-win-channel-runtime-object")
+    cross_win_embedded = cross_win_embedded.dep("cross-win-fiber-runtime-object")
+    cross_win_embedded = cross_win_embedded.dep("cross-win-fiber-core-object")
+    cross_win_embedded = cross_win_embedded.dep("cross-win-fiber-asm-object")
+    cross_win_embedded = cross_win_embedded.dep("cross-win-rt-core-object")
+    cross_win_embedded = cross_win_embedded.dep("cross-win-rt-platform-object")
+    out = out.add_target(cross_win_embedded)
+
+    var cross_win_embedded_obj = target_new(.CompileAsmObject, "cross-win-embedded-objects-object", cross_windows_dir() ++ "/embedded_objects.s").output(cross_windows_dir() ++ "/embedded_objects.o")
+    cross_win_embedded_obj = cross_win_embedded_obj.arg("triple=" ++ cross_windows_triple())
+    cross_win_embedded_obj = cross_win_embedded_obj.dep("cross-win-embedded-objects-asm")
+    out = out.add_target(cross_win_embedded_obj)
+
+    var cross_win_ld_rsp = target_new(.Action, "cross-win-llvm-link-metadata", "").output(cross_windows_dir() ++ "/llvm_ld.rsp")
+    cross_win_ld_rsp.action = run_cross_windows_llvm_link_metadata_action
+    cross_win_ld_rsp = cross_win_ld_rsp.write_scope(cross_windows_dir())
+    cross_win_ld_rsp = cross_win_ld_rsp.write_scope("out/command/cross-win-llvm-link-metadata")
+    out = out.add_target(cross_win_ld_rsp)
+
+    var cross_rt_windows = target_new(.Group, "cross-rt-windows", "")
+    cross_rt_windows = cross_rt_windows.dep("cross-win-embedded-objects-object")
+    cross_rt_windows = cross_rt_windows.dep("cross-win-llvm-bridge-object")
+    cross_rt_windows = cross_rt_windows.dep("cross-win-clang-bridge-object")
+    cross_rt_windows = cross_rt_windows.dep("cross-win-llvm-link-metadata")
+    out = out.add_target(cross_rt_windows)
 
     // The compiler links to an UNSTAMPED intermediate whose inputs (out/gen/main.w
     // + src) are commit-independent, so it caches across commits (#650). A cheap
