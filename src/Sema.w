@@ -361,6 +361,19 @@ fn sema_effect_bits_text(bits: i32) -> str:
 
 // ── Sema state ───────────────────────────────────────────────────
 
+// D22 Stage 2: one semantic record for a shared-reference expression that an
+// independently resolved owned context will materialize. `exact_source_type`
+// remains &T. `owned_value_type` is T, and `target_type` is the destination
+// after any ordinary value coercion. A differing `post_copy_type` records that
+// final coercion explicitly for later MIR/backend consumption.
+type ContextualCopyAdjustment {
+    source_node: i32,
+    exact_source_type: i32,
+    owned_value_type: i32,
+    target_type: i32,
+    post_copy_type: i32,
+}
+
 type Sema {
     pool: InternPool,
     diags: DiagnosticList,
@@ -839,13 +852,11 @@ type Sema {
     // consumed by MirLower.lower_call_arg to borrow the place instead of
     // moving the collection.
     slice_coerce_args: HashMap[i32, i32],
-    // Shared-reference call argument node -> checked reference type when its
-    // Copy pointee is passed by value.
-    // TODO(D22): this call-only sidecar is the old implementation boundary.
-    // Contextual Copy materialization is now a general owned-demand rule; the
-    // approved implementation design must represent every demand context
-    // uniformly without changing inference or pattern-projected types.
-    auto_copy_ref_args: HashMap[i32, i32],
+    // D22 Stage 2 contextual-Copy decisions. The node map indexes the single
+    // structured record consumed by later stages; expression type inference
+    // never reads this sidecar and therefore remains exact.
+    contextual_copy_adjustment_indices: HashMap[i32, i32],
+    contextual_copy_adjustments: Vec[ContextualCopyAdjustment],
     // #604 stage 1: >0 while resolving a function-signature parameter type —
     // the only position where `[]mut T` is legal in this release.
     in_param_type_position: i32,
@@ -1964,7 +1975,8 @@ fn sema_empty_state(pool: InternPool, diags: DiagnosticList, ast: AstPool) -> Se
         autoderef_step_starts: sema_new_map_i32_i32(),
         autoderef_step_counts: sema_new_map_i32_i32(),
         slice_coerce_args: sema_new_map_i32_i32(),
-        auto_copy_ref_args: sema_new_map_i32_i32(),
+        contextual_copy_adjustment_indices: sema_new_map_i32_i32(),
+        contextual_copy_adjustments: Vec.new(),
         in_param_type_position: 0,
         autoderef_step_fns: Vec.new(),
         autoderef_step_tys: Vec.new(),

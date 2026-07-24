@@ -328,6 +328,15 @@ impl Sema:
         let total_decl_count = self.ast.decl_count()
         let dump_decl_count = total_decl_count
         out.push_str(f"typed module decls={dump_decl_count}\n")
+        out.push_str(f"typed contextual-copy-adjustments={self.contextual_copy_adjustments.len()}\n")
+        for ai in 0..self.contextual_copy_adjustments.len() as i32:
+            let adjustment = self.contextual_copy_adjustments.get(ai as i64)
+            out.push_str(f"adjust[{ai}] node={adjustment.source_node} exact={self.type_name(adjustment.exact_source_type)} owned={self.type_name(adjustment.owned_value_type)} target={self.type_name(adjustment.target_type)}")
+            if adjustment.post_copy_type != 0:
+                out.push_str(" post=" ++ self.type_name(adjustment.post_copy_type))
+            else:
+                out.push_str(" post=identity")
+            out.push_str("\n")
 
         for di in 0..dump_decl_count:
             let decl = self.ast.get_decl(di)
@@ -493,6 +502,15 @@ impl Sema:
         if requested_limit > 0 and requested_limit <= total_decl_count:
             dump_decl_count = requested_limit
         with_write(f"typed module decls={dump_decl_count}\n")
+        with_write(f"typed contextual-copy-adjustments={self.contextual_copy_adjustments.len()}\n")
+        for ai in 0..self.contextual_copy_adjustments.len() as i32:
+            let adjustment = self.contextual_copy_adjustments.get(ai as i64)
+            with_write(f"adjust[{ai}] node={adjustment.source_node} exact={self.type_name(adjustment.exact_source_type)} owned={self.type_name(adjustment.owned_value_type)} target={self.type_name(adjustment.target_type)}")
+            if adjustment.post_copy_type != 0:
+                with_write(" post=" ++ self.type_name(adjustment.post_copy_type))
+            else:
+                with_write(" post=identity")
+            with_write("\n")
 
         for di in 0..dump_decl_count:
             let decl = self.ast.get_decl(di)
@@ -661,6 +679,14 @@ impl Sema:
         if has_typed_expr:
             let tid = self.typed_expr_types.get(node).unwrap()
             out = out ++ f"{typed_indent(indent)}expr {typed_expr_kind_name(kind)} span={start}..{end} : {self.type_name(tid)}\n"
+            if self.has_contextual_copy_adjustment(node) != 0:
+                let adjustment = self.contextual_copy_adjustment(node)
+                out = out ++ typed_indent(indent + 1) ++ "adjust contextual-copy exact=" ++ self.type_name(adjustment.exact_source_type) ++ " owned=" ++ self.type_name(adjustment.owned_value_type) ++ " target=" ++ self.type_name(adjustment.target_type)
+                if adjustment.post_copy_type != 0:
+                    out = out ++ " post=" ++ self.type_name(adjustment.post_copy_type)
+                else:
+                    out = out ++ " post=identity"
+                out = out ++ "\n"
 
         if kind == NodeKind.NK_LET_BINDING:
             if self.typed_binding_types.contains(node):
@@ -957,6 +983,15 @@ impl Sema:
             with_write(f" span={start}..{end} : ")
             with_write(self.type_name(tid))
             with_write("\n")
+            if self.has_contextual_copy_adjustment(node) != 0:
+                let adjustment = self.contextual_copy_adjustment(node)
+                emit_typed_indent(indent + 1)
+                with_write("adjust contextual-copy exact=" ++ self.type_name(adjustment.exact_source_type) ++ " owned=" ++ self.type_name(adjustment.owned_value_type) ++ " target=" ++ self.type_name(adjustment.target_type))
+                if adjustment.post_copy_type != 0:
+                    with_write(" post=" ++ self.type_name(adjustment.post_copy_type))
+                else:
+                    with_write(" post=identity")
+                with_write("\n")
 
         if kind == NodeKind.NK_LET_BINDING:
             if self.typed_binding_types.contains(node):
