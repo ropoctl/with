@@ -11985,7 +11985,7 @@ impl MirBuilder:
                         // never registered; the fn-level frame exposed it.
                         if vc_arg != 0:
                             let vc_arg_drop_ty = if vc_payload_ty != 0: vc_payload_ty else: self.expr_type(vc_arg)
-                            if self.sema.type_needs_drop_frozen(vc_arg_drop_ty) != 0:
+                            if self.sema.is_copy_frozen(vc_arg_drop_ty) == 0:
                                 self.consume_moved_operand(vc_arg_op)
                     let vc_fid = self.body.new_agg_fields(vc_fields, vc_names)
                     let vc_rv = self.body.new_rvalue(RvalueKind.RK_AGGREGATE, 1, vc_fid, vc_variant_idx)
@@ -12160,13 +12160,20 @@ impl MirBuilder:
                 sl_fields.push(f_op)
                 sl_names.push(resolved_name)
                 self.expected_type = saved_expected
-                // #605: a Drop-bearing field value is moved into the aggregate; mark
+                // #605: a non-Copy field value is moved into the aggregate; mark
                 // the source consumed so it is not also dropped at its scope exit
-                // (otherwise its destructor runs twice -> double-free). Gated on a
-                // Drop impl: non-Drop value types are left to copy, which the
-                // codebase relies on to share data across constructions and which is
-                // harmless without a destructor.
-                if self.sema.type_needs_drop_frozen(f_ty) != 0:
+                // (otherwise the buffer it now shares with the aggregate is freed
+                // twice -> double-free). The gate must match the drop scheduler,
+                // which schedules a value drop for every non-Copy local
+                // (is_copy_frozen == 0 in lower_let_binding) — including
+                // compiler-managed heap types (HashMap/Vec/str) that own a buffer
+                // but carry no user Drop impl, so type_needs_drop_frozen reports 0
+                // for them. Gating the consume on type_needs_drop_frozen left those
+                // fields dropped-and-aliased: the exact double-free that blocked
+                // self-host (sema_empty_state and every struct built from moved
+                // non-Copy locals). A genuinely POD non-Copy field gets a no-op
+                // drop that the moved-skip elides — harmless.
+                if self.sema.is_copy_frozen(f_ty) == 0:
                     self.consume_moved_operand(f_op)
             if self.sema.type_decl_nodes.contains(sl_name_sym):
                 let sl_td_node = self.sema.type_decl_nodes.get(sl_name_sym).unwrap()
@@ -12198,7 +12205,7 @@ impl MirBuilder:
                             sl_fields.push(def_op)
                             sl_names.push(decl_field_name)
                             self.expected_type = saved_expected
-                            if self.sema.type_has_drop_impl(decl_field_ty) != 0:
+                            if self.sema.is_copy_frozen(decl_field_ty) == 0:
                                 self.consume_moved_operand(def_op)
             let sl_fid = self.body.new_agg_fields(sl_fields, sl_names)
             let sl_rv = self.body.new_rvalue(RvalueKind.RK_AGGREGATE, 0, sl_fid, 0)
@@ -12273,7 +12280,7 @@ impl MirBuilder:
                 // source so its destructor is not also run at its scope exit (which
                 // would double-free). Paired with the tuple's element-drop
                 // (mir_emit_drop_tuple_ptr) — both land together.
-                if self.sema.type_needs_drop_frozen(elem_ty) != 0:
+                if self.sema.is_copy_frozen(elem_ty) == 0:
                     self.consume_moved_operand(elem_op)
             let tup_fid = self.body.new_agg_fields(tup_fields, tup_names)
             let tup_rv = self.body.new_rvalue(RvalueKind.RK_AGGREGATE, 0, tup_fid, 0)
@@ -12337,7 +12344,7 @@ impl MirBuilder:
                 // #605/#606: move a Drop element into the array; consume the source so
                 // it is not also dropped at scope exit. Paired with the array's
                 // element-drop (mir_emit_drop_array_ptr) — both land together.
-                if self.sema.type_needs_drop_frozen(self.expr_type(elem_node)) != 0:
+                if self.sema.is_copy_frozen(self.expr_type(elem_node)) == 0:
                     self.consume_moved_operand(arr_elem_op)
             let arr_fid = self.body.new_agg_fields(arr_fields, arr_names)
             let arr_rv = self.body.new_rvalue(RvalueKind.RK_AGGREGATE, 0, arr_fid, 0)
@@ -12397,7 +12404,7 @@ impl MirBuilder:
                 // source so it is not also dropped at scope exit. Paired with the
                 // enum's variant-aware payload drop (mir_emit_drop_enum_ptr).
                 let vs_arg_drop_ty = if vs_payload_ty != 0: vs_payload_ty else: self.expr_type(vs_arg)
-                if self.sema.type_needs_drop_frozen(vs_arg_drop_ty) != 0:
+                if self.sema.is_copy_frozen(vs_arg_drop_ty) == 0:
                     self.consume_moved_operand(vs_arg_op)
             let vs_fid = self.body.new_agg_fields(vs_fields, vs_names)
             let vs_rv = self.body.new_rvalue(RvalueKind.RK_AGGREGATE, 1, vs_fid, vs_variant_idx)
