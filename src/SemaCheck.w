@@ -15215,8 +15215,7 @@ impl Sema:
 
         // Check blanket impls: impl[T: Bound] Trait for T
         if found == 0:
-            var __bg_in = self.blanket_guard
-            __bg_in.insert(key)
+            self.blanket_guard.insert(key)
             for bi in 0..self.blanket_trait_syms.len() as i32:
                 if self.blanket_trait_syms.get(bi as i64) != trait_sym:
                     continue
@@ -15238,11 +15237,9 @@ impl Sema:
                         all_satisfied = 0
                 if all_satisfied != 0:
                     found = 1
-            var __bg_out = self.blanket_guard
-            let _ = __bg_out.remove(key)
+            let _ = self.blanket_guard.remove(key)
 
-        var __sc = self.selection_cache
-        __sc.insert(key, found)
+        self.selection_cache.insert(key, found)
         found
 
     fn subst_vec_lookup(names: &Vec[i32], types: &Vec[i32], name: i32) -> i32:

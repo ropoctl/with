@@ -3196,10 +3196,11 @@ impl Sema:
                 continue
             let te_start = self.type_d1.get(ti as i64)
             if self.type_extra_matches(te_start, args, arg_count) != 0:
-                // interior-mut cache: HashMap is a stable heap handle, so inserting
-                // through a copy of the handle keeps `self` a read borrow (D7).
-                var gic = self.generic_inst_cache
-                gic.insert(key, ti)
+                // Memoize the resolved instance. Mutate the cache in place; do
+                // NOT bind `self.generic_inst_cache` into a local — that shallow-
+                // copies the handle and schedules a drop that frees `self`'s
+                // buffer at scope end (aliasing XOR mutation; §2.5.1 / D7).
+                self.generic_inst_cache.insert(key, ti)
                 return ti as TypeId
         0 as TypeId
 
@@ -4798,8 +4799,7 @@ impl Sema:
                 return 1
         if self.needs_drop_visit.contains(resolved as i32):
             return 0
-        var __ndv_in = self.needs_drop_visit
-        __ndv_in.insert(resolved as i32)
+        self.needs_drop_visit.insert(resolved as i32)
         var result = 0
         if tk == TypeKind.TY_TUPLE:
             let te_start = self.get_type_d0(resolved)
@@ -4828,8 +4828,7 @@ impl Sema:
                             result = 1
                             break
                     vidx = vidx + 1
-        var __ndv_out = self.needs_drop_visit
-        let _ = __ndv_out.remove(resolved as i32)
+        let _ = self.needs_drop_visit.remove(resolved as i32)
         result
 
     mut fn emit_implicit_drop_view_use_error(view_sym: i32, origin_sym: i32, origin_node: i32):
@@ -6556,8 +6555,7 @@ impl Sema:
             // Break copy-check recursion on cyclic type graphs.
             if self.copy_visit_stack.contains(resolved as i32):
                 return 0
-            var __cvs_in = self.copy_visit_stack
-            __cvs_in.insert(resolved as i32)
+            self.copy_visit_stack.insert(resolved as i32)
 
             var out = 1
             if tk == TypeKind.TY_ARRAY:
@@ -6572,8 +6570,7 @@ impl Sema:
             else: // TypeKind.TY_RANGE
                 out = self.is_copy(self.get_type_d0(resolved))
 
-            var __cvs_out = self.copy_visit_stack
-            let _ = __cvs_out.remove(resolved as i32)
+            let _ = self.copy_visit_stack.remove(resolved as i32)
             return out
         if tk == TypeKind.TY_ENUM:
             // Enums are non-Copy by default; opt-in via `impl Copy for T`.
@@ -6608,8 +6605,7 @@ impl Sema:
             return self.drop_method_cache.get(type_name).unwrap()
 
         let has = self.select_trait_impl(type_name, self.syms.drop)
-        var __dc = self.drop_method_cache
-        __dc.insert(type_name, has)
+        self.drop_method_cache.insert(type_name, has)
         has
 
     fn record_drop_consumed_field(owner_sym: i32, field_sym: i32):
