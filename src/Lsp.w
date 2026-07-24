@@ -511,7 +511,13 @@ impl LspDocument:
             var methods: Vec[str] = Vec.new()
             let existing = self.cached_trait_methods.get(type_name)
             if existing.is_some():
-                methods = existing.unwrap()
+                // D22: `get` yields Option[&Vec]; copy the Copy str elements
+                // into this owned, later-mutated Vec instead of aliasing.
+                let ex_src = existing.unwrap()
+                var ex_i = 0
+                while ex_i < ex_src.len() as i32:
+                    methods.push(ex_src.get(ex_i as i64))
+                    ex_i = ex_i + 1
             var ti = 0
             while ti < count:
                 let trait_sym = sema.impl_extra.get((start + ti) as i64)
@@ -549,7 +555,15 @@ impl LspDocument:
             return Vec.new()
         let opt = self.cached_trait_methods.get(type_name)
         if opt.is_some():
-            return opt.unwrap()
+            // D22: `get` yields Option[&Vec]; return an independent owned Vec
+            // (copying the Copy str elements) rather than aliasing the cache.
+            var out: Vec[str] = Vec.new()
+            let src = opt.unwrap()
+            var i = 0
+            while i < src.len() as i32:
+                out.push(src.get(i as i64))
+                i = i + 1
+            return out
         Vec.new()
 
     mut fn invalidate():
