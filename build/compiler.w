@@ -1485,6 +1485,12 @@ pub fn run_patch_version_action(ctx: ActionCtx) -> i32:
     let version = comp_resolve_compiler_version(ctx)
     if version.len() == 0:
         return comp_fail(ctx, "could not resolve compiler version from src/version")
+    // Materialize the out/command/<name> marker directory that the action
+    // verifier expects for every declared extra_output (the sibling
+    // run_with_compiler_build_action creates its capture dir the same way).
+    let capture_dir = comp_join("out/command", ctx.target_name())
+    if ctx.fs().mkdir_all(capture_dir) != 0:
+        return comp_fail(ctx, "could not create capture directory: " ++ capture_dir)
     comp_patch_version_binary(ctx, unstamped, output_path, version)
 
 pub fn run_generate_llvm_link_metadata_action(ctx: ActionCtx) -> i32:

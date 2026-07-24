@@ -524,6 +524,12 @@ fn link_stage_make_linux_llvm_link_command(llvm_ld: str, obj_path: str, bin_path
     let cleanup_files = link_stage_collect_cleanup_files(&extras)
     LinkStageCommand { linker: llvm_ld, args, cwd: "", env, inputs, outputs, cleanup_files }
 
+fn link_stage_windows_libpath(var_name: str, fallback: str) -> str:
+    let v = runtime_getenv(var_name)
+    if v.len() > 0:
+        return v
+    fallback
+
 fn link_stage_make_windows_llvm_link_command(llvm_ld: str, obj_path: str, bin_path: str, extras: Vec[str], link_libs: Vec[str], link_args: Vec[str]) -> LinkStageCommand:
     let args: Vec[str] = Vec.new()
     let env: Vec[LinkStageEnvVar] = Vec.new()
@@ -536,9 +542,13 @@ fn link_stage_make_windows_llvm_link_command(llvm_ld: str, obj_path: str, bin_pa
     args.push("/stack:8388608")
     args.push("/opt:ref")
     args.push("/opt:icf")
-    args.push("/libpath:C:/Program Files (x86)/Windows Kits/10/Lib/10.0.19041.0/um/x64")
-    args.push("/libpath:C:/Program Files (x86)/Windows Kits/10/Lib/10.0.19041.0/ucrt/x64")
-    args.push("/libpath:C:/Program Files (x86)/Microsoft Visual Studio/2019/BuildTools/VC/Tools/MSVC/14.29.30133/lib/x64")
+    // Library search paths. On a Windows host these are the standard
+    // MSVC/WinSDK install locations; for a cross link from another host
+    // point them at a splatted lib tree (e.g. xwin output) via the
+    // WITH_WINDOWS_* env vars.
+    args.push("/libpath:" ++ link_stage_windows_libpath("WITH_WINDOWS_UM_LIBDIR", "C:/Program Files (x86)/Windows Kits/10/Lib/10.0.19041.0/um/x64"))
+    args.push("/libpath:" ++ link_stage_windows_libpath("WITH_WINDOWS_UCRT_LIBDIR", "C:/Program Files (x86)/Windows Kits/10/Lib/10.0.19041.0/ucrt/x64"))
+    args.push("/libpath:" ++ link_stage_windows_libpath("WITH_WINDOWS_MSVC_LIBDIR", "C:/Program Files (x86)/Microsoft Visual Studio/2019/BuildTools/VC/Tools/MSVC/14.29.30133/lib/x64"))
     args.push("/out:" ++ bin_path)
     outputs.push(bin_path)
     args.push(obj_path)
@@ -590,6 +600,18 @@ fn link_stage_elf_lld_for(llvm_ld: str) -> str:
         return sibling
     ""
 
+// The lld flavor for a Windows COFF/PE link. `lld-link` ships beside
+// the host llvm_ld in the same SDK bin directory (a symlink to `lld`
+// in the published SDKs); invoking lld as lld-link performs a native
+// COFF link from any host, so no wine is needed for the link itself.
+fn link_stage_coff_lld_for(llvm_ld: str) -> str:
+    if link_stage_basename(llvm_ld) == "lld-link" or link_stage_basename(llvm_ld) == "lld-link.exe":
+        return llvm_ld
+    let sibling = link_stage_dirname(llvm_ld) ++ "/lld-link"
+    if link_stage_file_exists(sibling):
+        return sibling
+    ""
+
 fn link_stage_make_llvm_link_command(llvm_ld: str, obj_path: str, bin_path: str, extras: Vec[str], link_libs: Vec[str], link_args: Vec[str]) -> LinkStageCommand:
     // A --target selection overrides the host: pick the target's link
     // recipe and lld flavor (§18.5 — cross-compilation is a normal mode).
@@ -601,6 +623,12 @@ fn link_stage_make_llvm_link_command(llvm_ld: str, obj_path: str, bin_path: str,
                 with_eprint("error: cross link needs the ELF lld driver (ld.lld) next to " ++ llvm_ld)
                 return LinkStageCommand { linker: "", args: Vec.new(), cwd: "", env: Vec.new(), inputs: Vec.new(), outputs: Vec.new(), cleanup_files: Vec.new() }
             return link_stage_make_linux_llvm_link_command(elf_ld, obj_path, bin_path, extras, link_libs, link_args)
+        if target_spec_active_kind() == 5:
+            let coff_ld = link_stage_coff_lld_for(llvm_ld)
+            if coff_ld.len() == 0:
+                with_eprint("error: cross link needs the COFF lld driver (lld-link) next to " ++ llvm_ld)
+                return LinkStageCommand { linker: "", args: Vec.new(), cwd: "", env: Vec.new(), inputs: Vec.new(), outputs: Vec.new(), cleanup_files: Vec.new() }
+            return link_stage_make_windows_llvm_link_command(coff_ld, obj_path, bin_path, extras, link_libs, link_args)
         with_eprint("error: unsupported cross link target: " ++ target_spec_name())
         return LinkStageCommand { linker: "", args: Vec.new(), cwd: "", env: Vec.new(), inputs: Vec.new(), outputs: Vec.new(), cleanup_files: Vec.new() }
     let os = runtime_sysinfo_os()
@@ -940,6 +968,8 @@ fn link_stage_platform_runtime_object() -> str:
             return "rt_linux_x86_64.o"
         if target_spec_active_kind() == 2:
             return "rt_linux_aarch64.o"
+        if target_spec_active_kind() == 5:
+            return "rt_windows_x86_64.o"
         with_eprint("error: unsupported cross runtime platform: " ++ target_spec_name())
         return ""
     link_stage_host_platform_runtime_object()
@@ -961,7 +991,7 @@ fn link_stage_host_platform_runtime_object() -> str:
     ""
 
 fn link_stage_make_archive(obj_path: str) -> str:
-    if runtime_sysinfo_os() == "Windows":
+    if runtime_sysinfo_os() == "Windows" or target_spec_active_kind() == 5:
         return obj_path
     // Wrap a .o file in a .a archive so the linker treats it as a library
     // (only pulling in symbols that aren't already defined).
