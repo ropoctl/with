@@ -40,6 +40,62 @@ jobs:
           chmod +x src/main
           src/main version
 
+      # The static LLVM SDK that `build :deps` fetches is published as a per-
+      # platform release asset. The build tree currently expects a `.tar.gz`
+      # asset (self-hosted zlib_gunzip in `run_deps_download_action`), but every
+      # release published so far ships the SDK only as `.tar.zst`. Until a
+      # release is cut with `.tar.gz` assets, `build :deps` cannot find its
+      # asset and the build fails. Provision `.deps/` directly here, preferring
+      # the correct `.tar.gz` and falling back to the `.tar.zst` that shipped in
+      # the last release, so `build :deps` finds its marker already present and
+      # succeeds without changing the self-hosted fetch path.
+      - name: Provision LLVM SDK (bridge .tar.gz/.tar.zst release skew)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WITH_SDK_REPO: withlang-dev/with
+        run: |
+          set -euo pipefail
+          prefix="$LLVM_PREFIX"
+          if [ -f "$prefix/lib/libclang.a" ]; then
+            echo "SDK already provisioned at $prefix"
+            exit 0
+          fi
+          # Derive "<ver>" and the darwin-aarch64 asset base from the prefix dir
+          # name (.deps/llvm-<ver>-darwin-arm64).
+          dir="$(basename "$prefix")"        # llvm-<ver>-darwin-arm64
+          ver="${dir#llvm-}"; ver="${ver%-darwin-arm64}"
+          base="with-llvm-sdk-${ver}-darwin-aarch64"
+          asset=""; tag=""
+          # Newest release first; within a release prefer .tar.gz over .tar.zst.
+          while IFS= read -r candidate; do
+            names="$(gh release view "$candidate" --repo "$WITH_SDK_REPO" --json assets --jq '.assets[].name')"
+            if printf '%s\n' "$names" | grep -qx "${base}.tar.gz"; then
+              asset="${base}.tar.gz"; tag="$candidate"; break
+            fi
+            if printf '%s\n' "$names" | grep -qx "${base}.tar.zst"; then
+              asset="${base}.tar.zst"; tag="$candidate"; break
+            fi
+          done < <(gh release list --repo "$WITH_SDK_REPO" --limit 50 --json tagName --jq '.[].tagName')
+          if [ -z "$asset" ]; then
+            echo "error: no release publishes ${base}.tar.gz or ${base}.tar.zst" >&2
+            exit 1
+          fi
+          echo "provisioning SDK from $tag: $asset"
+          mkdir -p .deps
+          curl -fL -o "$RUNNER_TEMP/$asset" \
+            "https://github.com/$WITH_SDK_REPO/releases/download/$tag/$asset"
+          case "$asset" in
+            *.tar.gz)  tar -xzf "$RUNNER_TEMP/$asset" -C .deps ;;
+            *.tar.zst)
+              if tar --help 2>&1 | grep -q -- --zstd; then
+                tar --zstd -xf "$RUNNER_TEMP/$asset" -C .deps
+              else
+                zstd -d -c "$RUNNER_TEMP/$asset" | tar -xf - -C .deps
+              fi ;;
+          esac
+          test -f "$prefix/lib/libclang.a"
+          echo "SDK provisioned at $prefix"
+
       - name: Fetch SDK
         run: src/main build :deps
 
