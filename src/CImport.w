@@ -10,6 +10,7 @@ use CiMigrate
 use std.cfg.stackify
 use compiler.ClangBridge.*
 use compiler.EmbeddedClangResource
+use TargetSpec
 
 extern fn with_parse_float(s: str) -> f64
 
@@ -576,6 +577,12 @@ fn process_c_import_with_defines(header_spec: str, defines: Vec[str]) -> str:
     c_import_untranslated_macros_clear()
     c_import_omitted_symbols_clear()
     c_import_included_files_clear()
+    // Cross builds would parse HOST headers and bake host C ABI facts
+    // into target code — silently wrong output. Fail loudly until
+    // c_import can parse against a target sysroot (§18.5).
+    if not target_spec_is_native():
+        g_cimport_last_error = "c_import is not supported with --target " ++ target_spec_name() ++ " yet: header parsing would use host headers, not the target's"
+        return ""
     g_cimport_raw_function_names = ""
     ci_record_field_caches_clear()
     g_cimport_report_untranslated_macros = ci_should_report_untranslated_macros(header_spec)

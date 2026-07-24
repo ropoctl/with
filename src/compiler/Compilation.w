@@ -22,9 +22,11 @@ use compiler.Zcu
 use compiler.Runtime
 use Overflow
 use Analysis
+use TargetSpec
 
 extern fn with_alloc(size: i64) -> *mut u8
 extern fn with_free(ptr: *mut u8) -> Unit
+extern fn wl_set_active_target_triple(triple: str) -> Unit
 
 fn profile_enabled() -> bool:
     runtime_getenv("WITH_PROFILE").len() > 0
@@ -362,6 +364,14 @@ impl Compilation:
         self.set_overflow_mode(options.overflow_mode)
         self.set_debug_info(options.debug_info)
         self.set_compiler_hooks_enabled(options.compiler_hooks_enabled)
+        self.set_target_kind(options.target_kind)
+
+    // Install the --target selection (§18.5) before any parse or
+    // codegen: @[target] guards, comptime sysinfo, C-ABI decisions,
+    // LLVM triple, and the link stage all read the active target.
+    mut fn set_target_kind(kind: i32):
+        target_spec_set_active(kind)
+        wl_set_active_target_triple(target_spec_llvm_triple())
 
     fn apply_runtime_config(cfg: ProjectConfig) -> ProjectConfig:
         var out = cfg
