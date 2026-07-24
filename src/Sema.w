@@ -5619,12 +5619,14 @@ impl Sema:
             let file_id = self.consume_call_sites.get((i + 3) as i64)
             i = i + 9
             // share-place param: the caller keeps ownership; no transfer needed.
-            // (Only movable named bindings were recorded, so an owned param here is a
-            // genuine ownership transfer that must be made explicit.)
+            // D5 call-site `move` ceremony retired (spec §3.8: a plain call f(x)
+            // is always legal; a consuming signature never requires a redundant
+            // call-site `move`). The transfer is decided by the callee signature,
+            // not by a spelling at the call site, so this site emits no diagnostic.
             if self.sig_param_uses_value_ref_abi(callee_sig, callee_pi) != 0:
                 continue
-            self.local_file_id = file_id
-            self.emit_error("this parameter takes ownership of a non-Copy value (it is consumed or escapes the call); pass `move x` to transfer ownership, or `copy x` for an independent copy (§3.8)", arg_node)
+            let _ = arg_node
+            let _ = file_id
 
     fn get_sig(name: i32) -> i32:
         if self.sig_lookup.contains(name):

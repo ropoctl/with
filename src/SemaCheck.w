@@ -18278,16 +18278,11 @@ impl Sema:
             if self.method_arg_stores_value(obj_type as i32, field, ai) != 0:
                 self.check_ephemeral_task_storage(mc_arg_node, "generic container")
                 // Container stores take ownership of their element just like an
-                // owned function parameter. Builtins have no ordinary signature
-                // for finalize_call_site_ownership to inspect, so enforce D5 at
-                // this semantic boundary instead of silently moving a plain named
-                // binding in MIR. Rvalues need no spelling; `copy` keeps the
-                // source; `move` is invalidated by check_expr itself.
-                let mc_store_arg_kind = self.ast.kind(mc_arg_node)
-                if mc_store_arg_kind != NodeKind.NK_MOVE_ARG and mc_store_arg_kind != NodeKind.NK_COPY_ARG and self.is_copy(mc_arg_ty as TypeId) == 0:
-                    let mc_store_root = self.place_root_sym(mc_arg_node)
-                    if mc_store_root != 0 and self.scope_has(mc_store_root) != 0:
-                        self.emit_error("this parameter takes ownership of a non-Copy value (it is consumed or escapes the call); pass `move x` to transfer ownership, or `copy x` for an independent copy (§3.8)", mc_arg_node)
+                // owned function parameter. D5 call-site `move` ceremony retired
+                // (spec §3.8: a plain call — including a container store like
+                // `xs.push(x)` — is always legal; the consuming signature is
+                // authoritative). No diagnostic here; ownership transfer is
+                // decided by the callee, not by a spelling at the call site.
                 // #625 (viral-escape, decisions.md D2): storing an ephemeral
                 // element propagates its stack view-origins onto the container
                 // binding, so a later escape (return / heap-store / box) of the
