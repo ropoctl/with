@@ -1708,9 +1708,7 @@ impl MirBuilder:
                 if tk == TypeKind.TY_GENERIC_INST:
                     let value_ty = self.sema.get_generic_inst_arg(resolved, 1)
                     if method_name == "get":
-                        // D22 map-view flip retracted until Stage 6 (owned Option[V]);
-                        // see the HashMap.get note in SemaCheck.w.
-                        return self.sema.find_option_type_for(value_ty)
+                        return self.sema.find_option_ref_type_for(value_ty)
                     if method_name == "remove":
                         return self.sema.find_option_type_for(value_ty)
                 if method_name == "values":

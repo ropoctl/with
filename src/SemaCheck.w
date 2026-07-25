@@ -17241,10 +17241,7 @@ impl Sema:
             if tk == TypeKind.TY_GENERIC_INST:
                 let value_ty = self.get_generic_inst_arg(resolved as i32, 1)
                 if field == self.syms.get:
-                    // D22 map-view flip retracted until Stage 6 lands atomically with
-                    // contextual-materialization coverage. Owned Option[V] pre-Stage-6,
-                    // matching stdlib BTreeMap.get.
-                    return self.ensure_option_type_for(value_ty)
+                    return self.ensure_option_ref_type_for(value_ty)
                 if field == self.syms.remove:
                     return self.ensure_option_type_for(value_ty)
         if owner_sym == self.syms.hashset:
@@ -19227,9 +19224,11 @@ impl Sema:
                     return self.ty_void as i32
                 if field == self.syms.get:
                     // D22 seeds map lookup from the receiver only. TODO(D22):
-                    // D22 map-view flip retracted until Stage 6 (see the HashMap.get
-                    // note in builtin_intrinsic_method_return_type); owned Option[V].
-                    return self.ensure_option_type_for(self.get_generic_inst_arg(recv_type, 1))
+                    // preserve this origin through every transparent carrier,
+                    // pattern, `?`, `??`, and eliminator instead of merely
+                    // recording it at the producer.
+                    self.record_builtin_receiver_view_origins(node, expr)
+                    return self.ensure_option_ref_type_for(self.get_generic_inst_arg(recv_type, 1))
                 if field == self.syms.contains:
                     return self.ty_bool as i32
                 if field == self.syms.remove:
@@ -19415,7 +19414,7 @@ impl Sema:
             // Builtin eliminators must transfer semantic origin sets exactly as
             // their non-builtin equivalents; no intrinsic may become an origin
             // erasure boundary.
-            if field == self.syms.get and type_name_sym == self.syms.slotmap:
+            if field == self.syms.get and (type_name_sym == self.syms.hashmap or type_name_sym == self.syms.slotmap):
                 self.record_builtin_receiver_view_origins(node, expr)
             self.typed_expr_types.insert(node, builtin_ret)
             return builtin_ret

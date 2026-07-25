@@ -1991,8 +1991,7 @@ impl CCodegen:
         var value_tid = self.hashmap_value_tid(self.operand_tid(body, recv_operand))
         if value_tid == 0:
             value_tid = self.call_hashmap_value_tid_from_usage(body, args_id)
-        // D22 map-view flip retracted until Stage 6: owned Option[V].
-        self.option_tid_for_payload(value_tid)
+        self.option_ref_tid_for_payload(value_tid)
 
     mut fn call_hashmap_value_tid_from_usage(body: &MirBody, args_id: i32) -> i32:
         let recv_operand = self.call_arg_operand(body, args_id, 0)
@@ -6114,21 +6113,18 @@ impl CCodegen:
                     return "    abort();"
                 let payload_tid = self.sema.type_reflection_variant_payload_type_frozen(dst_tid, some_variant, 0)
                 let payload_c = self.c_type(payload_tid, 0)
-                var out = "    " ++ cc_lbrace() ++ " " ++ key_ty ++ " __with_k = " ++ key_text ++ "; " ++ payload_c ++ " __with_v = " ++ self.zero_value_text(payload_tid) ++ ";"
-                out = out ++ " if ((" ++ recv ++ ") != 0 && with_hashmap_get((void*)(intptr_t)(" ++ recv ++ "), &__with_k, &__with_v, " ++ is_str_key ++ ") != 0) "
-                out = out ++ cc_lbrace() ++ " " ++ dst ++ " = " ++ self.payload_enum_literal(dst_tid, some_variant, "__with_v") ++ "; " ++ cc_rbrace()
+                var out = "    " ++ cc_lbrace() ++ " " ++ key_ty ++ " __with_k = " ++ key_text ++ "; void* __with_p = ((" ++ recv ++ ") != 0) ? with_hashmap_get_ptr((void*)(intptr_t)(" ++ recv ++ "), &__with_k, " ++ is_str_key ++ ") : (void*)0;"
+                out = out ++ " if (__with_p != (void*)0) "
+                out = out ++ cc_lbrace() ++ " " ++ dst ++ " = " ++ self.payload_enum_literal(dst_tid, some_variant, "(" ++ payload_c ++ ")__with_p") ++ "; " ++ cc_rbrace()
                 out = out ++ " else " ++ cc_lbrace() ++ " " ++ dst ++ " = " ++ self.payload_enum_literal(dst_tid, none_variant, "") ++ "; " ++ cc_rbrace()
                 out = out ++ " " ++ cc_rbrace() ++ "\n"
                 out = out ++ f"    goto bb{next_bb};"
                 return out
-            // Legacy encoded Option path for pointer/integer option lowering.
-            // (D22 map-view flip retracted until Stage 6: owned payload, not a
-            // pointer niche.)
-            var out = "    " ++ cc_lbrace() ++ " " ++ key_ty ++ " __with_k = " ++ key_text ++ "; int64_t __with_v = 0;"
-            out = out ++ " int64_t __with_r = 0;"
-            out = out ++ " if ((" ++ recv ++ ") != 0 && with_hashmap_get((void*)(intptr_t)(" ++ recv ++ "), &__with_k, &__with_v, " ++ is_str_key ++ ") != 0) "
-            out = out ++ cc_lbrace() ++ " __with_r = (__with_v + 1); " ++ cc_rbrace()
-            out = out ++ " memcpy(&(" ++ dst ++ "), &__with_r, sizeof(__with_r) < sizeof(" ++ dst ++ ") ? sizeof(__with_r) : sizeof(" ++ dst ++ ")); " ++ cc_rbrace() ++ "\n"
+            // D22: niche-lowered Option[&V] is the nullable pointer itself.
+            // Contextual Copy, when requested, must already be explicit in MIR;
+            // emit-C must not infer it from V or the destination spelling.
+            var out = "    " ++ cc_lbrace() ++ " " ++ key_ty ++ " __with_k = " ++ key_text ++ "; void* __with_p = ((" ++ recv ++ ") != 0) ? with_hashmap_get_ptr((void*)(intptr_t)(" ++ recv ++ "), &__with_k, " ++ is_str_key ++ ") : (void*)0;"
+            out = out ++ " memcpy(&(" ++ dst ++ "), &__with_p, sizeof(__with_p) < sizeof(" ++ dst ++ ") ? sizeof(__with_p) : sizeof(" ++ dst ++ ")); " ++ cc_rbrace() ++ "\n"
             out = out ++ f"    goto bb{next_bb};"
             return out
 
@@ -8009,11 +8005,11 @@ impl CCodegen:
                 let recv_tid = self.operand_tid_no_infer(body, recv_operand)
                 let value_tid = self.hashmap_value_tid(recv_tid)
                 if value_tid != 0 and self.is_void_tid(value_tid) == 0:
-                    let opt_tid = self.option_tid_for_payload(value_tid)
+                    let opt_tid = self.option_ref_tid_for_payload(value_tid)
                     acc = self.collect_struct_types_from_tid(move acc, opt_tid)
                 let dst_tid = self.place_local_tid(body, body.term_data2(bb))
                 if dst_tid != 0 and self.is_void_tid(dst_tid) == 0 and self.is_scalar_like_tid(dst_tid) == 0:
-                    let dst_opt_tid = self.option_tid_for_payload(dst_tid)
+                    let dst_opt_tid = self.option_ref_tid_for_payload(dst_tid)
                     acc = self.collect_struct_types_from_tid(move acc, dst_opt_tid)
             for li in 0..body.local_type_ids.len() as i32:
                 if self.check_interrupted() != 0:
@@ -8501,11 +8497,11 @@ impl CCodegen:
                 let recv_tid = self.operand_tid_no_infer(body, recv_operand)
                 let value_tid = self.hashmap_value_tid(recv_tid)
                 if value_tid != 0 and self.is_void_tid(value_tid) == 0:
-                    let _ = self.option_tid_for_payload(value_tid)
+                    let _ = self.option_ref_tid_for_payload(value_tid)
                 let dest_place = body.term_data2(bb)
                 let dst_tid = self.place_local_tid(body, dest_place)
                 if dst_tid != 0 and self.is_void_tid(dst_tid) == 0 and self.is_scalar_like_tid(dst_tid) == 0:
-                    let _ = self.option_tid_for_payload(dst_tid)
+                    let _ = self.option_ref_tid_for_payload(dst_tid)
 
     mut fn local_receives_ref(body: &MirBody, local_id: i32) -> bool:
         self.local_ref_target_tid(body, local_id) != 0
@@ -9069,8 +9065,6 @@ impl CCodegen:
         if self.module_exports_c_name("with_memcmp") == 0:
             out.write("extern int32_t with_memcmp(const void*, const void*, int64_t);\n")
         out.write("extern void* with_hashmap_get_ptr(void*, const void*, int64_t);\n")
-        if self.module_exports_c_name("with_hashmap_get") == 0:
-            out.write("extern int32_t with_hashmap_get(void*, const void*, void*, int64_t);\n")
         out.write("extern int64_t with_clock_nanos(void);\n")
         out.write("extern int32_t with_nanosleep(int64_t);\n")
         out.write("extern double with_parse_float(with_str);\n")

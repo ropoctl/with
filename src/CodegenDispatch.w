@@ -7894,56 +7894,24 @@ impl Codegen:
             let key = if key_ty != 0 and wl_type_of(key_raw) != key_ty: self.coerce_value_to_type(key_raw, key_ty) else: key_raw
             let key_alloca = self.create_entry_alloca(wl_type_of(key))
             wl_build_store(self.builder, key, key_alloca)
-            // D22 map-view flip retracted until Stage 6: owned Option[V] via the
-            // out-buffer runtime call, not the Option[&V] pointer niche.
-            // MirLower types get as real Option[V]; size the out-buffer as the
-            // payload V (the dest sema type is the option, not the value).
-            let dest_sema = self.mir_intrinsic_dest_sema_type(body, dest_place)
-            var payload_sema = dest_sema
-            if dest_sema > 0:
-                var opt_resolved = self.mir_resolve_alias_at(dest_sema)
-                var opt_tk = self.mir_type_kind_at(opt_resolved)
-                if opt_tk == 0 and opt_resolved >= self.mir_type_kinds_len() as i32 and opt_resolved > 0:
-                    opt_resolved = self.sema.resolve_alias(opt_resolved as TypeId) as i32
-                    opt_tk = self.sema.get_type_kind(opt_resolved as TypeId)
-                if opt_tk == TypeKind.TY_GENERIC_INST:
-                    let opt_base = if opt_resolved >= self.mir_type_kinds_len() as i32:
-                        self.sema.get_generic_inst_base(opt_resolved)
-                    else:
-                        self.mir_type_d0_at(opt_resolved)
-                    if opt_base == self.sema.syms.option:
-                        payload_sema = if opt_resolved >= self.mir_type_kinds_len() as i32:
-                            self.sema.get_generic_inst_arg(opt_resolved, 0)
-                        else:
-                            self.mir_type_extra_at(self.mir_type_d1_at(opt_resolved))
-            var val_ty = self.mir_sema_type_to_llvm(payload_sema)
-            if val_ty == 0:
-                val_ty = i64_ty
-            let out_alloca = self.create_entry_alloca(val_ty)
             let is_str_val = wl_const_int(i64_ty, if self.is_str_type(wl_type_of(key)): 1 else: 0, 0)
-            let fn_val = self.ensure_hm_fn("with_hashmap_get", i64_ty)
+            let fn_val = self.ensure_hm_fn("with_hashmap_get_ptr", ptr_ty)
             let get_params: Vec[i64] = Vec.new()
             get_params.push(ptr_ty)
             get_params.push(ptr_ty)
-            get_params.push(ptr_ty)
             get_params.push(i64_ty)
-            let fn_ty = wl_function_type(i64_ty, vec_data_i64(&get_params), 4, 0)
+            let fn_ty = wl_function_type(ptr_ty, vec_data_i64(&get_params), 3, 0)
             let get_args: Vec[i64] = Vec.new()
             get_args.push(map_ptr)
             get_args.push(key_alloca)
-            get_args.push(out_alloca)
             get_args.push(is_str_val)
-            let found = wl_build_call(self.builder, fn_ty, fn_val, vec_data_i64(&get_args), 4)
-            let val = wl_build_load(self.builder, val_ty, out_alloca)
-            // Always wrap in Option[V].
-            var dest_llvm = self.get_or_create_option_type(0, val_ty)
-            if dest_llvm != 0:
-                let is_found = wl_build_icmp(self.builder, wl_int_ne(), found, wl_const_int(i64_ty, 0, 0))
-                let some_val = self.build_option_some(val, dest_llvm)
-                let none_val = self.build_option_none(dest_llvm)
-                result = wl_build_select(self.builder, is_found, some_val, none_val)
-            else:
-                result = val
+            let value_ptr = wl_build_call(self.builder, fn_ty, fn_val, vec_data_i64(&get_args), 3)
+            // D22: Option[&V] uses the same nullable-pointer niche representation
+            // as SlotMap.get: null is None, and a live value address is Some(&V).
+            // Any contextual Copy must already be explicit in MIR; codegen never
+            // chooses lookup ownership from V or the destination type.
+            let dest_llvm = self.mir_sema_type_to_llvm(self.mir_intrinsic_dest_sema_type(body, dest_place))
+            result = if dest_llvm != 0 and wl_get_type_kind(dest_llvm) == wl_pointer_type_kind(): self.coerce_value_to_type(value_ptr, dest_llvm) else: value_ptr
 
         else if intrinsic == MirIntrinsic.MAP_CONTAINS:
             let recv_op = body.call_arg_operands.get(arg_start as i64)

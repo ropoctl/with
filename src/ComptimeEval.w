@@ -2765,7 +2765,7 @@ impl ComptimeEvaluator:
             // TODO(D22): once the implementation design lands, verify that
             // comptime elimination, joins, and contextual Copy use the same
             // resolved semantics as runtime rather than snapshot shape.
-            let get_opt_tid = self.map_option_result_tid(recv_value, node, 0)
+            let get_opt_tid = self.map_option_result_tid(recv_value, node, 1)
             if get_opt_tid == 0:
                 return self.fail(node, "HashMap.get() needs a resolved Option type in comptime")
             for i in 0..recv_value.extra_count:
