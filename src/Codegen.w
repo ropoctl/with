@@ -24,6 +24,7 @@ extern fn exit(code: i32) -> Unit
 extern fn with_fs_read_file(path: str) -> str
 extern fn with_vec_free(v: *mut u8) -> Unit
 extern fn with_hashmap_free(map: *mut u8) -> Unit
+extern fn with_memset(dst: *mut u8, c: i32, n: i64) -> Unit
 extern fn with_parse_float(s: str) -> f64
 extern fn with_eprint(s: str) -> Unit
 extern fn with_getenv_str(name: str) -> str
@@ -1171,6 +1172,17 @@ impl Codegen:
         with_hashmap_free(unsafe { *(&raw const self.mir_ref_capture_local_types as *const *mut u8) })
         with_vec_free(&raw mut self.mir_bb_values as *mut u8)
         with_vec_free(&raw mut self.mir_default_unreachable_bbs as *mut u8)
+        // The manual frees above are the sole, curated teardown: they free only
+        // the tables Codegen owns and deliberately skip the shared/aliased
+        // fields (intern↔Backend.pool, decl_source_paths↔caller, the source
+        // strings, the placeholder sema). But `self` is this move fn's terminal
+        // owner, so the compiler schedules a scope-exit `__drop_struct_<Codegen>`
+        // here — a full deep destructor that would (a) double-free every table
+        // just freed and (b) free those shared buffers. (Pre-D22 that auto-drop
+        // was empty, so this went unnoticed; D22 made the container drop glue
+        // real.) Zero self so the guarded auto-drop is a null-safe no-op —
+        // exactly the move-reset the compiler already emits for `deinit`.
+        with_memset(&raw mut self as *mut u8, 0, size_of[Codegen]())
 
     // #685 inc-2: deinit CONSUMES the Codegen — LLVM resources first (they
     // read self), then the table backings via the consuming tail call.

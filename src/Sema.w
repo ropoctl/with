@@ -1349,6 +1349,21 @@ fn sema_clone_i32_vec(values: &Vec[i32]) -> Vec[i32]:
         out.push(values.get(i as i64))
     out
 
+// Deep-clone a HashMap[str, str] so the destination owns independent backing
+// arrays and string payloads. A plain `dst = src.field` only shallow-copies the
+// map header, leaving both maps pointing at one buffer — two owners that
+// double-free at teardown (Zcu.c_import_omitted_symbols aliased into the round's
+// Sema was exactly this bug). Mirrors sema_clone_str_vec's owned-text policy.
+fn sema_clone_str_str_hashmap(src: &HashMap[str, str]) -> HashMap[str, str]:
+    var out: HashMap[str, str] = HashMap.new()
+    let ks = src.keys()
+    for i in 0..ks.len() as i32:
+        let k = ks.get(i as i64)
+        let v = src.get(k)
+        if v.is_some():
+            out.insert(sema_owned_text(k), sema_owned_text(v.unwrap()))
+    out
+
 impl Sema:
     pub move fn prepare_comptime_eval_copy() -> Sema:
         self.type_kinds = sema_clone_i32_vec(&self.type_kinds)

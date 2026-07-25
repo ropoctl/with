@@ -1582,7 +1582,7 @@ impl Zcu:
             pre_sema.source_text_file_ids = sema_clone_i32_vec(&self.source_text_file_ids)
             pre_sema.source_text_names = sema_clone_str_vec(&self.source_text_names)
             pre_sema.source_texts = sema_clone_str_vec(&self.source_texts)
-            pre_sema.ci_omitted_symbols = self.c_import_omitted_symbols
+            pre_sema.ci_omitted_symbols = sema_clone_str_str_hashmap(&self.c_import_omitted_symbols)
             pre_sema.tool_mode_entry_path = self.tool_mode_entry_path
             pre_sema.runtime_available = if self.project_config.runtime_available: 1 else: 0
             pre_sema.runtime_fiber_stack_size = self.project_config.runtime_fiber_stack_size
@@ -1606,7 +1606,7 @@ impl Zcu:
             self.source_text_file_ids = sema_clone_i32_vec(&pre_sema.source_text_file_ids)
             self.source_text_names = sema_clone_str_vec(&pre_sema.source_text_names)
             self.source_texts = sema_clone_str_vec(&pre_sema.source_texts)
-            self.c_import_omitted_symbols = pre_sema.ci_omitted_symbols
+            self.c_import_omitted_symbols = sema_clone_str_str_hashmap(&pre_sema.ci_omitted_symbols)
             var tracked_paths = self.tracked_input_paths
             self.tracked_input_paths = tracked_input_merge_unique(move tracked_paths, &pre_sema.tracked_input_paths)
             if self.diagnostics.has_errors() and self.analysis_partial_semantics == 0:
@@ -1637,7 +1637,7 @@ impl Zcu:
         sema.source_text_file_ids = sema_clone_i32_vec(&self.source_text_file_ids)
         sema.source_text_names = sema_clone_str_vec(&self.source_text_names)
         sema.source_texts = sema_clone_str_vec(&self.source_texts)
-        sema.ci_omitted_symbols = self.c_import_omitted_symbols
+        sema.ci_omitted_symbols = sema_clone_str_str_hashmap(&self.c_import_omitted_symbols)
         sema.tool_mode_entry_path = self.tool_mode_entry_path
         sema.runtime_available = if self.project_config.runtime_available: 1 else: 0
         sema.runtime_fiber_stack_size = self.project_config.runtime_fiber_stack_size
