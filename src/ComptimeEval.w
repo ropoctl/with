@@ -2759,9 +2759,9 @@ impl ComptimeEvaluator:
             let key_signal = self.eval_expr(self.ast.get_extra(extra_start))
             if key_signal.kind != ComptimeControlKind.CTL_VALUE:
                 return key_signal
-            // Runtime get returns owned Option[V] until the D22 map-view flip
-            // lands atomically with contextual-materialization coverage
-            // (Stage 6); the evaluator's enum snapshot matches that shape.
+            // Runtime get returns Option[&V]. The evaluator stores the referenced
+            // immutable value directly inside its internal enum snapshot; Sema's
+            // static type and origin tracking still enforce the borrow contract.
             // TODO(D22): once the implementation design lands, verify that
             // comptime elimination, joins, and contextual Copy use the same
             // resolved semantics as runtime rather than snapshot shape.
