@@ -3,10 +3,102 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 jobs:
+  selfhost-linux:
+    name: selfhost (Linux x86_64)
+    runs-on: ubuntu-latest
+    env:
+      WITH_OUT_DIR: ${{ github.workspace }}/out
+      WITH: ${{ github.workspace }}/src/main
+      LLVM_PREFIX: ${{ github.workspace }}/.deps/llvm-22.1.6-linux-x86_64
+      # The SDK's ld.lld is linked against libxml2.so.16; runners ship .so.2.
+      # A soname shim on LD_LIBRARY_PATH satisfies the loader.
+      LD_LIBRARY_PATH: ${{ github.workspace }}/.link-shim
+      # Bound aggregate parallelism so peak RSS fits a 16 GB runner (+ swap).
+      WITH_BUILD_JOBS: "2"
+      SEED_REPO: ropoctl/with
+      SEED_TAG: seed-08-d5bae558
+      SEED_ASSET: with-linux-x86_64
+      SDK_REPO: withlang-dev/with
+      SDK_TAG: v0.15.1
+      SDK_ASSET: with-llvm-sdk-22.1.6-linux-x86_64.tar.zst
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system packages
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends zstd libxml2 build-essential
+
+      - name: Add swap headroom
+        run: |
+          set -euo pipefail
+          sudo fallocate -l 24G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+
+      - name: libxml2 soname shim (ld.lld wants libxml2.so.16)
+        run: |
+          set -euo pipefail
+          mkdir -p .link-shim
+          real="$(ldconfig -p | awk '/libxml2\.so\.2 /{print $NF; exit}')"
+          if [ -z "${real:-}" ]; then real=/usr/lib/x86_64-linux-gnu/libxml2.so.2; fi
+          ln -sf "$real" .link-shim/libxml2.so.16
+          ls -l .link-shim
+
+      - name: Bootstrap seed
+        run: |
+          set -euo pipefail
+          curl -fL -o src/main \
+            "https://github.com/${SEED_REPO}/releases/download/${SEED_TAG}/${SEED_ASSET}"
+          chmod +x src/main
+          src/main version
+
+      - name: Fetch + extract LLVM SDK
+        run: |
+          set -euo pipefail
+          mkdir -p .deps
+          curl -fL -o /tmp/sdk.tar.zst \
+            "https://github.com/${SDK_REPO}/releases/download/${SDK_TAG}/${SDK_ASSET}"
+          zstd -dc /tmp/sdk.tar.zst | tar -x -C .deps
+          test -f "${LLVM_PREFIX}/lib/libclang.a" || {
+            echo "error: SDK missing libclang.a after extract" >&2
+            ls -la "${LLVM_PREFIX}/lib" 2>/dev/null | head || true
+            exit 1
+          }
+          # The SDK linker must load against the soname shim.
+          "${LLVM_PREFIX}/bin/ld.lld" --version
+
+      - name: Build stage1 (seed -> stage1)
+        run: src/main build :stage1
+
+      - name: Build stage2 (stage1 -> stage2)
+        run: src/main build :stage2
+
+      - name: Build stage3 (stage2 -> stage3)
+        run: src/main build :stage3
+
+      - name: Fixpoint (stage2 == stage3, byte-identical)
+        run: |
+          set -euo pipefail
+          cmp out/stage/bin/with-stage2 out/stage/bin/with-stage3
+          echo "fixpoint OK: stage2 == stage3 (byte-identical)"
+          sha256sum out/stage/bin/with-stage2 out/stage/bin/with-stage3
+
+  # macOS self-host is retained but gated to manual dispatch: its SDK fetch
+  # path (`build :deps`) requires a .tar.gz asset that the published SDK
+  # releases no longer provide, and it cannot be verified from the Linux CI
+  # host. Run it explicitly via workflow_dispatch once a darwin runner and a
+  # matching SDK asset are available.
   selfhost-macos:
     name: selfhost (macOS)
+    if: github.event_name == 'workflow_dispatch'
     runs-on: macos-latest
     env:
       WITH_OUT_DIR: ${{ github.workspace }}/out
