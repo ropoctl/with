@@ -1125,6 +1125,17 @@ unsafe fn comptime_eval_finish(sema_ptr: *mut Sema, evaluator: ComptimeEvaluator
         effect_records,
     }
 
+// Clone a Vec[str] into its own backing buffer. Minting a child capability from
+// a parent ActionCtx record copies the parent's Vec[str] fields; without this
+// clone the child's {ptr,len,cap} would alias the parent buffer and both records
+// in `capability_records` free it at evaluator teardown -> double-free at
+// safe-free. Same bug class as build_graph_clone_str_vec.
+fn comptime_clone_str_vec(src: &Vec[str]) -> Vec[str]:
+    var out: Vec[str] = Vec.new()
+    for i in 0..src.len() as i32:
+        out.push(src.get(i as i64))
+    out
+
 fn comptime_capability_record(kind: i32, package_name: str, package_version: str, project_root: str) -> ComptimeCapabilityRecord:
     ComptimeCapabilityRecord {
         kind,
@@ -5555,15 +5566,15 @@ impl ComptimeEvaluator:
             return comptime_control_error()
         var child = comptime_capability_record(child_kind, record.package_name, record.package_version, record.project_root)
         child.target_name = record.target_name
-        child.inputs = record.inputs
-        child.outputs = record.outputs
-        child.args = record.args
+        child.inputs = comptime_clone_str_vec(record.inputs)
+        child.outputs = comptime_clone_str_vec(record.outputs)
+        child.args = comptime_clone_str_vec(record.args)
         if child_kind == CapabilityKind.CK_BUILD_TOOL_FS:
-            child.write_scope = record.write_scope
+            child.write_scope = comptime_clone_str_vec(record.write_scope)
             child.write_scoped = 1
             child.scratch_path = record.scratch_path
         else if child_kind == CapabilityKind.CK_BUILD_PROCESS_RUNNER:
-            child.write_scope = record.write_scope
+            child.write_scope = comptime_clone_str_vec(record.write_scope)
             child.write_scoped = record.write_scoped
             child.network = record.network
         comptime_control_value(self.mint_capability(child_type, move child))

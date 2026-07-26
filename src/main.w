@@ -1454,7 +1454,14 @@ unsafe fn run_build_action_from_build_w(root: str, cfg: ProjectConfig, target: &
     if target.action_fn == 0:
         with_eprint("error: action target '" ++ target.name ++ "' is missing an evaluator action function")
         return build_action_run_result(1)
-    let result = comptime_eval_tool_action_result(sema_ptr, (*sema_ptr).ast, (*sema_ptr).pool, target.action_fn, cfg.package_name, cfg.package_version, root, target.name, move target.inputs, target.output, target.extra_outputs, move target.args, target.write_scopes, target.timeout_ms, target.cwd, move target.env, target.network, if options.strict_effects: 1 else: 0)
+    let action_inputs = build_graph_clone_str_vec(&target.inputs)
+    let action_extra_outputs = build_graph_clone_str_vec(&target.extra_outputs)
+    let action_args = build_graph_clone_str_vec(&target.args)
+    let action_write_scopes = build_graph_clone_str_vec(&target.write_scopes)
+    let action_env = build_graph_clone_str_vec(&target.env)
+    let action_ast = (*sema_ptr).ast
+    let action_pool = (*sema_ptr).pool
+    let result = comptime_eval_tool_action_result(sema_ptr, action_ast, action_pool, target.action_fn, cfg.package_name, cfg.package_version, root, target.name, move action_inputs, target.output, move action_extra_outputs, move action_args, move action_write_scopes, target.timeout_ms, target.cwd, move action_env, target.network, if options.strict_effects: 1 else: 0)
     if result.runtime_exit_code != 0:
         if result.runtime_stderr.len() > 0:
             with_ewrite(result.runtime_stderr)
