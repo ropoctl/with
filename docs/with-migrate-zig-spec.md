@@ -2,6 +2,12 @@
 
 **Best-effort migration from Zig to With.**
 
+> **D22 status (2026-07-23): A new decision has been made, but implementation
+> is still in progress.** Choose the Zig lookup operation by semantics:
+> pointer/view lookup maps to With's uniform `get -> Option[&V]`; an independent
+> non-Copy value requires explicit clone, while consuming transfer uses
+> `remove`. Do not silently translate either into an owned borrowed-map read.
+
 Zig and With are close cousins — both are systems languages that
 reject hidden control flow, value explicit memory management, and
 compile through LLVM. The translation is more mechanical than

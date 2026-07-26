@@ -129,7 +129,7 @@ fn analysis_collect_declarations(report: &AnalysisReport, sema: &Sema, source_pa
         fact.name = sema.pool_resolve(sym)
         fact.detail = "receiver=" ++ analysis_receiver_mode_name(mode) ++ " required=" ++ receiver_required_mode_text(fact.effects) ++ f" params={param_count} type-params={type_params} sig={sig} owner={owner} proven={receiver_proven} source-file={source_file} explicit-receiver={explicit_receiver} synthetic-receiver={synthetic_receiver} in-impl={in_impl} trait-impl={trait_impl} top-level-method={top_level_method}"
         fact = analysis_with_node_location(move fact, sema, node, decl_path, decl_source)
-        report.add(fact)
+        report.add(move fact)
 
 fn analysis_extension_registration_index(sema: &Sema, owner: i32, method: i32, fn_sym: i32, sig: i32) -> i32:
     let count = sema.extension_method_owner_syms.len() as i32
@@ -211,7 +211,7 @@ fn analysis_collect_method_registrations(report: &AnalysisReport, sema: &Sema, s
         let fact_path = analysis_decl_path(sema, di, source_path)
         let fact_source = analysis_decl_source(sema, di, source_text)
         fact = analysis_with_node_location(move fact, sema, node, fact_path, fact_source)
-        report.add(fact)
+        report.add(move fact)
 
 // Trait methods live in the trait declaration's compact extra-data table, not
 // in AstPool.decls as independent FN_DECL nodes. Emit them explicitly so tools
@@ -264,7 +264,7 @@ fn analysis_collect_trait_declarations(report: &AnalysisReport, sema: &Sema, sou
             fact.path = path
             fact.name = trait_name ++ "." ++ sema.pool_resolve(method_sym)
             fact.detail = "trait declaration receiver=" ++ analysis_receiver_mode_name(mode) ++ f" params={param_count} explicit-receiver={explicit_receiver} synthetic-receiver={synthetic_receiver} source-file={source_file}"
-            report.add(fact)
+            report.add(move fact)
             pos = pos + TRAIT_METHOD_STRIDE
 
 fn analysis_collect_types(report: &AnalysisReport, sema: &Sema):
@@ -281,7 +281,7 @@ fn analysis_collect_types(report: &AnalysisReport, sema: &Sema):
         fact.symbol = if kind == TypeKind.TY_STRUCT or kind == TypeKind.TY_ENUM or kind == TypeKind.TY_ALIAS: d0 else: 0
         fact.name = type_name
         fact.detail = f"kind={kind} d0={d0} d1={d1} d2={d2}"
-        report.add(fact)
+        report.add(move fact)
 
         if kind != TypeKind.TY_STRUCT:
             continue
@@ -292,7 +292,7 @@ fn analysis_collect_types(report: &AnalysisReport, sema: &Sema):
             invalid.id = tid
             invalid.name = type_name ++ ".fields"
             invalid.detail = f"invalid struct field table start={field_start} count={field_count} extra={sema.type_extra.len() as i32}"
-            report.add(invalid)
+            report.add(move invalid)
             continue
         for fi in 0..field_count:
             let base = field_start + fi * 3
@@ -307,7 +307,7 @@ fn analysis_collect_types(report: &AnalysisReport, sema: &Sema):
             field.type_id = field_ty
             field.name = type_name ++ "." ++ sema.pool_resolve(field_sym)
             field.detail = "owner=" ++ type_name ++ " field-type=" ++ sema.type_name(field_ty) ++ f" default-node={default_node}"
-            report.add(field)
+            report.add(move field)
 
 fn analysis_collect_expressions(report: &AnalysisReport, sema: &Sema):
     for node in 1..sema.ast.node_count():
@@ -321,7 +321,7 @@ fn analysis_collect_expressions(report: &AnalysisReport, sema: &Sema):
         fact.type_id = tid
         fact.name = f"node:{node}"
         fact.detail = f"node-kind={fact.index} type-name={sema.type_name(tid)} start={sema.ast.get_start(node)} end={sema.ast.get_end(node)}"
-        report.add(fact)
+        report.add(move fact)
 
 fn analysis_parse_node_id(text: str) -> i32:
     if text.len() == 0:
@@ -462,7 +462,7 @@ fn analysis_collect_ast_node_tree(report: &AnalysisReport, sema: &Sema, node: i3
     let type_name = if typed.is_some(): sema.type_name(typed.unwrap()) else: "<untyped>"
     fact.detail = f"role={role} kind={analysis_ast_node_kind_name(kind)} raw=[{d0},{d1},{d2}] type={type_name} resolved={if resolved.is_some(): resolved.unwrap() else: 0} symbol={symbol_name} start={sema.ast.get_start(node)} end={sema.ast.get_end(node)}"
     fact = analysis_with_node_location(move fact, sema, node, path, source)
-    report.add(fact)
+    report.add(move fact)
     if depth <= 0:
         return
     for ci in 0..analysis_ast_child_count(sema, node):
@@ -474,7 +474,7 @@ fn analysis_collect_ast_node_tree(report: &AnalysisReport, sema: &Sema, node: i3
             invalid.index = ci
             invalid.name = f"node:{node}"
             invalid.detail = f"invalid structural child role={analysis_ast_child_role(sema, node, ci)} child={child}"
-            report.add(invalid)
+            report.add(move invalid)
             continue
         analysis_collect_ast_node_tree(report, sema, child, node, analysis_ast_child_role(sema, node, ci), depth - 1, path, source)
 
@@ -518,7 +518,7 @@ fn analysis_collect_signatures(report: &AnalysisReport, sema: &Sema, source_path
 
             var abi = move param
             abi.stage = AnalysisStage.Abi
-            report.add(abi)
+            report.add(move abi)
         let receiver = sema.sig_receiver_mode(si)
         if receiver != ReceiverMode.None:
             var fact = AnalysisFact.new(AnalysisStage.Sema, AnalysisFactKind.Receiver)
@@ -532,7 +532,7 @@ fn analysis_collect_signatures(report: &AnalysisReport, sema: &Sema, source_path
             fact.path = sig.path
             fact.name = name
             fact.detail = "declared=" ++ analysis_receiver_mode_name(receiver) ++ " required=" ++ receiver_required_mode_text(fact.effects)
-            report.add(fact)
+            report.add(move fact)
 
 fn analysis_collect_effect_edges(report: &AnalysisReport, sema: &Sema):
     var at = 0
@@ -555,7 +555,7 @@ fn analysis_collect_effect_edges(report: &AnalysisReport, sema: &Sema):
         let callee = if callee_sig >= 0 and callee_sig < sema.sig_names.len() as i32: sema.pool_resolve(sema.sig_names.get(callee_sig as i64)) else: "<invalid>"
         fact.name = caller
         fact.detail = f"param[{caller_pi}] -> {callee} param[{callee_pi}] projection={projection}"
-        report.add(fact)
+        report.add(move fact)
         at = at + 4
         edge = edge + 1
 
@@ -583,7 +583,7 @@ fn analysis_collect_specializations(report: &AnalysisReport, sema: &Sema, source
         fact.path = analysis_sig_path(sema, mono, source_path)
         fact.name = sema.pool_resolve(mono)
         fact.detail = parts.join("")
-        report.add(fact)
+        report.add(move fact)
 
 fn analysis_collect_resolved_calls(report: &AnalysisReport, sema: &Sema, source_path: str, source_text: str):
     for node in 1..sema.ast.node_count():
@@ -601,7 +601,7 @@ fn analysis_collect_resolved_calls(report: &AnalysisReport, sema: &Sema, source_
         fact.name = if mono != 0: sema.pool_resolve(mono) else: "<unresolved>"
         fact.detail = f"resolved-call sig={sig} mono={mono} args={fact.index}"
         fact = analysis_with_node_location(move fact, sema, node, source_path, source_text)
-        report.add(fact)
+        report.add(move fact)
 
 // Tool Gap #2 — production method-resolution decisions, one fact per checked
 // method call: receiver type, owner, method, inherent-vs-extension source,
@@ -656,7 +656,7 @@ fn analysis_collect_method_resolutions(report: &AnalysisReport, sema: &Sema, sou
         fact.name = sema.pool_resolve(owner) ++ "." ++ sema.pool_resolve(method)
         fact.detail = f"sig={final_sig} fn={fact.index} verdict={verdict} probe-sig={sig} inherent={inherent} via-extension={via_extension} candidates={total} visible={visible} recv-type={fact.type_id}"
         fact = analysis_with_node_location(move fact, sema, mres_node, source_path, source_text)
-        report.add(fact)
+        report.add(move fact)
 
 fn analysis_collect_diagnostics(report: &AnalysisReport, sema: &Sema):
     for i in 0..sema.diags.items.len() as i32:
@@ -685,7 +685,7 @@ fn analysis_collect_diagnostics(report: &AnalysisReport, sema: &Sema):
             fact.column = analysis_column_for_offset(subject_source, diag.primary.start)
         fact.path = if subject.len() > 0: subject else: diag.origin_file
         fact.detail = diag.origin_fn ++ ": " ++ diag.message ++ f" subject-file={diag.primary.file}"
-        report.add(fact)
+        report.add(move fact)
 
 fn analysis_collect_phase(report: &AnalysisReport, sema: &Sema):
     var fact = AnalysisFact.new(AnalysisStage.Sema, AnalysisFactKind.Phase)
@@ -694,7 +694,7 @@ fn analysis_collect_phase(report: &AnalysisReport, sema: &Sema):
     fact.index = sema.type_kinds.len() as i32
     fact.name = "sema-freeze"
     fact.detail = f"symbols={sema.symbols_frozen} types={sema.types_frozen} type-count={fact.index}"
-    report.add(fact)
+    report.add(move fact)
 
 fn analysis_collect_sema(report: &AnalysisReport, sema: &Sema, source_path: str, source_text: str):
     analysis_collect_phase(report, sema)
@@ -781,7 +781,7 @@ fn analysis_collect_mir_call(report: &AnalysisReport, mir_mod: &MirModule, body:
         arg.detail = analysis_operand_kind_name(kind) ++ " " ++ mir_operand_text(body, operand, pool, sema) ++ if share: " -> share-place" else: ""
         let arg_node = arg.node
         arg = analysis_with_node_location(move arg, sema, arg_node, caller_path, caller_source)
-        report.add(arg)
+        report.add(move arg)
 
 fn analysis_collect_mir(report: &AnalysisReport, mir_mod: &MirModule, sema: &Sema, pool: &InternPool, source_path: str, source_text: str):
     for bi in 0..mir_mod.bodies.len() as i32:
@@ -805,7 +805,7 @@ fn analysis_collect_mir(report: &AnalysisReport, mir_mod: &MirModule, sema: &Sem
             local.flags = body.local_mutables.get(li as i64) | (body.local_is_user_var.get(li as i64) << 1)
             local.name = body_fact.name
             local.detail = f"_{li} ty={local.type_id} mut={body.local_mutables.get(li as i64)}"
-            report.add(local)
+            report.add(move local)
         for pi in 0..body.place_locals.len() as i32:
             var place = AnalysisFact.new(AnalysisStage.Mir, AnalysisFactKind.Place)
             place.id = pi
@@ -815,7 +815,7 @@ fn analysis_collect_mir(report: &AnalysisReport, mir_mod: &MirModule, sema: &Sem
             place.type_id = body.place_sema_types.get(pi as i64)
             place.name = body_fact.name
             place.detail = mir_place_text(&body, pi)
-            report.add(place)
+            report.add(move place)
         for ci in 0..body.call_arg_starts.len() as i32:
             analysis_collect_mir_call(report, mir_mod, &body, sema, pool, ci, source_path, source_text)
 
@@ -823,7 +823,7 @@ fn analysis_audit_call_contracts(report: &AnalysisReport, sema: &Sema, mir_mod: 
     for bi in 0..mir_mod.bodies.len() as i32:
         let body = mir_mod.bodies.get(bi as i64)
         let calls = body.call_arg_starts.len() as i32
-        if body.call_arg_counts.len() as i32 != calls or body.call_intrinsic_kinds.len() as i32 != calls or body.call_ast_nodes.len() as i32 != calls or body.call_sig_indices.len() as i32 != calls or body.call_mono_syms.len() as i32 != calls or body.call_contract_required.len() as i32 != calls:
+        if body.call_arg_counts.len() as i32 != calls or body.call_intrinsic_kinds.len() as i32 != calls or body.call_ast_nodes.len() as i32 != calls or body.call_sig_indices.len() as i32 != calls or body.call_mono_syms.len() as i32 != calls or body.call_contract_required.len() as i32 != calls or body.call_pipeline_receiver_places.len() as i32 != calls:
             report.fail(f"body {body.fn_sym}: MIR call tables are not parallel")
             continue
         for ci in 0..calls:
@@ -995,7 +995,7 @@ fn analysis_audit_storage(report: &AnalysisReport, sema: &Sema):
     fact.name = "resolved-call-storage"
     fact.detail = f"nodes={node_count} calls={resolved_calls} args={resolved_args} start-count=separate default-key=i64x32 large-node-proof={fact.flags}"
     report.note(fact.detail)
-    report.add(fact)
+    report.add(move fact)
 
     var trait_count = 0
     var trait_methods = 0
@@ -1030,7 +1030,7 @@ fn analysis_audit_storage(report: &AnalysisReport, sema: &Sema):
     trait_fact.name = "trait-method-storage"
     trait_fact.detail = f"traits={trait_count} methods={trait_methods} stride={TRAIT_METHOD_STRIDE} source-spans=parser-owned"
     report.note(trait_fact.detail)
-    report.add(trait_fact)
+    report.add(move trait_fact)
 
     var impl_count = 0
     var extend_count = 0
@@ -1055,7 +1055,7 @@ fn analysis_audit_storage(report: &AnalysisReport, sema: &Sema):
     impl_kind_fact.name = "impl-kind-storage"
     impl_kind_fact.detail = f"impl-blocks={impl_count} extend-blocks={extend_count} provenance=parser-owned"
     report.note(impl_kind_fact.detail)
-    report.add(impl_kind_fact)
+    report.add(move impl_kind_fact)
 
 fn analysis_audit_method_registrations(report: &AnalysisReport, sema: &Sema):
     let ext_count = sema.extension_method_owner_syms.len() as i32
@@ -1112,7 +1112,7 @@ fn analysis_audit_frozen_calls(report: &AnalysisReport, sema: &Sema, mir_mod: &M
             fact.path = caller_path
             fact.name = callee
             fact.detail = "frozen caller " ++ sema.pool_resolve(body.fn_sym) ++ " reaches " ++ analysis_receiver_mode_name(mode) ++ " semantic method"
-            report.add(fact)
+            report.add(move fact)
             report.fail("frozen phase " ++ sema.pool_resolve(body.fn_sym) ++ " -> " ++ callee ++ ": mutable Sema re-entry")
 
 fn analysis_audit_mir(report: &AnalysisReport, mir_mod: &MirModule):

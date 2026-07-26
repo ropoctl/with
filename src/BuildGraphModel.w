@@ -258,7 +258,7 @@ pub fn parse_build_graph(text: str) -> BuildGraph:
                 graph.error_msg = "invalid target line in build graph"
                 return graph
             if has_current:
-                graph.targets.push(current)
+                graph.targets.push(move current)
             let output = if graph_version == 2: fields.get(6) else: ""
             current = build_graph_target_new(
                 build_graph_parse_i32(fields.get(1)),
@@ -334,7 +334,7 @@ pub fn parse_build_graph(text: str) -> BuildGraph:
             return graph
         i = i + 1
     if has_current:
-        graph.targets.push(current)
+        graph.targets.push(move current)
     graph.ok = true
     graph
 
@@ -449,7 +449,7 @@ fn build_graph_selected_targets_add(selected: BuildGraphSelectedTargets, graph: 
             if not out.ok:
                 return out
     out.selected_names.push(name)
-    out.targets.push(target)
+    out.targets.push(move target)
     out
 
 fn build_graph_select_target_closure(graph: &BuildGraph, target_name: str) -> BuildGraphSelectedTargets:

@@ -193,7 +193,7 @@ impl AnalysisFact:
         }
 
 impl AnalysisReport:
-    fn add(fact: AnalysisFact): self.facts.push(fact)
+    fn add(fact: AnalysisFact): self.facts.push(move fact)
     fn fail(message: str): self.violations.push(message)
     fn note(message: str): self.notes.push(message)
     fn ok(): self.violations.len() == 0

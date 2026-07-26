@@ -2427,7 +2427,7 @@ impl Codegen:
         if has_sret != 0:
             wl_add_sret_attr(self.context, func, 0, str_ty)
         if has_sret != 0 or byval_mask != 0:
-            self.record_c_abi_transform(concat_sym, has_sret, str_ty, byval_mask, byval_types, 0, direct_types, 0)
+            self.record_c_abi_transform(concat_sym, has_sret, str_ty, byval_mask, move byval_types, 0, move direct_types, 0)
         self.fn_values.insert(concat_sym, func)
         self.fn_fn_types.insert(concat_sym, fn_type)
         let args: Vec[i64] = Vec.new()
@@ -2493,7 +2493,7 @@ impl Codegen:
         let func = wl_add_function(self.llmod, concat_name, fn_type)
         if has_sret != 0:
             wl_add_sret_attr(self.context, func, 0, str_ty)
-            self.record_c_abi_transform(concat_sym, has_sret, str_ty, 0, byval_types, 0, direct_types, 0)
+            self.record_c_abi_transform(concat_sym, has_sret, str_ty, 0, move byval_types, 0, move direct_types, 0)
         self.fn_values.insert(concat_sym, func)
         self.fn_fn_types.insert(concat_sym, fn_type)
         let args: Vec[i64] = Vec.new()
@@ -2771,7 +2771,7 @@ impl Codegen:
             wl_add_sret_attr(self.context, func, 0, sret_ty)
         self.apply_c_abi_byval_attrs(func, byval_mask, byval_types, param_count, if has_sret != 0: 1 else: 0)
         if has_sret != 0 or byval_mask != 0:
-            self.record_c_abi_transform(sym, has_sret, sret_ty, byval_mask, byval_types, 0, direct_types, 0)
+            self.record_c_abi_transform(sym, has_sret, sret_ty, byval_mask, move byval_types, 0, move direct_types, 0)
         self.fn_values.insert(sym, func)
         self.fn_fn_types.insert(sym, fn_type)
         func
@@ -3980,7 +3980,12 @@ impl Codegen:
         var byval_types: Vec[i64] = Vec.new()
         let byval_types_opt = self.extern_fn_byval_types.get(concrete.sym)
         if byval_types_opt.is_some():
-            byval_types = byval_types_opt.unwrap()
+            // D22: copy the Copy elements; `get` returns a borrow of the map's Vec.
+            let bt_src = byval_types_opt.unwrap()
+            var bt_i = 0
+            while bt_i < bt_src.len() as i32:
+                byval_types.push(bt_src.get(bt_i as i64))
+                bt_i = bt_i + 1
         self.apply_c_abi_call_attrs(call, 0, 0, byval_mask, byval_types, 1, 0)
 
     mut fn mir_emit_guarded_concrete_drop(ptr: i64, ty: i64, concrete: ConcreteMirFunction):
@@ -4266,19 +4271,179 @@ impl Codegen:
         args.push(ptr)
         let _ = wl_build_call(self.builder, free_ty, free_fn, vec_data_i64(&args), 1)
 
-    // #606 (A5 narrow): drop a Vec value at scope exit. Only Vec whose element needs
-    // drop gets element-drop + buffer free; POD-element Vecs (Vec[i32], Vec[str], …)
-    // return false and fall through to the no-op default — freeing those buffers is
-    // the separate wide flip, and doing it here would double-free the copyable POD
-    // Vec headers the compiler shares as cheap handles.
+    // #691/D18 (§2.5.1, supersedes the A5 narrow form): drop a Vec value at
+    // scope exit. Every Vec frees its buffer — ownership is a property of the
+    // handle, not its contents; elements are dropped first only when the
+    // element type needs it. The null guard inside the free path makes a
+    // blanked (moved-from) header a no-op.
     mut fn mir_emit_drop_vec_ptr(ptr: i64, sema_ty: i32) -> bool:
         if not self.mir_sema_type_is_std_vec(sema_ty):
             return false
         let elem_sema = self.mir_vec_elem_sema_type_from_sema_type(sema_ty)
-        if elem_sema <= 0 or self.sema.type_needs_drop_frozen(elem_sema) == 0:
-            return false
-        self.mir_emit_vec_element_drops_ptr(ptr, sema_ty)
+        if elem_sema > 0 and self.sema.type_needs_drop_frozen(elem_sema) != 0:
+            self.mir_emit_vec_element_drops_ptr(ptr, sema_ty)
         self.mir_emit_vec_free_ptr(ptr)
+        true
+
+    // HashMap[K, V] and HashSet[T] are opaque { ptr } values in LLVM. Generic
+    // field glue therefore cannot see either their runtime allocations or the
+    // typed objects stored in occupied slots. Return 1 for HashMap, 2 for
+    // HashSet, and 0 for every other sema type.
+    fn mir_hash_collection_kind(sema_ty: i32) -> i32:
+        if sema_ty <= 0:
+            return 0
+        var resolved = self.mir_resolve_alias_at(sema_ty)
+        var tk = self.mir_type_kind_at(resolved)
+        if tk == TypeKind.TY_REF or tk == TypeKind.TY_PTR:
+            resolved = self.mir_resolve_alias_at(self.mir_type_d0_at(resolved))
+            tk = self.mir_type_kind_at(resolved)
+        if tk == 0 and resolved >= self.mir_type_kinds_len() as i32 and resolved > 0:
+            resolved = self.sema.resolve_alias(resolved as TypeId) as i32
+            tk = self.sema.get_type_kind(resolved as TypeId)
+        if tk != TypeKind.TY_GENERIC_INST:
+            return 0
+        let base_sym = if resolved >= self.mir_type_kinds_len() as i32:
+            self.sema.get_generic_inst_base(resolved)
+        else:
+            self.mir_type_d0_at(resolved)
+        if base_sym == self.sema.syms.hashmap:
+            return 1
+        if base_sym == self.sema.syms.hashset:
+            return 2
+        0
+
+    fn mir_hash_collection_arg_sema_type(sema_ty: i32, index: i32) -> i32:
+        if sema_ty <= 0:
+            return 0
+        var resolved = self.mir_resolve_alias_at(sema_ty)
+        var tk = self.mir_type_kind_at(resolved)
+        if tk == TypeKind.TY_REF or tk == TypeKind.TY_PTR:
+            resolved = self.mir_resolve_alias_at(self.mir_type_d0_at(resolved))
+            tk = self.mir_type_kind_at(resolved)
+        if tk == 0 and resolved >= self.mir_type_kinds_len() as i32 and resolved > 0:
+            resolved = self.sema.resolve_alias(resolved as TypeId) as i32
+            tk = self.sema.get_type_kind(resolved as TypeId)
+        if tk != TypeKind.TY_GENERIC_INST:
+            return 0
+        let arg_count = if resolved >= self.mir_type_kinds_len() as i32:
+            self.sema.get_generic_inst_arg_count(resolved)
+        else:
+            self.mir_type_d2_at(resolved)
+        if index < 0 or index >= arg_count:
+            return 0
+        if resolved >= self.mir_type_kinds_len() as i32:
+            return self.sema.get_generic_inst_arg(resolved, index)
+        let te_start = self.mir_type_d1_at(resolved)
+        self.mir_type_extra_at(te_start + index)
+
+    fn ensure_hashmap_slot_runtime_fn(name: str, ret_ty: i64) -> i64:
+        let existing = wl_get_named_function(self.llmod, name)
+        if existing != 0:
+            return existing
+        let params: Vec[i64] = Vec.new()
+        params.push(wl_ptr_type(self.context))
+        params.push(wl_i64_type(self.context))
+        let fn_ty = wl_function_type(ret_ty, vec_data_i64(&params), 2, 0)
+        wl_add_function(self.llmod, name, fn_ty)
+
+    fn hashmap_slot_runtime_fn_type(ret_ty: i64) -> i64:
+        let params: Vec[i64] = Vec.new()
+        params.push(wl_ptr_type(self.context))
+        params.push(wl_i64_type(self.context))
+        wl_function_type(ret_ty, vec_data_i64(&params), 2, 0)
+
+    mut fn mir_emit_hash_collection_element_drops(handle: i64, sema_ty: i32, collection_kind: i32) -> Unit:
+        let key_sema = self.mir_hash_collection_arg_sema_type(sema_ty, 0)
+        let value_sema = if collection_kind == 1: self.mir_hash_collection_arg_sema_type(sema_ty, 1) else: 0
+        let drop_key = key_sema > 0 and self.sema.type_needs_drop_frozen(key_sema) != 0
+        let drop_value = value_sema > 0 and self.sema.type_needs_drop_frozen(value_sema) != 0
+        if not drop_key and not drop_value:
+            return
+        let key_ty = if drop_key: self.mir_sema_type_to_llvm(key_sema) else: 0
+        let value_ty = if drop_value: self.mir_sema_type_to_llvm(value_sema) else: 0
+        if (drop_key and key_ty == 0) or (drop_value and value_ty == 0):
+            return
+
+        let i64_ty = wl_i64_type(self.context)
+        let i32_ty = wl_i32_type(self.context)
+        let ptr_ty = wl_ptr_type(self.context)
+        let cap_fn = self.ensure_hm_fn("with_hashmap_capacity", i64_ty)
+        let cap_ty = wl_function_type(i64_ty, vec_data_i64(&self.make_ptr_vec()), 1, 0)
+        let cap_args: Vec[i64] = Vec.new()
+        cap_args.push(handle)
+        let cap = wl_build_call(self.builder, cap_ty, cap_fn, vec_data_i64(&cap_args), 1)
+        let zero = wl_const_int(i64_ty, 0, 0)
+        let has_slots = wl_build_icmp(self.builder, wl_int_sgt(), cap, zero)
+        let entry_bb = wl_get_insert_block(self.builder)
+        let loop_bb = wl_append_bb(self.context, self.current_function, "drop.hash.loop")
+        let occupied_bb = wl_append_bb(self.context, self.current_function, "drop.hash.occupied")
+        let advance_bb = wl_append_bb(self.context, self.current_function, "drop.hash.advance")
+        let done_bb = wl_append_bb(self.context, self.current_function, "drop.hash.done")
+        wl_build_cond_br(self.builder, has_slots, loop_bb, done_bb)
+
+        wl_position_at_end(self.builder, loop_bb)
+        let idx_phi = wl_build_phi(self.builder, i64_ty)
+        let occupied_fn = self.ensure_hashmap_slot_runtime_fn("with_hashmap_slot_occupied", i32_ty)
+        let occupied_ty = self.hashmap_slot_runtime_fn_type(i32_ty)
+        let occupied_args: Vec[i64] = Vec.new()
+        occupied_args.push(handle)
+        occupied_args.push(idx_phi)
+        let occupied = wl_build_call(self.builder, occupied_ty, occupied_fn, vec_data_i64(&occupied_args), 2)
+        let is_occupied = wl_build_icmp(self.builder, wl_int_ne(), occupied, wl_const_int(i32_ty, 0, 0))
+        wl_build_cond_br(self.builder, is_occupied, occupied_bb, advance_bb)
+
+        wl_position_at_end(self.builder, occupied_bb)
+        if drop_key:
+            let key_fn = self.ensure_hashmap_slot_runtime_fn("with_hashmap_key_ptr_at", ptr_ty)
+            let key_fn_ty = self.hashmap_slot_runtime_fn_type(ptr_ty)
+            let key_args: Vec[i64] = Vec.new()
+            key_args.push(handle)
+            key_args.push(idx_phi)
+            let key_ptr = wl_build_call(self.builder, key_fn_ty, key_fn, vec_data_i64(&key_args), 2)
+            self.member_drop_depth = self.member_drop_depth + 1
+            self.mir_emit_drop_ptr_for_sema_type(key_ptr, key_ty, key_sema)
+            self.member_drop_depth = self.member_drop_depth - 1
+        if drop_value:
+            let value_fn = self.ensure_hashmap_slot_runtime_fn("with_hashmap_value_ptr_at", ptr_ty)
+            let value_fn_ty = self.hashmap_slot_runtime_fn_type(ptr_ty)
+            let value_args: Vec[i64] = Vec.new()
+            value_args.push(handle)
+            value_args.push(idx_phi)
+            let value_ptr = wl_build_call(self.builder, value_fn_ty, value_fn, vec_data_i64(&value_args), 2)
+            self.member_drop_depth = self.member_drop_depth + 1
+            self.mir_emit_drop_ptr_for_sema_type(value_ptr, value_ty, value_sema)
+            self.member_drop_depth = self.member_drop_depth - 1
+        wl_build_br(self.builder, advance_bb)
+
+        wl_position_at_end(self.builder, advance_bb)
+        let next_idx = wl_build_add(self.builder, idx_phi, wl_const_int(i64_ty, 1, 0))
+        let more = wl_build_icmp(self.builder, wl_int_slt(), next_idx, cap)
+        wl_build_cond_br(self.builder, more, loop_bb, done_bb)
+        let advance_end_bb = wl_get_insert_block(self.builder)
+
+        let phi_vals: Vec[i64] = Vec.new()
+        phi_vals.push(zero)
+        phi_vals.push(next_idx)
+        let phi_bbs: Vec[i64] = Vec.new()
+        phi_bbs.push(entry_bb)
+        phi_bbs.push(advance_end_bb)
+        wl_add_incoming(idx_phi, vec_data_i64(&phi_vals), vec_data_i64(&phi_bbs), 2)
+        wl_position_at_end(self.builder, done_bb)
+
+    mut fn mir_emit_drop_hash_collection_ptr(ptr: i64, ty: i64, sema_ty: i32) -> bool:
+        let collection_kind = self.mir_hash_collection_kind(sema_ty)
+        if collection_kind == 0:
+            return false
+        if wl_get_type_kind(ty) != wl_struct_type_kind():
+            return false
+        let handle_ptr = wl_build_struct_gep(self.builder, ty, ptr, 0)
+        let handle = wl_build_load(self.builder, wl_ptr_type(self.context), handle_ptr)
+        self.mir_emit_hash_collection_element_drops(handle, sema_ty, collection_kind)
+        let free_fn = self.ensure_hm_fn("with_hashmap_free", wl_void_type(self.context))
+        let free_ty = wl_function_type(wl_void_type(self.context), vec_data_i64(&self.make_ptr_vec()), 1, 0)
+        let free_args: Vec[i64] = Vec.new()
+        free_args.push(handle)
+        let _ = wl_build_call(self.builder, free_ty, free_fn, vec_data_i64(&free_args), 1)
         true
 
     mut fn mir_emit_drop_ptr_for_sema_type(ptr: i64, ty: i64, sema_ty: i32) -> Unit:
@@ -4303,6 +4468,8 @@ impl Codegen:
         // #606 (A5 narrow): a std Vec[T] with a Drop element drops each element then
         // frees the buffer. POD-element Vecs return false here and fall through.
         if tk == TypeKind.TY_GENERIC_INST and self.mir_emit_drop_vec_ptr(ptr, drop_sema_ty):
+            return
+        if tk == TypeKind.TY_GENERIC_INST and self.mir_emit_drop_hash_collection_ptr(ptr, ty, drop_sema_ty):
             return
         var type_sym = 0
         if tk == TypeKind.TY_STRUCT or tk == TypeKind.TY_ENUM or tk == TypeKind.TY_GENERIC_INST:
@@ -7454,12 +7621,6 @@ impl Codegen:
             args.push(recv_ptr)
             args.push(elem_alloca)
             let _ = wl_build_call(self.builder, push_ty, push_fn, vec_data_i64(&args), 2)
-            let push_dest_sema = self.mir_intrinsic_dest_sema_type(body, dest_place)
-            if push_dest_sema > 0 and push_dest_sema != self.sema.ty_void as i32:
-                var push_vec_ty = self.mir_dest_llvm_type(body, dest_place)
-                if push_vec_ty == 0:
-                    push_vec_ty = self.get_or_create_vec_type(0, push_elem_ty)
-                result = wl_build_load(self.builder, push_vec_ty, recv_ptr)
 
         else if intrinsic == MirIntrinsic.VEC_GET:
             let recv_ptr = self.mir_intrinsic_recv_ptr(body, args_id)
@@ -7578,10 +7739,23 @@ impl Codegen:
             result = wl_build_call(self.builder, clear_ty, clear_fn, vec_data_i64(&args), 1)
 
         else if intrinsic == MirIntrinsic.VEC_POP:
-            // Pop: get last element, remove it. Simplified: just return default.
             let recv_ptr = self.mir_intrinsic_recv_ptr(body, args_id)
             let recv = self.mir_intrinsic_recv_vec_value(body, args_id)
             let len = wl_build_extract_value(self.builder, recv, 1)
+            let recv_op = body.call_arg_operands.get(arg_start as i64)
+            var elem_ty = self.mir_vec_elem_type(body, recv_op)
+            if elem_ty == 0:
+                elem_ty = i64_ty
+            var opt_ty = self.mir_dest_llvm_type(body, dest_place)
+            if opt_ty == 0:
+                opt_ty = self.get_or_create_option_type(0, elem_ty)
+            let has_item = wl_build_icmp(self.builder, wl_int_sgt(), len, wl_const_int(i64_ty, 0, 0))
+            let some_bb = wl_append_bb(self.context, self.current_function, "vec.pop.some")
+            let none_bb = wl_append_bb(self.context, self.current_function, "vec.pop.none")
+            let merge_bb = wl_append_bb(self.context, self.current_function, "vec.pop.merge")
+            wl_build_cond_br(self.builder, has_item, some_bb, none_bb)
+
+            wl_position_at_end(self.builder, some_bb)
             let last_idx = wl_build_sub(self.builder, len, wl_const_int(i64_ty, 1, 0))
             let get_fn = self.ensure_vec_runtime_fn("with_vec_get_ptr", ptr_ty, 2)
             let get_ty = self.get_vec_fn_type("with_vec_get_ptr", ptr_ty, 2)
@@ -7589,18 +7763,32 @@ impl Codegen:
             get_args.push(recv_ptr)
             get_args.push(last_idx)
             let raw_ptr = wl_build_call(self.builder, get_ty, get_fn, vec_data_i64(&get_args), 2)
-            let recv_op = body.call_arg_operands.get(arg_start as i64)
-            let elem_ty = self.mir_vec_elem_type(body, recv_op)
-            if elem_ty != 0:
-                result = wl_build_load(self.builder, elem_ty, raw_ptr)
-            else:
-                result = wl_build_load(self.builder, i64_ty, raw_ptr)
+            let popped = wl_build_load(self.builder, elem_ty, raw_ptr)
             let remove_fn = self.ensure_vec_runtime_fn("with_vec_remove", void_ty, 2)
             let remove_ty = self.get_vec_fn_type("with_vec_remove", void_ty, 2)
             let rm_args: Vec[i64] = Vec.new()
             rm_args.push(recv_ptr)
             rm_args.push(last_idx)
             let _ = wl_build_call(self.builder, remove_ty, remove_fn, vec_data_i64(&rm_args), 2)
+            let some_val = self.build_option_some(popped, opt_ty)
+            wl_build_br(self.builder, merge_bb)
+            let some_end = wl_get_insert_block(self.builder)
+
+            wl_position_at_end(self.builder, none_bb)
+            let none_val = self.build_option_none(opt_ty)
+            wl_build_br(self.builder, merge_bb)
+            let none_end = wl_get_insert_block(self.builder)
+
+            wl_position_at_end(self.builder, merge_bb)
+            let pop_phi = wl_build_phi(self.builder, opt_ty)
+            let pop_vals: Vec[i64] = Vec.new()
+            let pop_bbs: Vec[i64] = Vec.new()
+            pop_vals.push(some_val)
+            pop_vals.push(none_val)
+            pop_bbs.push(some_end)
+            pop_bbs.push(none_end)
+            wl_add_incoming(pop_phi, vec_data_i64(&pop_vals), vec_data_i64(&pop_bbs), 2)
+            result = pop_phi
 
         else:
             return false
@@ -7706,10 +7894,29 @@ impl Codegen:
             let key = if key_ty != 0 and wl_type_of(key_raw) != key_ty: self.coerce_value_to_type(key_raw, key_ty) else: key_raw
             let key_alloca = self.create_entry_alloca(wl_type_of(key))
             wl_build_store(self.builder, key, key_alloca)
-            // Determine value type for the output buffer.
-            // Sema gives us V (the value type), not Option[V].
+            // D22 map-view flip retracted until Stage 6: owned Option[V] via the
+            // out-buffer runtime call, not the Option[&V] pointer niche.
+            // MirLower types get as real Option[V]; size the out-buffer as the
+            // payload V (the dest sema type is the option, not the value).
             let dest_sema = self.mir_intrinsic_dest_sema_type(body, dest_place)
-            var val_ty = self.mir_sema_type_to_llvm(dest_sema)
+            var payload_sema = dest_sema
+            if dest_sema > 0:
+                var opt_resolved = self.mir_resolve_alias_at(dest_sema)
+                var opt_tk = self.mir_type_kind_at(opt_resolved)
+                if opt_tk == 0 and opt_resolved >= self.mir_type_kinds_len() as i32 and opt_resolved > 0:
+                    opt_resolved = self.sema.resolve_alias(opt_resolved as TypeId) as i32
+                    opt_tk = self.sema.get_type_kind(opt_resolved as TypeId)
+                if opt_tk == TypeKind.TY_GENERIC_INST:
+                    let opt_base = if opt_resolved >= self.mir_type_kinds_len() as i32:
+                        self.sema.get_generic_inst_base(opt_resolved)
+                    else:
+                        self.mir_type_d0_at(opt_resolved)
+                    if opt_base == self.sema.syms.option:
+                        payload_sema = if opt_resolved >= self.mir_type_kinds_len() as i32:
+                            self.sema.get_generic_inst_arg(opt_resolved, 0)
+                        else:
+                            self.mir_type_extra_at(self.mir_type_d1_at(opt_resolved))
+            var val_ty = self.mir_sema_type_to_llvm(payload_sema)
             if val_ty == 0:
                 val_ty = i64_ty
             let out_alloca = self.create_entry_alloca(val_ty)
@@ -8561,8 +8768,10 @@ impl Codegen:
                 wl_position_at_end(self.builder, ptr_ok_bb)
                 result = recv
             else:
-                // Legacy encoded-option intrinsics such as HashMap.get may reach
-                // here with the payload's static type. There is no tag to inspect.
+                // TODO(D22): legacy encoded-option intrinsics may reach here with
+                // the payload's static type. A conforming HashMap.get must never
+                // use this origin-erasing/value-shaped fallback; it is a nullable
+                // Option[&V] and any contextual Copy is explicit before codegen.
                 result = recv
 
         else if intrinsic == MirIntrinsic.STR_LEN:
@@ -14332,13 +14541,21 @@ impl Codegen:
                 abi_byval_mask = bv_opt.unwrap() as i64
             let bvt_opt = self.extern_fn_byval_types.get(callee_fn_sym)
             if bvt_opt.is_some():
-                abi_byval_types = bvt_opt.unwrap()
+                let bvt_src = bvt_opt.unwrap()
+                var bvt_i = 0
+                while bvt_i < bvt_src.len() as i32:
+                    abi_byval_types.push(bvt_src.get(bvt_i as i64))
+                    bvt_i = bvt_i + 1
             let dp_opt = self.extern_fn_direct_params.get(callee_fn_sym)
             if dp_opt.is_some():
                 abi_direct_mask = dp_opt.unwrap() as i64
             let dpt_opt = self.extern_fn_direct_param_types.get(callee_fn_sym)
             if dpt_opt.is_some():
-                abi_direct_types = dpt_opt.unwrap()
+                let dpt_src = dpt_opt.unwrap()
+                var dpt_i = 0
+                while dpt_i < dpt_src.len() as i32:
+                    abi_direct_types.push(dpt_src.get(dpt_i as i64))
+                    dpt_i = dpt_i + 1
             let drt_opt = self.extern_fn_direct_ret_type.get(callee_fn_sym)
             if drt_opt.is_some():
                 abi_direct_ret_ty = drt_opt.unwrap() as i64
@@ -14901,13 +15118,21 @@ impl Codegen:
         var fn_byval_types: Vec[i64] = Vec.new()
         let fn_byval_types_opt = self.extern_fn_byval_types.get(name_sym)
         if fn_byval_types_opt.is_some():
-            fn_byval_types = fn_byval_types_opt.unwrap()
+            let fn_bt_src = fn_byval_types_opt.unwrap()
+            var fn_bt_i = 0
+            while fn_bt_i < fn_bt_src.len() as i32:
+                fn_byval_types.push(fn_bt_src.get(fn_bt_i as i64))
+                fn_bt_i = fn_bt_i + 1
         let fn_direct_mask_opt = self.extern_fn_direct_params.get(name_sym)
         let fn_direct_mask = if fn_direct_mask_opt.is_some(): fn_direct_mask_opt.unwrap() as i64 else: 0
         var fn_direct_types: Vec[i64] = Vec.new()
         let fn_direct_types_opt = self.extern_fn_direct_param_types.get(name_sym)
         if fn_direct_types_opt.is_some():
-            fn_direct_types = fn_direct_types_opt.unwrap()
+            let fn_dt_src = fn_direct_types_opt.unwrap()
+            var fn_dt_i = 0
+            while fn_dt_i < fn_dt_src.len() as i32:
+                fn_direct_types.push(fn_dt_src.get(fn_dt_i as i64))
+                fn_dt_i = fn_dt_i + 1
 
         var method_owner_sym = 0
         for di in 0..name_str.len() as i32:
@@ -15353,13 +15578,21 @@ impl Codegen:
         var fn_byval_types: Vec[i64] = Vec.new()
         let fn_byval_types_opt = self.extern_fn_byval_types.get(mono_sym)
         if fn_byval_types_opt.is_some():
-            fn_byval_types = fn_byval_types_opt.unwrap()
+            let fn_bt_src = fn_byval_types_opt.unwrap()
+            var fn_bt_i = 0
+            while fn_bt_i < fn_bt_src.len() as i32:
+                fn_byval_types.push(fn_bt_src.get(fn_bt_i as i64))
+                fn_bt_i = fn_bt_i + 1
         let fn_direct_mask_opt = self.extern_fn_direct_params.get(mono_sym)
         let fn_direct_mask = if fn_direct_mask_opt.is_some(): fn_direct_mask_opt.unwrap() as i64 else: 0
         var fn_direct_types: Vec[i64] = Vec.new()
         let fn_direct_types_opt = self.extern_fn_direct_param_types.get(mono_sym)
         if fn_direct_types_opt.is_some():
-            fn_direct_types = fn_direct_types_opt.unwrap()
+            let fn_dt_src = fn_direct_types_opt.unwrap()
+            var fn_dt_i = 0
+            while fn_dt_i < fn_dt_src.len() as i32:
+                fn_direct_types.push(fn_dt_src.get(fn_dt_i as i64))
+                fn_dt_i = fn_dt_i + 1
 
         // Detect method owner from mangled name (e.g. "Vec__i32.push")
         var method_owner_sym = 0

@@ -360,25 +360,25 @@ pub fn process_spec(executable: str) -> ProcessSpec:
         capture_stderr: true,
     }
 
-pub fn ProcessSpec.arg(self: &Self, value: str) -> ProcessSpec:
+pub fn ProcessSpec.arg(move self: Self, value: str) -> ProcessSpec:
     var args = self.args
     args.push(value)
     ProcessSpec { executable: self.executable, args, cwd: self.cwd, env: self.env, timeout_ms: self.timeout_ms, stdin_path: self.stdin_path, capture_stdout: self.capture_stdout, capture_stderr: self.capture_stderr }
 
-pub fn ProcessSpec.working_dir(self: &Self, path: str) -> ProcessSpec:
+pub fn ProcessSpec.working_dir(move self: Self, path: str) -> ProcessSpec:
     ProcessSpec { executable: self.executable, args: self.args, cwd: path, env: self.env, timeout_ms: self.timeout_ms, stdin_path: self.stdin_path, capture_stdout: self.capture_stdout, capture_stderr: self.capture_stderr }
 
-pub fn ProcessSpec.timeout(self: &Self, ms: i32) -> ProcessSpec:
+pub fn ProcessSpec.timeout(move self: Self, ms: i32) -> ProcessSpec:
     ProcessSpec { executable: self.executable, args: self.args, cwd: self.cwd, env: self.env, timeout_ms: ms, stdin_path: self.stdin_path, capture_stdout: self.capture_stdout, capture_stderr: self.capture_stderr }
 
-pub fn ProcessSpec.stdin(self: &Self, path: str) -> ProcessSpec:
+pub fn ProcessSpec.stdin(move self: Self, path: str) -> ProcessSpec:
     ProcessSpec { executable: self.executable, args: self.args, cwd: self.cwd, env: self.env, timeout_ms: self.timeout_ms, stdin_path: path, capture_stdout: self.capture_stdout, capture_stderr: self.capture_stderr }
 
-pub fn ProcessSpec.env_var(self: &Self, name: str, value: str) -> ProcessSpec:
-    let env = self.env.set(name, value)
+pub fn ProcessSpec.env_var(move self: Self, name: str, value: str) -> ProcessSpec:
+    let env = (move self.env).set(name, value)
     ProcessSpec { executable: self.executable, args: self.args, cwd: self.cwd, env, timeout_ms: self.timeout_ms, stdin_path: self.stdin_path, capture_stdout: self.capture_stdout, capture_stderr: self.capture_stderr }
 
-pub fn ProcessSpec.capture(self: &Self, stdout: bool, stderr: bool) -> ProcessSpec:
+pub fn ProcessSpec.capture(move self: Self, stdout: bool, stderr: bool) -> ProcessSpec:
     ProcessSpec { executable: self.executable, args: self.args, cwd: self.cwd, env: self.env, timeout_ms: self.timeout_ms, stdin_path: self.stdin_path, capture_stdout: stdout, capture_stderr: stderr }
 
 pub type ToolProcessResult {
@@ -633,7 +633,7 @@ pub fn parallel(workspaces: Vec[Workspace]) -> Vec[BuildResult]:
 pub fn process_env() -> ProcessEnv:
     ProcessEnv { vars: Vec.new() }
 
-pub fn ProcessEnv.set(self: &Self, name: str, value: str) -> ProcessEnv:
+pub fn ProcessEnv.set(move self: Self, name: str, value: str) -> ProcessEnv:
     var vars = self.vars
     vars.push(ProcessEnvVar { name, value })
     ProcessEnv { vars }
@@ -1873,7 +1873,7 @@ pub fn Target.allow_parallel(move self: Target) -> Target:
 
 pub fn Build.add_target(move self: Build, target: Target) -> Build:
     var out = self
-    out.targets.push(target)
+    out.targets.push(move target)
     out
 
 pub fn Build.generated_source(move self: Build, path: str, contents: str) -> Build:
@@ -1883,121 +1883,121 @@ pub fn Build.generated_source(move self: Build, path: str, contents: str) -> Bui
 
 pub fn Build.add_generated_source(move self: Build, source: GeneratedSource) -> Build:
     var out = self
-    out.generated_sources.push(source)
+    out.generated_sources.push(move source)
     out
 
-pub fn Build.executable(self: &Self, name: str, entry: str) -> Build:
+pub fn Build.executable(move self: Self, name: str, entry: str) -> Build:
     let target = target_new(.Executable, name, entry)
-    var out = *self
-    out.add_target(target)
+    var out = self
+    out.add_target(move target)
 
-pub fn Build.library(self: &Self, name: str, entry: str) -> Build:
+pub fn Build.library(move self: Self, name: str, entry: str) -> Build:
     let target = target_new(.Library, name, entry)
-    var out = *self
-    out.add_target(target)
+    var out = self
+    out.add_target(move target)
 
-pub fn Build.test(self: &Self, name: str, entry: str) -> Build:
+pub fn Build.test(move self: Self, name: str, entry: str) -> Build:
     let target = target_new(.Test, name, entry)
-    var out = *self
-    out.add_target(target)
+    var out = self
+    out.add_target(move target)
 
-pub fn Build.object(self: &Self, name: str, entry: str) -> Build:
+pub fn Build.object(move self: Self, name: str, entry: str) -> Build:
     let target = target_new(.Object, name, entry)
-    var out = *self
-    out.add_target(target)
+    var out = self
+    out.add_target(move target)
 
-pub fn Build.archive(self: &Self, name: str, entry: str) -> Build:
+pub fn Build.archive(move self: Self, name: str, entry: str) -> Build:
     let target = target_new(.Archive, name, entry)
-    var out = *self
-    out.add_target(target)
+    var out = self
+    out.add_target(move target)
 
-pub fn Build.action(self: &Self, name: str, action: fn(ActionCtx) -> i32) -> Build:
+pub fn Build.action(move self: Self, name: str, action: fn(ActionCtx) -> i32) -> Build:
     var target = target_new(.Action, name, "")
     target.action = action
-    var out = *self
-    out.add_target(target)
+    var out = self
+    out.add_target(move target)
 
-pub fn Build.command(self: &Self, name: str, runner: str) -> Build:
+pub fn Build.command(move self: Self, name: str, runner: str) -> Build:
     let target = target_new(.Command, name, runner)
-    var out = *self
-    out.add_target(target)
+    var out = self
+    out.add_target(move target)
 
-pub fn Build.install(self: &Self, name: str, source: str, dest: str) -> Build:
+pub fn Build.install(move self: Self, name: str, source: str, dest: str) -> Build:
     let target = target_new(.Install, name, source).output(dest)
-    var out = *self
-    out.add_target(target)
+    var out = self
+    out.add_target(move target)
 
-pub fn Build.group(self: &Self, name: str) -> Build:
+pub fn Build.group(move self: Self, name: str) -> Build:
     let target = target_new(.Group, name, "")
-    var out = *self
-    out.add_target(target)
+    var out = self
+    out.add_target(move target)
 
-pub fn Build.binary_compare(self: &Self, name: str, left: str, right: str) -> Build:
+pub fn Build.binary_compare(move self: Self, name: str, left: str, right: str) -> Build:
     var target = target_new(.BinaryCompare, name, left)
     target = target.arg(right)
-    var out = *self
-    out.add_target(target)
+    var out = self
+    out.add_target(move target)
 
-pub fn Build.fixpoint_compare(self: &Self, name: str, left: str, right: str) -> Build:
+pub fn Build.fixpoint_compare(move self: Self, name: str, left: str, right: str) -> Build:
     var target = target_new(.FixpointCompare, name, left)
     target = target.arg(right)
-    var out = *self
-    out.add_target(target)
+    var out = self
+    out.add_target(move target)
 
-pub fn Build.compile_c_object(self: &Self, name: str, source: str, output: str) -> Build:
+pub fn Build.compile_c_object(move self: Self, name: str, source: str, output: str) -> Build:
     let target = target_new(.CompileCObject, name, source).output(output)
-    var out = *self
-    out.add_target(target)
+    var out = self
+    out.add_target(move target)
 
-pub fn Build.compile_asm_object(self: &Self, name: str, source: str, output: str) -> Build:
+pub fn Build.compile_asm_object(move self: Self, name: str, source: str, output: str) -> Build:
     let target = target_new(.CompileAsmObject, name, source).output(output)
-    var out = *self
-    out.add_target(target)
+    var out = self
+    out.add_target(move target)
 
-pub fn Build.compile_llvm_ir_object(self: &Self, name: str, source: str, output: str) -> Build:
+pub fn Build.compile_llvm_ir_object(move self: Self, name: str, source: str, output: str) -> Build:
     let target = target_new(.CompileLlvmIrObject, name, source).output(output)
-    var out = *self
-    out.add_target(target)
+    var out = self
+    out.add_target(move target)
 
-pub fn Build.create_static_archive(self: &Self, name: str, output: str) -> Build:
+pub fn Build.create_static_archive(move self: Self, name: str, output: str) -> Build:
     let target = target_new(.CreateStaticArchive, name, "").output(output)
-    var out = *self
-    out.add_target(target)
+    var out = self
+    out.add_target(move target)
 
-pub fn Build.generate_response_file(self: &Self, name: str, output: str) -> Build:
+pub fn Build.generate_response_file(move self: Self, name: str, output: str) -> Build:
     let target = target_new(.GenerateResponseFile, name, "").output(output)
-    var out = *self
-    out.add_target(target)
+    var out = self
+    out.add_target(move target)
 
-pub fn Build.embed_object_files(self: &Self, name: str, output: str) -> Build:
+pub fn Build.embed_object_files(move self: Self, name: str, output: str) -> Build:
     let target = target_new(.EmbedObjectFiles, name, "").output(output)
-    var out = *self
-    out.add_target(target)
+    var out = self
+    out.add_target(move target)
 
-pub fn Build.copy_tree(self: &Self, name: str, source_dir: str, output_dir: str) -> Build:
+pub fn Build.copy_tree(move self: Self, name: str, source_dir: str, output_dir: str) -> Build:
     let target = target_new(.CopyTree, name, source_dir).output(output_dir)
-    var out = *self
-    out.add_target(target)
+    var out = self
+    out.add_target(move target)
 
-pub fn Build.copy_file(self: &Self, name: str, source: str, dest: str) -> Build:
+pub fn Build.copy_file(move self: Self, name: str, source: str, dest: str) -> Build:
     let target = target_new(.CopyFile, name, source).output(dest)
-    var out = *self
-    out.add_target(target)
+    var out = self
+    out.add_target(move target)
 
-pub fn Build.clean(self: &Self, name: str) -> Build:
+pub fn Build.clean(move self: Self, name: str) -> Build:
     let target = target_new(.Clean, name, "")
-    var out = *self
-    out.add_target(target)
+    var out = self
+    out.add_target(move target)
 
-pub fn Build.run_corpus_test(self: &Self, name: str, runner: str) -> Build:
+pub fn Build.run_corpus_test(move self: Self, name: str, runner: str) -> Build:
     let target = target_new(.RunCorpusTest, name, runner)
-    var out = *self
-    out.add_target(target)
+    var out = self
+    out.add_target(move target)
 
-pub fn Build.promote_tree_if_verified(self: &Self, name: str, source_dir: str, output_dir: str) -> Build:
+pub fn Build.promote_tree_if_verified(move self: Self, name: str, source_dir: str, output_dir: str) -> Build:
     let target = target_new(.PromoteTreeIfVerified, name, source_dir).output(output_dir)
-    var out = *self
-    out.add_target(target)
+    var out = self
+    out.add_target(move target)
 
 pub type Download {
     url: str,
@@ -2005,7 +2005,7 @@ pub type Download {
     output_path: str,
 }
 
-pub fn Build.download(self: &Self, name: str, spec: Download) -> Build:
+pub fn Build.download(move self: Self, name: str, spec: Download) -> Build:
     var target = target_new(.Action, name, "").output(spec.output_path)
     target.action = build_download_action
     target = target.allow_network()
@@ -2013,17 +2013,17 @@ pub fn Build.download(self: &Self, name: str, spec: Download) -> Build:
     target = target.write_scope("out/command/" ++ name)
     target = target.arg(spec.url)
     target = target.arg(spec.sha256)
-    var out = *self
-    out.add_target(target)
+    var out = self
+    out.add_target(move target)
 
-pub fn Build.extract_tar_gz(self: &Self, name: str, archive: str, output_dir: str) -> Build:
+pub fn Build.extract_tar_gz(move self: Self, name: str, archive: str, output_dir: str) -> Build:
     var target = target_new(.Action, name, "").output(output_dir)
     target.action = build_extract_tar_gz_action
     target = target.input(archive)
     target = target.write_scope(output_dir)
     target = target.write_scope("out/command/" ++ name)
-    var out = *self
-    out.add_target(target)
+    var out = self
+    out.add_target(move target)
 
 fn build_path_dirname(path: str) -> str:
     var last_slash = -1
@@ -2206,7 +2206,7 @@ fn build_extract_tar_gz_action(ctx: ActionCtx) -> i32:
         return 1
     0
 
-pub fn Target.target(self: &Self, target: BuildTarget) -> Target:
+pub fn Target.target(move self: Self, target: BuildTarget) -> Target:
     Target {
         kind: self.kind,
         name: self.name,
@@ -2230,7 +2230,7 @@ pub fn Target.target(self: &Self, target: BuildTarget) -> Target:
         parallel: self.parallel,
     }
 
-pub fn Target.optimize(self: &Self, mode: OptimizeMode) -> Target:
+pub fn Target.optimize(move self: Self, mode: OptimizeMode) -> Target:
     Target {
         kind: self.kind,
         name: self.name,
@@ -2269,7 +2269,7 @@ pub fn Target.define(move self: Target, define: str) -> Target:
     out.defines.push(define)
     out
 
-pub fn Target.output(self: &Self, output: str) -> Target:
+pub fn Target.output(move self: Self, output: str) -> Target:
     Target {
         kind: self.kind,
         name: self.name,
@@ -2340,6 +2340,7 @@ fn build_action_write_scope(target: &Target) -> Vec[str]:
 
 fn build_action_ctx(ctx: &BuildCtx, target: &Target) -> ActionCtx:
     let fs_outputs = build_action_write_scope(target)
+    let process_outputs = build_action_write_scope(target)
     let ctx_outputs = build_action_outputs(target)
     let scratch_path = tool_action_scratch_dir(target.name)
     ActionCtx {
@@ -2348,7 +2349,7 @@ fn build_action_ctx(ctx: &BuildCtx, target: &Target) -> ActionCtx:
         project: ctx.project,
         diagnostics_value: ctx.diagnostics,
         fs_value: ToolFs { token: ctx.token, root: ctx.fs.root, write_scope: fs_outputs, write_scoped: true, scratch_path },
-        process_runner_value: ProcessRunner { token: ctx.token, root: ctx.fs.root, target_name: target.name, write_scope: fs_outputs, write_scoped: true, network: target.network },
+        process_runner_value: ProcessRunner { token: ctx.token, root: ctx.fs.root, target_name: target.name, write_scope: process_outputs, write_scoped: true, network: target.network },
         inputs_value: target.inputs,
         outputs_value: ctx_outputs,
         args_value: target.args,

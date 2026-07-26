@@ -9,7 +9,7 @@ type H { items: Vec[W] }
 
 fn run(s: *mut i32):
     let h = H { items: Vec.new() }
-    h.items.push(W { slot: s }).push(W { slot: s })
+    h.items |> push(W { slot: s }) |> push(W { slot: s })
 
 fn main:
     var c = 0

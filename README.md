@@ -5,6 +5,13 @@ Fast, safe, and designed to feel less hostile than existing native languages.
 
 [Specification](docs/with-specification.md) | [Contributing](CONTRIBUTING.md) | [Editor Support](docs/feature_plans/editor-support.md) | [Devlog](https://github.com/withlang-dev/with/discussions/185)
 
+> **Current language-design status (2026-07-23):** D22 has been accepted and
+> documented in specification v7.2, but implementation is still in progress.
+> Owning keyed-map lookup uniformly returns `Option[&V]`; contextual Copy and
+> transparent view-origin propagation complete its ergonomic and safety story.
+> See [`docs/decisions.md`](docs/decisions.md) D22. Current compiler behavior is
+> not precedent where the decision marks it NON-COMPLIANT.
+
 ## Why With?
 
 - **Performance:** Compiles to native machine code via LLVM. No runtime interpreter, no GC pauses. Suitable for games, AI infrastructure, embedded systems, and web services.

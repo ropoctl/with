@@ -14,6 +14,7 @@ use std.crypto.sha256
 use render
 use CiMigrate
 use Overflow
+use TargetSpec
 
 extern fn with_eprint(s: str) -> Unit
 extern fn with_fs_read_file(path: str) -> str
@@ -65,8 +66,6 @@ extern fn with_str_from_byte(byte: i32) -> str
 extern fn with_str_starts_with(s: str, prefix: str) -> i32
 extern fn with_str_ends_with(s: str, suffix: str) -> i32
 extern fn with_str_replace(s: str, old: str, new_s: str) -> str
-extern fn with_sysinfo_os() -> str
-extern fn with_sysinfo_arch() -> str
 extern fn with_sysinfo_hostname() -> str
 
 const COMPTIME_RECURSION_LIMIT: i32 = 256
@@ -249,6 +248,19 @@ type ComptimeEvaluator {
     tool_identity_paths: Vec[str],
     tool_identity_values: Vec[str],
     strict_effects: i32,
+    // >0 while a D21 Unit-returning mutator pipeline stage is evaluating.
+    // Collection evaluators still perform their ordinary rebind, but expose
+    // the updated receiver as the pipeline carrier instead of the Unit result.
+    pipeline_receiver_carrier_depth: i32,
+    // Top-level comptime folding precedes Sema, so D21 carrier roots cannot
+    // rely only on Sema.pipeline_carrier_kinds. Record the root established by
+    // each evaluated carrier stage for the next stage in the same chain.
+    pipeline_receiver_carrier_roots: HashMap[i32, i32],
+    // A comptime call owns a private parameter scope. Preserve the final
+    // `mut self` value across that scope's pop so the method-call boundary can
+    // write it back to the caller's place, exactly like runtime share-place.
+    last_call_has_mut_receiver: i32,
+    last_call_mut_receiver: ComptimeValue,
     // Worker mode: when a build target runs in a subprocess worker, build(ctx)
     // is re-evaluated only to reconstruct the declarative graph. The parent
     // already performed every comptime ToolFs mutation, so the worker must not
@@ -323,6 +335,10 @@ fn ComptimeEvaluator.init(sema: Sema, ast: AstPool, pool: InternPool, require_su
         tool_identity_paths: Vec.new(),
         tool_identity_values: Vec.new(),
         strict_effects: 0,
+        pipeline_receiver_carrier_depth: 0,
+        pipeline_receiver_carrier_roots: HashMap.new(),
+        last_call_has_mut_receiver: 0,
+        last_call_mut_receiver: comptime_value_invalid(),
         suppress_toolfs_writes: 0,
         has_pending_diag: 0,
         pending_diag: Diagnostic.err("", Span { file: 0, start: 0, end: 0 }),
@@ -1099,7 +1115,7 @@ unsafe fn comptime_eval_finish(sema_ptr: *mut Sema, evaluator: ComptimeEvaluator
     let synced_sema = evaluator.sema
     *sema_ptr = synced_sema
     if has_pending_diag != 0:
-        sema_ptr.diags.emit(pending_diag)
+        sema_ptr.diags.emit(move pending_diag)
     ComptimeEvalResult {
         value,
         extras,
@@ -1218,7 +1234,7 @@ unsafe fn comptime_try_eval_expr_result(sema_ptr: *mut Sema, ast: AstPool, pool:
     var sema = *sema_ptr
     sema.ast = ast
     sema = sema.prepare_comptime_eval_copy()
-    var evaluator = ComptimeEvaluator.init(sema, ast, pool, 0)
+    var evaluator = ComptimeEvaluator.init(move sema, ast, pool, 0)
     let value = evaluator.eval_root(node)
     comptime_eval_finish(sema_ptr, evaluator, value)
 
@@ -1226,7 +1242,7 @@ unsafe fn comptime_force_eval_expr_result(sema_ptr: *mut Sema, ast: AstPool, poo
     var sema = *sema_ptr
     sema.ast = ast
     sema = sema.prepare_comptime_eval_copy()
-    var evaluator = ComptimeEvaluator.init(sema, ast, pool, 1)
+    var evaluator = ComptimeEvaluator.init(move sema, ast, pool, 1)
     let value = evaluator.eval_root(node)
     comptime_eval_finish(sema_ptr, evaluator, value)
 
@@ -1240,7 +1256,7 @@ unsafe fn comptime_eval_tool_build_result(sema_ptr: *mut Sema, ast: AstPool, poo
     var sema = *sema_ptr
     sema.ast = ast
     sema = sema.prepare_comptime_eval_copy()
-    var evaluator = ComptimeEvaluator.init(sema, ast, pool, 1)
+    var evaluator = ComptimeEvaluator.init(move sema, ast, pool, 1)
     evaluator.allow_runtime_calls = 1
     evaluator.strict_effects = strict_effects
     evaluator.suppress_toolfs_writes = suppress_side_effects
@@ -1268,7 +1284,7 @@ unsafe fn comptime_eval_tool_action_result(sema_ptr: *mut Sema, ast: AstPool, po
     var sema = *sema_ptr
     sema.ast = ast
     sema = sema.prepare_comptime_eval_copy()
-    var evaluator = ComptimeEvaluator.init(sema, ast, pool, 1)
+    var evaluator = ComptimeEvaluator.init(move sema, ast, pool, 1)
     evaluator.allow_runtime_calls = 1
     evaluator.strict_effects = strict_effects
     evaluator.step_budget = COMPTIME_TOOL_STEP_LIMIT
@@ -1277,7 +1293,7 @@ unsafe fn comptime_eval_tool_action_result(sema_ptr: *mut Sema, ast: AstPool, po
     let ctx_type = evaluator.capability_type_id(CapabilityKind.CK_BUILD_ACTION_CTX, call_node)
     if ctx_type == 0:
         return comptime_eval_finish(sema_ptr, evaluator, comptime_value_invalid())
-    let ctx_record = comptime_action_capability_record(package_name, package_version, project_root, target_name, inputs, output, extra_outputs, args_values, write_scopes, timeout_ms, cwd, env, network)
+    let ctx_record = comptime_action_capability_record(package_name, package_version, project_root, target_name, move inputs, output, extra_outputs, move args_values, write_scopes, timeout_ms, cwd, move env, network)
     let ctx_value = evaluator.mint_capability(ctx_type, move ctx_record)
     let args: Vec[ComptimeValue] = Vec.new()
     args.push(ctx_value)
@@ -1575,8 +1591,9 @@ impl ComptimeEvaluator:
         stored.generation = self.next_capability_generation
         self.next_capability_generation = self.next_capability_generation + 1
         let handle_id = self.capability_records.len() as i32
-        self.capability_records.push(stored)
-        comptime_value_capability(type_id, stored.kind, handle_id, stored.generation)
+        let result = comptime_value_capability(type_id, stored.kind, handle_id, stored.generation)
+        self.capability_records.push(move stored)
+        result
 
     mut fn validate_capability(value: ComptimeValue, expected_kind: i32, method: str, node: i32) -> i32:
         if value.kind != ComptimeValueKind.CV_CAPABILITY:
@@ -1872,6 +1889,9 @@ impl ComptimeEvaluator:
     fn find_fn_decl_node(sym: i32) -> i32:
         if self.sema.fn_decl_nodes.contains(sym):
             return self.sema.fn_decl_nodes.get(sym).unwrap()
+        let generic = self.sema.generic_fn_node_for_symbol(sym)
+        if generic != 0:
+            return generic
         var di = self.ast.decl_count() as i32 - 1
         while di >= 0:
             let decl = self.ast.get_decl(di)
@@ -1960,10 +1980,32 @@ impl ComptimeEvaluator:
             if idx < 0:
                 return self.fail(node, "comptime collection mutation requires a local identifier receiver")
             self.update_slot_value(idx, value)
+            if self.pipeline_receiver_carrier_depth > 0:
+                return comptime_control_value(value)
+            return comptime_control_value(comptime_value_void(self.sema.ty_void as i32))
+        if self.ast.kind(recv_node) == NodeKind.NK_FIELD_ACCESS:
+            let assigned = self.assign_struct_field_value(recv_node, value, node)
+            if assigned.kind == ComptimeControlKind.CTL_VALUE and self.pipeline_receiver_carrier_depth > 0:
+                return comptime_control_value(value)
+            return assigned
+        if self.pipeline_receiver_carrier_depth > 0:
+            return comptime_control_value(value)
+        self.fail(node, "comptime collection mutation requires a local identifier or field receiver")
+
+    mut fn write_back_mut_receiver(recv_node: i32, value: ComptimeValue, node: i32) -> ComptimeControl:
+        let sym = self.binding_sym(recv_node)
+        if sym != 0:
+            let idx = self.lookup_slot_index(sym)
+            if idx < 0:
+                return self.fail(node, "comptime mut method receiver place is unavailable")
+            self.update_slot_value(idx, value)
             return comptime_control_value(comptime_value_void(self.sema.ty_void as i32))
         if self.ast.kind(recv_node) == NodeKind.NK_FIELD_ACCESS:
             return self.assign_struct_field_value(recv_node, value, node)
-        self.fail(node, "comptime collection mutation requires a local identifier or field receiver")
+        // An rvalue receiver is an ordinary statement temporary. It has no
+        // outer binding to update, but D21 may still carry its final value to
+        // the next Unit-mutator pipeline stage.
+        comptime_control_value(comptime_value_void(self.sema.ty_void as i32))
 
     mut fn reserve_string_bytes(node: i32, amount: i64) -> i32:
         if amount <= 0:
@@ -2164,6 +2206,17 @@ impl ComptimeEvaluator:
             if typed != 0:
                 return typed
         fallback
+
+    fn comptime_value_semantic_type(value: ComptimeValue) -> i32:
+        if value.type_id != 0:
+            return value.type_id
+        if value.kind == ComptimeValueKind.CV_BOOL:
+            return self.sema.ty_bool as i32
+        if value.kind == ComptimeValueKind.CV_STR:
+            return self.sema.ty_str as i32
+        if value.kind == ComptimeValueKind.CV_VOID:
+            return self.sema.ty_void as i32
+        0
 
     fn comptime_int_width(type_id: i32) -> i32:
         let numeric = self.sema.numeric_operand_type(type_id)
@@ -2502,8 +2555,11 @@ impl ComptimeEvaluator:
         if method == "pop":
             if arg_count != 0:
                 return self.fail(node, "Vec[u8].pop() takes no arguments")
+            let pop_opt_tid = self.vec_option_result_tid(recv_value, node)
+            if pop_opt_tid == 0:
+                return self.fail(node, "Vec[u8].pop() needs a resolved Option type in comptime")
             if recv_value.text.len() <= 0:
-                return self.fail(node, "Vec[u8].pop() on empty comptime byte vector")
+                return comptime_control_value(comptime_value_enum(pop_opt_tid, self.sema.syms.none, self.extra_values.len() as i32, 0))
             let last_byte = with_str_byte_at(recv_value.text, recv_value.text.len() - 1)
             if self.reserve_string_bytes(node, recv_value.text.len() - 1) == 0:
                 return comptime_control_error()
@@ -2512,7 +2568,9 @@ impl ComptimeEvaluator:
             let rebind = self.rebind_collection_receiver(recv_node, updated, node)
             if rebind.kind != ComptimeControlKind.CTL_VALUE:
                 return rebind
-            return comptime_control_value(comptime_value_int(self.sema.ty_u8 as i32, last_byte as i64))
+            let some_start = self.extra_values.len() as i32
+            self.extra_values.push(comptime_value_int(self.sema.ty_u8 as i32, last_byte as i64))
+            return comptime_control_value(comptime_value_enum(pop_opt_tid, self.sema.syms.some, some_start, 1))
         if method == "clear":
             if arg_count != 0:
                 return self.fail(node, "Vec[u8].clear() takes no arguments")
@@ -2606,8 +2664,11 @@ impl ComptimeEvaluator:
         if method == "pop":
             if arg_count != 0:
                 return self.fail(node, "Vec.pop() takes no arguments")
+            let pop_opt_tid = self.vec_option_result_tid(recv_value, node)
+            if pop_opt_tid == 0:
+                return self.fail(node, "Vec.pop() needs a resolved Option type in comptime")
             if recv_value.extra_count <= 0:
-                return self.fail(node, "Vec.pop() on empty comptime vector")
+                return comptime_control_value(comptime_value_enum(pop_opt_tid, self.sema.syms.none, self.extra_values.len() as i32, 0))
             let removed = self.extra_values.get((recv_value.extra_start + recv_value.extra_count - 1) as i64)
             // (start, count-1) is already a frozen prefix view of the existing
             // slice — no copy needed; arena elements are immutable.
@@ -2615,7 +2676,9 @@ impl ComptimeEvaluator:
             let rebind = self.rebind_collection_receiver(recv_node, updated, node)
             if rebind.kind != ComptimeControlKind.CTL_VALUE:
                 return rebind
-            return comptime_control_value(removed)
+            let some_start = self.extra_values.len() as i32
+            self.extra_values.push(removed)
+            return comptime_control_value(comptime_value_enum(pop_opt_tid, self.sema.syms.some, some_start, 1))
 
         if method == "remove":
             if arg_count != 1:
@@ -2696,8 +2759,13 @@ impl ComptimeEvaluator:
             let key_signal = self.eval_expr(self.ast.get_extra(extra_start))
             if key_signal.kind != ComptimeControlKind.CTL_VALUE:
                 return key_signal
-            // #665: runtime get returns Option[V]; comptime must agree.
-            let get_opt_tid = self.map_option_result_tid(recv_value, node)
+            // Runtime get returns Option[&V]. The evaluator stores the referenced
+            // immutable value directly inside its internal enum snapshot; Sema's
+            // static type and origin tracking still enforce the borrow contract.
+            // TODO(D22): once the implementation design lands, verify that
+            // comptime elimination, joins, and contextual Copy use the same
+            // resolved semantics as runtime rather than snapshot shape.
+            let get_opt_tid = self.map_option_result_tid(recv_value, node, 0)
             if get_opt_tid == 0:
                 return self.fail(node, "HashMap.get() needs a resolved Option type in comptime")
             for i in 0..recv_value.extra_count:
@@ -2723,7 +2791,7 @@ impl ComptimeEvaluator:
                 return key_signal
             // #665: runtime remove returns Option[V] and leaves the map
             // untouched on a miss; comptime must agree.
-            let remove_opt_tid = self.map_option_result_tid(recv_value, node)
+            let remove_opt_tid = self.map_option_result_tid(recv_value, node, 0)
             if remove_opt_tid == 0:
                 return self.fail(node, "HashMap.remove() needs a resolved Option type in comptime")
             let new_start = self.extra_values.len() as i32
@@ -2751,10 +2819,22 @@ impl ComptimeEvaluator:
 
         self.fail(node, "HashMap method is not comptime-evaluable yet")
 
-    mut fn map_option_result_tid(recv_value: ComptimeValue, node: i32) -> i32:
+    mut fn vec_option_result_tid(recv_value: ComptimeValue, node: i32) -> i32:
+        let typed = self.node_type_or(node, 0)
+        if typed != 0:
+            return typed
+        let recv_resolved = self.sema.resolve_alias(recv_value.type_id)
+        if self.sema.get_type_kind(recv_resolved) != TypeKind.TY_GENERIC_INST:
+            return 0
+        if self.sema.get_generic_inst_arg_count(recv_resolved as i32) < 1:
+            return 0
+        let elem_tid = self.sema.get_generic_inst_arg(recv_resolved as i32, 0)
+        self.sema.ensure_option_type_for(elem_tid)
+
+    mut fn map_option_result_tid(recv_value: ComptimeValue, node: i32, borrowed: i32) -> i32:
         // Comptime fn bodies are evaluated before sema types their
         // expressions, so the call node often has no type; derive
-        // Option[V] from the receiver's value type instead.
+        // get's Option[&V] or remove's Option[V] from the receiver instead.
         let typed = self.node_type_or(node, 0)
         if typed != 0:
             return typed
@@ -2764,12 +2844,9 @@ impl ComptimeEvaluator:
         if self.sema.get_generic_inst_arg_count(recv_resolved as i32) < 2:
             return 0
         let val_tid = self.sema.get_generic_inst_arg(recv_resolved as i32, 1)
-        let existing = self.sema.find_generic_inst(self.sema.syms.option, val_tid)
-        if existing != 0:
-            return existing
-        let args: Vec[i32] = Vec.new()
-        args.push(val_tid)
-        self.sema.ensure_generic_inst_type(self.sema.syms.option, args, 1) as i32
+        if borrowed != 0:
+            return self.sema.ensure_option_ref_type_for(val_tid)
+        self.sema.ensure_option_type_for(val_tid)
 
     fn is_option_enum_value(value: ComptimeValue) -> bool:
         let resolved = self.sema.resolve_alias(value.type_id)
@@ -2914,17 +2991,105 @@ impl ComptimeEvaluator:
             return comptime_control_value(comptime_value_vec(self.node_type_or(node, 0), start, pieces.len() as i32))
         self.fail(node, "str method '" ++ method ++ "' is not comptime-evaluable yet")
 
-    mut fn eval_resolved_method_call(fn_sym: i32, recv_value: ComptimeValue, extra_start: i32, arg_count: i32, node: i32) -> ComptimeControl:
-        if fn_sym == 0:
-            return self.fail(node, "method was not resolved for comptime evaluation")
-        let args: Vec[ComptimeValue] = Vec.new()
-        args.push(recv_value)
+    mut fn concrete_method_comptime_type_args(fn_sym: i32, concrete_sig: i32, node: i32) -> ComptimeGenericResolvedArgs:
+        let out_syms: Vec[i32] = Vec.new()
+        let out_tys: Vec[i32] = Vec.new()
+        let fn_node = self.find_fn_decl_node(fn_sym)
+        let meta = self.ast.find_fn_meta(fn_node)
+        if fn_node == 0 or meta < 0:
+            let _ = self.fail(node, "generic comptime method metadata is unavailable")
+            return ComptimeGenericResolvedArgs { ok: 0, tp_syms: out_syms, tp_tys: out_tys }
+        let tp_start = self.ast.fn_meta_tp_start(meta)
+        let tp_count = self.ast.fn_meta_tp_count(meta)
+        if tp_count == 0:
+            return ComptimeGenericResolvedArgs { ok: 1, tp_syms: out_syms, tp_tys: out_tys }
+        if concrete_sig < 0 or concrete_sig >= self.sema.sig_names.len() as i32:
+            let _ = self.fail(node, "generic comptime method has no concrete signature")
+            return ComptimeGenericResolvedArgs { ok: 0, tp_syms: out_syms, tp_tys: out_tys }
+        let mono_sym = self.sema.sig_names.get(concrete_sig as i64)
+        let specialization = self.sema.concrete_specialization_by_sym.get(mono_sym)
+        if specialization.is_none():
+            let _ = self.fail(node, "generic comptime method specialization metadata is unavailable")
+            return ComptimeGenericResolvedArgs { ok: 0, tp_syms: out_syms, tp_tys: out_tys }
+        let spec = specialization.unwrap()
+        let subst_start = self.sema.concrete_specialization_subst_starts.get(spec as i64)
+        let subst_count = self.sema.concrete_specialization_subst_counts.get(spec as i64)
+        var tp_pos = tp_start
+        for ti in 0..tp_count:
+            let tp_sym = self.ast.get_extra(tp_pos)
+            let bound_count = self.ast.get_extra(tp_pos + 1)
+            var found_ty = 0
+            for si in 0..subst_count:
+                if self.sema.concrete_specialization_subst_syms.get((subst_start + si) as i64) == tp_sym:
+                    found_ty = self.sema.concrete_specialization_subst_types.get((subst_start + si) as i64)
+                    break
+            if found_ty == 0:
+                let _ = self.fail(node, "generic comptime method type argument was not resolved")
+                return ComptimeGenericResolvedArgs { ok: 0, tp_syms: out_syms, tp_tys: out_tys }
+            out_syms.push(tp_sym)
+            out_tys.push(found_ty)
+            tp_pos = tp_pos + 2 + bound_count
+        ComptimeGenericResolvedArgs { ok: 1, tp_syms: out_syms, tp_tys: out_tys }
+
+    mut fn eval_user_method_value(recv_node: i32, recv_value: ComptimeValue, method: i32, extra_start: i32, arg_count: i32, node: i32, carry_receiver: i32) -> ComptimeControl:
+        let arg_values: Vec[ComptimeValue] = Vec.new()
+        let arg_types: Vec[i32] = Vec.new()
         for i in 0..arg_count:
             let arg_signal = self.eval_expr(self.ast.get_extra(extra_start + i))
             if arg_signal.kind != ComptimeControlKind.CTL_VALUE:
                 return arg_signal
-            args.push(arg_signal.value)
-        self.eval_fn_symbol_call_values(fn_sym, args, node)
+            arg_values.push(arg_signal.value)
+            arg_types.push(self.comptime_value_semantic_type(arg_signal.value))
+
+        let resolved_recv = self.sema.auto_deref_method_type_frozen(recv_value.type_id as TypeId, method)
+        let owner = self.sema.method_owner_symbol_for_type(resolved_recv as i32)
+        if owner == 0:
+            return self.fail(node, "method receiver type is unavailable in comptime")
+
+        var fn_sym = self.sema.lookup_generic_method_fn(owner, method)
+        var concrete_sig = -1
+        var type_args = ComptimeGenericResolvedArgs { ok: 1, tp_syms: Vec.new(), tp_tys: Vec.new() }
+        if fn_sym != 0:
+            let ret_ty = self.sema.check_generic_method_call(owner, resolved_recv as i32, fn_sym, 0, recv_node, arg_types, extra_start, arg_count, node)
+            let resolved_sig = self.sema.resolved_call_sigs.get(node)
+            if ret_ty == 0 or resolved_sig.is_none():
+                return comptime_control_error()
+            concrete_sig = resolved_sig.unwrap()
+            type_args = self.concrete_method_comptime_type_args(fn_sym, concrete_sig, node)
+            if type_args.ok == 0:
+                return comptime_control_error()
+        else:
+            fn_sym = self.sema.lookup_method_fn(owner, method)
+            concrete_sig = self.sema.lookup_method_sig(owner, method)
+            if fn_sym == 0 or concrete_sig < 0:
+                return self.fail(node, "method '" ++ self.pool.resolve(method) ++ "' is not comptime-evaluable yet")
+            self.sema.comp_resolved.insert(node, fn_sym)
+            self.sema.resolved_call_sigs.insert(node, concrete_sig)
+            self.sema.resolved_call_mono_syms.insert(node, fn_sym)
+            self.sema.typed_expr_types.insert(node, self.sema.sig_return_type(concrete_sig))
+
+        let call_args: Vec[ComptimeValue] = Vec.new()
+        call_args.push(recv_value)
+        for ai in 0..arg_values.len() as i32:
+            call_args.push(arg_values.get(ai as i64))
+        let call_signal = self.eval_fn_symbol_call_values_with_type_args(fn_sym, call_args, node, type_args.tp_syms, type_args.tp_tys)
+        if call_signal.kind != ComptimeControlKind.CTL_VALUE:
+            return call_signal
+
+        let receiver_mode = self.sema.sig_receiver_mode(concrete_sig)
+        var final_receiver = recv_value
+        if receiver_mode == ReceiverMode.Mut:
+            if self.last_call_has_mut_receiver == 0:
+                return self.fail(node, "comptime mut method did not preserve its receiver value")
+            final_receiver = self.last_call_mut_receiver
+            let write_back = self.write_back_mut_receiver(recv_node, final_receiver, node)
+            if write_back.kind != ComptimeControlKind.CTL_VALUE:
+                return write_back
+
+        let call_ret = self.sema.resolve_alias(self.sema.sig_return_type(concrete_sig) as TypeId)
+        if carry_receiver != 0 and receiver_mode == ReceiverMode.Mut and call_ret == self.sema.ty_void:
+            return comptime_control_value(final_receiver)
+        call_signal
 
     mut fn eval_pipeline_method_call(lhs: i32, method: i32, extra_start: i32, arg_count: i32, node: i32) -> ComptimeControl:
         let recv_signal = self.eval_expr(lhs)
@@ -2932,24 +3097,76 @@ impl ComptimeEvaluator:
             return recv_signal
         self.eval_pipeline_method_value(lhs, recv_signal.value, method, extra_start, arg_count, node)
 
+    fn pipeline_receiver_root_node(node: i32) -> i32:
+        var current = node
+        while current != 0:
+            let kind = self.ast.kind(current)
+            if kind == NodeKind.NK_GROUPED:
+                current = self.ast.get_data0(current)
+                continue
+            if kind == NodeKind.NK_PIPELINE:
+                let evaluated_root = self.pipeline_receiver_carrier_roots.get(current)
+                if evaluated_root.is_some():
+                    current = evaluated_root.unwrap()
+                    continue
+                if self.sema.pipeline_carrier_kinds.contains(current) and self.sema.pipeline_carrier_kinds.get(current).unwrap() != 0:
+                    current = self.ast.get_data0(current)
+                    continue
+            break
+        current
+
     mut fn eval_pipeline_method_value(lhs: i32, recv: ComptimeValue, method: i32, extra_start: i32, arg_count: i32, node: i32) -> ComptimeControl:
-        if recv.kind == ComptimeValueKind.CV_VEC or recv.kind == ComptimeValueKind.CV_BYTES:
+        if recv.kind == ComptimeValueKind.CV_STRUCT and not self.is_string_builder_value(recv):
+            let recv_node = self.pipeline_receiver_root_node(lhs)
+            let result = self.eval_user_method_value(recv_node, recv, method, extra_start, arg_count, node, 1)
+            let resolved_sig = self.sema.resolved_call_sigs.get(node)
+            if resolved_sig.is_some():
+                let sig = resolved_sig.unwrap()
+                let call_ret = self.sema.sig_return_type(sig)
+                let threads_receiver = if self.sema.sig_receiver_mode(sig) == ReceiverMode.Mut and self.sema.resolve_alias(call_ret as TypeId) == self.sema.ty_void: 1 else: 0
+                self.sema.pipeline_method_calls.insert(node, method)
+                self.sema.pipeline_call_return_types.insert(node, call_ret)
+                self.sema.pipeline_carrier_kinds.insert(node, threads_receiver)
+                self.sema.typed_expr_types.insert(node, if threads_receiver != 0: recv.type_id else: call_ret)
+                if threads_receiver != 0 and result.kind == ComptimeControlKind.CTL_VALUE:
+                    self.pipeline_receiver_carrier_roots.insert(node, recv_node)
+            return result
+        var threads_receiver = 0
+        if self.sema.pipeline_carrier_kinds.contains(node):
+            threads_receiver = self.sema.pipeline_carrier_kinds.get(node).unwrap()
+        else if recv.type_id != 0:
+            let resolved_recv = self.sema.auto_deref_method_type_frozen(recv.type_id as TypeId, method)
+            let owner = self.sema.method_owner_symbol_for_type(resolved_recv as i32)
+            let call_ret = self.sema.builtin_intrinsic_method_return_type(resolved_recv as i32, owner, method)
+            if call_ret != 0 and self.sema.resolve_alias(call_ret as TypeId) == self.sema.ty_void and self.sema.pipeline_method_has_mut_receiver(node, recv.type_id, method) != 0:
+                threads_receiver = 1
+        if threads_receiver != 0:
+            self.pipeline_receiver_carrier_depth = self.pipeline_receiver_carrier_depth + 1
+        let recv_node = if threads_receiver != 0: self.pipeline_receiver_root_node(lhs) else: lhs
+        let result = if recv.kind == ComptimeValueKind.CV_VEC or recv.kind == ComptimeValueKind.CV_BYTES:
             if recv.kind == ComptimeValueKind.CV_BYTES:
-                return self.eval_bytes_method_call(lhs, recv, method, extra_start, arg_count, node)
-            return self.eval_vec_method_call(lhs, recv, method, extra_start, arg_count, node)
-        if recv.kind == ComptimeValueKind.CV_MAP:
-            return self.eval_map_method_call(lhs, recv, method, extra_start, arg_count, node)
-        if self.is_string_builder_value(recv):
-            return self.eval_string_builder_method_call(lhs, recv, method, extra_start, arg_count, node)
-        if recv.kind == ComptimeValueKind.CV_STR:
-            return self.eval_str_method_call(recv, method, extra_start, arg_count, node)
+                self.eval_bytes_method_call(recv_node, recv, method, extra_start, arg_count, node)
+            else:
+                self.eval_vec_method_call(recv_node, recv, method, extra_start, arg_count, node)
+        else if recv.kind == ComptimeValueKind.CV_MAP:
+            self.eval_map_method_call(recv_node, recv, method, extra_start, arg_count, node)
+        else if self.is_string_builder_value(recv):
+            self.eval_string_builder_method_call(recv_node, recv, method, extra_start, arg_count, node)
+        else if recv.kind == ComptimeValueKind.CV_STR:
+            self.eval_str_method_call(recv, method, extra_start, arg_count, node)
         // §4.2.4 / #565: pipeline is method-call sugar, so integer receivers get the
         // same intrinsic evaluation as the direct-method form.
-        if recv.kind == ComptimeValueKind.CV_INT:
-            return self.eval_int_method_call(recv, self.node_type_or(lhs, recv.type_id), method, extra_start, arg_count, node)
-        if recv.kind == ComptimeValueKind.CV_ENUM and self.is_option_enum_value(recv):
-            return self.eval_option_method_call(recv, method, extra_start, arg_count, node)
-        self.fail(node, "pipeline method '" ++ self.pool.resolve(method) ++ "' is not comptime-evaluable yet")
+        else if recv.kind == ComptimeValueKind.CV_INT:
+            self.eval_int_method_call(recv, self.node_type_or(lhs, recv.type_id), method, extra_start, arg_count, node)
+        else if recv.kind == ComptimeValueKind.CV_ENUM and self.is_option_enum_value(recv):
+            self.eval_option_method_call(recv, method, extra_start, arg_count, node)
+        else:
+            self.fail(node, "pipeline method '" ++ self.pool.resolve(method) ++ "' is not comptime-evaluable yet")
+        if threads_receiver != 0:
+            self.pipeline_receiver_carrier_depth = self.pipeline_receiver_carrier_depth - 1
+            if result.kind == ComptimeControlKind.CTL_VALUE:
+                self.pipeline_receiver_carrier_roots.insert(node, recv_node)
+        result
 
     mut fn eval_pipeline(node: i32) -> ComptimeControl:
         let lhs = self.ast.get_data0(node)
@@ -3375,7 +3592,7 @@ fn comptime_workspace_compile_result(result: ComptimeValue, messages: Vec[Compti
 
 fn comptime_workspace_compile_invalid() -> ComptimeWorkspaceCompileResult:
     let messages: Vec[ComptimeValue] = Vec.new()
-    comptime_workspace_compile_result(comptime_value_invalid(), messages)
+    comptime_workspace_compile_result(comptime_value_invalid(), move messages)
 
 fn comptime_module_name_for_path(root: str, path: str) -> str:
     var rel = path
@@ -4128,7 +4345,7 @@ impl ComptimeEvaluator:
         comptime_workspace_native_compile_result_free(native)
         if self.had_error != 0:
             return comptime_workspace_compile_invalid()
-        comptime_workspace_compile_result(result, messages)
+        comptime_workspace_compile_result(result, move messages)
 
     mut fn start_intercept_workspace_compile(record: ComptimeWorkspaceRecord, capability: ComptimeCapabilityRecord, node: i32) -> ComptimeWorkspaceRecord:
         var out = record
@@ -6546,8 +6763,8 @@ impl ComptimeEvaluator:
                     let field_value = self.extra_values.get((recv_signal.value.extra_start + field_index) as i64)
                     if field_value.kind == ComptimeValueKind.CV_FN:
                         return self.eval_fn_value_call(field_value, self.ast.get_data1(node), arg_count, node)
-                if self.sema.comp_resolved.contains(node):
-                    return self.eval_resolved_method_call(self.sema.comp_resolved.get(node).unwrap(), recv_signal.value, self.ast.get_data1(node), arg_count, node)
+                if self.sema.pipeline_method_exists(recv_signal.value.type_id, field) != 0:
+                    return self.eval_user_method_value(recv_node, recv_signal.value, field, self.ast.get_data1(node), arg_count, node, 0)
             if recv_signal.value.kind == ComptimeValueKind.CV_VEC or recv_signal.value.kind == ComptimeValueKind.CV_BYTES:
                 if recv_signal.value.kind == ComptimeValueKind.CV_BYTES:
                     return self.eval_bytes_method_call(recv_node, recv_signal.value, field, self.ast.get_data1(node), arg_count, node)
@@ -6735,10 +6952,13 @@ impl ComptimeEvaluator:
         if fn_name == "with_sysinfo_os" or fn_name == "with_sysinfo_arch" or fn_name == "with_sysinfo_hostname":
             if arg_values.len() as i32 != 0:
                 return self.fail(node, "sysinfo runtime call takes no arguments")
+            // os/arch reflect the --target selection so comptime platform
+            // dispatch bakes target values, never the host's (§18.5).
+            // hostname is inherently a host property and stays host.
             if fn_name == "with_sysinfo_os":
-                return comptime_control_value(comptime_value_str(with_sysinfo_os()))
+                return comptime_control_value(comptime_value_str(target_spec_os()))
             if fn_name == "with_sysinfo_arch":
-                return comptime_control_value(comptime_value_str(with_sysinfo_arch()))
+                return comptime_control_value(comptime_value_str(target_spec_arch()))
             return comptime_control_value(comptime_value_str(with_sysinfo_hostname()))
         comptime_control_error()
 
@@ -6748,6 +6968,8 @@ impl ComptimeEvaluator:
         self.eval_fn_symbol_call_values_with_type_args(fn_sym, arg_values, node, empty_tp_syms, empty_tp_tys)
 
     mut fn eval_fn_symbol_call_values_with_type_args(fn_sym: i32, arg_values: Vec[ComptimeValue], node: i32, tp_syms: Vec[i32], tp_tys: Vec[i32]) -> ComptimeControl:
+        self.last_call_has_mut_receiver = 0
+        self.last_call_mut_receiver = comptime_value_invalid()
         let fn_name = self.pool.resolve(fn_sym)
         if fn_name == "parallel":
             return self.eval_parallel_workspaces_call(arg_values, node)
@@ -6892,6 +7114,14 @@ impl ComptimeEvaluator:
                             return self.fail(ppat, "comptime argument did not match parameter pattern")
 
         let body_signal = self.eval_expr(self.ast.get_data1(fn_node))
+        var has_mut_receiver = 0
+        var final_mut_receiver = comptime_value_invalid()
+        if param_count > 0 and fn_param_is_mut_self(self.ast.fn_param_flags(param_start, 0)) != 0:
+            let receiver_name = self.ast.fn_param_name(param_start, 0)
+            let receiver_slot = self.lookup_slot_index(receiver_name)
+            if receiver_slot >= 0:
+                has_mut_receiver = 1
+                final_mut_receiver = self.slot_values.get(receiver_slot as i64)
         let ret_type = self.comptime_fn_return_type(fn_sym, tp_syms, tp_tys)
         self.pop_scope()
         self.active_fn_syms.pop()
@@ -6899,6 +7129,8 @@ impl ComptimeEvaluator:
         self.sema.current_module_path = saved_path
         if has_generic_subst != 0:
             self.restore_generic_substitutions(generic_snapshot)
+        self.last_call_has_mut_receiver = has_mut_receiver
+        self.last_call_mut_receiver = final_mut_receiver
         if body_signal.kind == ComptimeControlKind.CTL_RETURN or body_signal.kind == ComptimeControlKind.CTL_VALUE:
             return self.apply_implicit_default_return(fn_node, ret_type, body_signal)
         if body_signal.kind == ComptimeControlKind.CTL_BREAK or body_signal.kind == ComptimeControlKind.CTL_CONTINUE:
@@ -6933,7 +7165,7 @@ impl ComptimeEvaluator:
             let plan = self.workspace_compile_plan(record, capability, node)
             if plan.valid == 0:
                 return comptime_control_error()
-            plans.push(plan)
+            plans.push(move plan)
             workspace_ids.push(workspace_id)
             intercepted.push(if record.intercept_active != 0: 1 else: 0)
         let native_results: Vec[ComptimeWorkspaceNativeCompileResult] = Vec.new()

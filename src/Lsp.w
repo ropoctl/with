@@ -469,7 +469,7 @@ impl LspDocument:
         let tokens = lexer.tokenize()
         var intern = InternPool.init()
         var diags = DiagnosticList.init()
-        var parser = Parser.init(tokens, self.text, 0, intern, diags)
+        var parser = Parser.init(move tokens, self.text, 0, intern, move diags)
         self.fast_pool = parser.parse_module()
         self.fast_intern = parser.intern
         self.fast_text_len = self.text.len() as i32
@@ -489,7 +489,7 @@ impl LspDocument:
         // Build type-at-offset map from sema's typed_expr_types.
         // Iterate all AST nodes and check which have type info.
         let sema = comp.zcu.last_sema
-        let typed = comp.zcu.typed_expr_types
+        let typed = sema.typed_expr_types
         self.cached_type_at = HashMap.new()
         for ni in 0..pool.node_count():
             let tid_opt = typed.get(ni)
@@ -511,7 +511,13 @@ impl LspDocument:
             var methods: Vec[str] = Vec.new()
             let existing = self.cached_trait_methods.get(type_name)
             if existing.is_some():
-                methods = existing.unwrap()
+                // D22: `get` yields Option[&Vec]; copy the Copy str elements
+                // into this owned, later-mutated Vec instead of aliasing.
+                let ex_src = existing.unwrap()
+                var ex_i = 0
+                while ex_i < ex_src.len() as i32:
+                    methods.push(ex_src.get(ex_i as i64))
+                    ex_i = ex_i + 1
             var ti = 0
             while ti < count:
                 let trait_sym = sema.impl_extra.get((start + ti) as i64)
@@ -530,7 +536,7 @@ impl LspDocument:
                             mi = mi + 1
                 ti = ti + 1
             if methods.len() > 0:
-                self.cached_trait_methods.insert(type_name, methods)
+                self.cached_trait_methods.insert(type_name, move methods)
         self.cached_text_len = self.text.len() as i32
         self.cache_valid = true
 
@@ -549,7 +555,15 @@ impl LspDocument:
             return Vec.new()
         let opt = self.cached_trait_methods.get(type_name)
         if opt.is_some():
-            return opt.unwrap()
+            // D22: `get` yields Option[&Vec]; return an independent owned Vec
+            // (copying the Copy str elements) rather than aliasing the cache.
+            var out: Vec[str] = Vec.new()
+            let src = opt.unwrap()
+            var i = 0
+            while i < src.len() as i32:
+                out.push(src.get(i as i64))
+                i = i + 1
+            return out
         Vec.new()
 
     mut fn invalidate():
@@ -608,7 +622,7 @@ impl LspState:
         for i in 0..self.documents.len() as i32:
             if i == idx:
                 var doc = LspDocument.new(uri, uri_to_path(uri), text, version)
-                new_docs.push(doc)
+                new_docs.push(move doc)
             else:
                 new_docs.push(self.documents.get(i as i64))
         self.documents = new_docs
@@ -1270,7 +1284,7 @@ fn lsp_parse_file(text: str) -> LspParseResult:
     let tokens = lexer.tokenize()
     var intern = InternPool.init()
     var diags = DiagnosticList.init()
-    var parser = Parser.init(tokens, text, 0, intern, diags)
+    var parser = Parser.init(move tokens, text, 0, intern, move diags)
     let pool = parser.parse_module()
     LspParseResult { pool, intern: parser.intern }
 

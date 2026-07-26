@@ -690,7 +690,7 @@ impl StackifyContext:
 
     mut fn tree_add_node(node: StackifyNode) -> i32:
         let id = self.tree.nodes.len() as i32
-        self.tree.nodes.push(node)
+        self.tree.nodes.push(move node)
         id
 
 fn stackify_empty_node(kind: i32) -> StackifyNode:
@@ -717,7 +717,7 @@ impl StackifyContext:
         self.process_stack.push(StackifyProcessEntry { kind, block, index, value, target })
 
     mut fn pop_process() -> StackifyProcessEntry:
-        self.process_stack.pop()
+        self.process_stack.remove(self.process_stack.len() - 1)
 
     mut fn push_ctrl(kind: i32, label_block: i32):
         self.ctrl_stack.push(StackifyCtrlEntry { kind, label_block })
@@ -750,7 +750,7 @@ impl StackifyContext:
         node.values_count = target.args_count
         node.to_values_start = to_start
         node.to_values_count = self.graph.blocks.get(target.block as i64).params_count
-        self.tree_add_node(node)
+        self.tree_add_node(move node)
 
     mut fn push_merge_children(block: i32):
         let start = self.merge_items.len() as i32
@@ -786,7 +786,7 @@ impl StackifyContext:
             self.add_param_transfer(target)
             var node = stackify_empty_node(StackifyNodeKind.Br)
             node.label = label
-            let id = self.tree_add_node(node)
+            let id = self.tree_add_node(move node)
             self.result_push(id)
             return
         if not stackify_dominates(self.analysis.idom, source, target.block):
@@ -808,7 +808,7 @@ impl StackifyContext:
         select_node.labels_start = labels_start
         select_node.labels_count = b.targets_count
         select_node.default_label = b.targets_count
-        let select_id = self.tree_add_node(select_node)
+        let select_id = self.tree_add_node(move select_node)
 
         var body: Vec[i32] = Vec.new()
         body.push(select_id)
@@ -829,11 +829,11 @@ impl StackifyContext:
             block_node.block = stackify_invalid()
             block_node.first_child_start = child_start
             block_node.first_child_count = body.len() as i32
-            outer.push(self.tree_add_node(block_node))
+            outer.push(self.tree_add_node(move block_node))
             outer.push(self.make_param_transfer(target))
             var br = stackify_empty_node(StackifyNodeKind.Br)
             br.label = resolved + extra
-            outer.push(self.tree_add_node(br))
+            outer.push(self.tree_add_node(move br))
             body = outer
             idx = idx + 1
         var bi: i64 = 0
@@ -862,7 +862,7 @@ impl StackifyContext:
         node.block = header
         node.first_child_start = child_start
         node.first_child_count = count
-        let id = self.tree_add_node(node)
+        let id = self.tree_add_node(move node)
         self.result_push(id)
 
     mut fn finish_block(out: i32):
@@ -875,7 +875,7 @@ impl StackifyContext:
         node.block = out
         node.first_child_start = child_start
         node.first_child_count = count
-        let id = self.tree_add_node(node)
+        let id = self.tree_add_node(move node)
         self.result_push(id)
 
     mut fn else():
@@ -897,7 +897,7 @@ impl StackifyContext:
         node.first_child_count = then_count
         node.second_child_start = else_child_start
         node.second_child_count = else_count
-        let id = self.tree_add_node(node)
+        let id = self.tree_add_node(move node)
         self.result_push(id)
 
     mut fn node_within(block: i32, merge_start: i32):
@@ -916,7 +916,7 @@ impl StackifyContext:
 
         var leaf = stackify_empty_node(StackifyNodeKind.Leaf)
         leaf.block = block
-        let leaf_id = self.tree_add_node(leaf)
+        let leaf_id = self.tree_add_node(move leaf)
         self.result_push(leaf_id)
         let b = self.graph.blocks.get(block as i64)
         if b.term_kind == StackifyTermKind.Br:
@@ -944,11 +944,11 @@ impl StackifyContext:
             var ret = stackify_empty_node(StackifyNodeKind.Return)
             ret.values_start = self.tree_add_values_from_vec(vals)
             ret.values_count = b.return_values_count
-            let id = self.tree_add_node(ret)
+            let id = self.tree_add_node(move ret)
             self.result_push(id)
             return
         let un = stackify_empty_node(StackifyNodeKind.Unreachable)
-        let uid = self.tree_add_node(un)
+        let uid = self.tree_add_node(move un)
         self.result_push(uid)
 
 fn stackify_context_new(graph: StackifyGraph, analysis: StackifyAnalysis) -> StackifyContext:
@@ -1002,7 +1002,7 @@ pub fn stackify_graph(graph: StackifyGraph) -> StackifyResult:
     let analysis = stackify_compute_analysis(graph)
     if not analysis.ok:
         return stackify_result_error(analysis.message)
-    var ctx = stackify_context_new(graph, analysis)
+    var ctx = stackify_context_new(move graph, move analysis)
     ctx.result_push_frame()
     ctx.push_process(StackifyProcessKind.DomSubtree, ctx.graph.entry, 0, 0, 0)
     while ctx.ok and ctx.process_stack.len() > 0:
@@ -1014,4 +1014,4 @@ pub fn stackify_graph(graph: StackifyGraph) -> StackifyResult:
     let root_count = ctx.result_frame_count(root_start)
     ctx.tree.roots_start = ctx.tree_add_child_range(root_start, root_count)
     ctx.tree.roots_count = root_count
-    stackify_result_ok(ctx.tree)
+    stackify_result_ok(move ctx.tree)

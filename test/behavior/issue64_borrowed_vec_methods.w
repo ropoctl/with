@@ -26,7 +26,7 @@ fn main:
     nums_mut.push(7)
     nums_mut.push(8)
     nums_mut.push(9)
-    assert(nums_mut.pop() == 9)
+    assert(nums_mut.pop().unwrap() == 9)
     assert(nums_mut.remove(0) == 7)
     assert(nums_mut.len() == 1)
     assert(nums_mut.get(0) == 8)

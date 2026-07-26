@@ -1,5 +1,6 @@
 use Archive
 use compiler.Runtime
+use TargetSpec
 
 extern let with_embedded_cimport_stubs_o_start: u8
 extern let with_embedded_cimport_stubs_o_end: u8
@@ -92,7 +93,7 @@ fn link_stage_result_for_command(command: LinkStageCommand) -> LinkStageResult:
 fn link_stage_result_for_plan(plan: LinkStagePlan) -> LinkStageResult:
     if not plan.ok:
         return link_stage_result_fail()
-    link_stage_result_for_command(plan.command)
+    link_stage_result_for_command(move plan.command)
 
 fn link_stage_argv_append(argv: str, arg: str) -> str:
     argv ++ arg ++ "\0"
@@ -324,53 +325,89 @@ fn link_stage_make_link_command(linker: str, obj_path: str, bin_path: str, extra
 fn link_stage_file_exists(path: str) -> bool:
     runtime_file_exists(path) != 0
 
-fn link_stage_linux_dynamic_linker() -> str:
-    if link_stage_file_exists("/lib64/ld-linux-x86-64.so.2"):
+// Sysroot prefix for Linux link inputs. Native Linux hosts link
+// against the real root (""); a cross host must supply a Linux sysroot
+// (crt objects, libc, libgcc) via WITH_LINUX_SYSROOT.
+fn link_stage_linux_sysroot() -> str:
+    let explicit = runtime_getenv("WITH_LINUX_SYSROOT")
+    if explicit.len() > 0:
+        return explicit
+    ""
+
+// The Linux target arch this link is for: the --target selection when
+// cross, else the host arch (native Linux links).
+fn link_stage_linux_arch() -> str:
+    if not target_spec_is_native():
+        return target_spec_arch()
+    runtime_sysinfo_arch()
+
+// Debian-style multiarch directory name for the Linux target arch.
+fn link_stage_linux_multiarch() -> str:
+    if link_stage_linux_arch() == "aarch64":
+        return "aarch64-linux-gnu"
+    "x86_64-linux-gnu"
+
+fn link_stage_linux_emulation() -> str:
+    if link_stage_linux_arch() == "aarch64":
+        return "aarch64linux"
+    "elf_x86_64"
+
+fn link_stage_linux_dynamic_linker(sysroot: str) -> str:
+    if link_stage_linux_arch() == "aarch64":
+        if link_stage_file_exists(sysroot ++ "/lib/ld-linux-aarch64.so.1"):
+            return "/lib/ld-linux-aarch64.so.1"
+        if link_stage_file_exists(sysroot ++ "/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1"):
+            return "/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1"
+        return ""
+    if link_stage_file_exists(sysroot ++ "/lib64/ld-linux-x86-64.so.2"):
         return "/lib64/ld-linux-x86-64.so.2"
-    if link_stage_file_exists("/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"):
+    if link_stage_file_exists(sysroot ++ "/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"):
         return "/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"
     ""
 
-fn link_stage_linux_crt_object(name: str) -> str:
-    let usr = "/usr/lib/x86_64-linux-gnu/" ++ name
+fn link_stage_linux_crt_object(sysroot: str, name: str) -> str:
+    let multiarch = link_stage_linux_multiarch()
+    let usr = sysroot ++ "/usr/lib/" ++ multiarch ++ "/" ++ name
     if link_stage_file_exists(usr):
         return usr
-    let lib = "/lib/x86_64-linux-gnu/" ++ name
+    let lib = sysroot ++ "/lib/" ++ multiarch ++ "/" ++ name
     if link_stage_file_exists(lib):
         return lib
     ""
 
-fn link_stage_linux_gcc_dir() -> str:
+fn link_stage_linux_gcc_dir(sysroot: str) -> str:
+    let base = sysroot ++ "/usr/lib/gcc/" ++ link_stage_linux_multiarch() ++ "/"
     let candidates: Vec[str] = Vec.new()
-    candidates.push("/usr/lib/gcc/x86_64-linux-gnu/15")
-    candidates.push("/usr/lib/gcc/x86_64-linux-gnu/14")
-    candidates.push("/usr/lib/gcc/x86_64-linux-gnu/13")
-    candidates.push("/usr/lib/gcc/x86_64-linux-gnu/12")
-    candidates.push("/usr/lib/gcc/x86_64-linux-gnu/11")
-    candidates.push("/usr/lib/gcc/x86_64-linux-gnu/10")
-    candidates.push("/usr/lib/gcc/x86_64-linux-gnu/9")
+    candidates.push(base ++ "15")
+    candidates.push(base ++ "14")
+    candidates.push(base ++ "13")
+    candidates.push(base ++ "12")
+    candidates.push(base ++ "11")
+    candidates.push(base ++ "10")
+    candidates.push(base ++ "9")
     for i in 0..candidates.len() as i32:
         let dir = candidates.get(i as i64)
         if link_stage_file_exists(dir ++ "/crtbegin.o"):
             return dir
     ""
 
-fn link_stage_linux_system_lib_path(name: str) -> str:
+fn link_stage_linux_system_lib_path(sysroot: str, name: str) -> str:
+    let libdir = sysroot ++ "/usr/lib/" ++ link_stage_linux_multiarch()
     if name == "z":
-        if link_stage_file_exists("/usr/lib/x86_64-linux-gnu/libz.so"):
+        if link_stage_file_exists(libdir ++ "/libz.so"):
             return ""
-        if link_stage_file_exists("/usr/lib/x86_64-linux-gnu/libz.so.1"):
-            return "/usr/lib/x86_64-linux-gnu/libz.so.1"
+        if link_stage_file_exists(libdir ++ "/libz.so.1"):
+            return libdir ++ "/libz.so.1"
     if name == "zstd":
-        if link_stage_file_exists("/usr/lib/x86_64-linux-gnu/libzstd.so"):
+        if link_stage_file_exists(libdir ++ "/libzstd.so"):
             return ""
-        if link_stage_file_exists("/usr/lib/x86_64-linux-gnu/libzstd.so.1"):
-            return "/usr/lib/x86_64-linux-gnu/libzstd.so.1"
+        if link_stage_file_exists(libdir ++ "/libzstd.so.1"):
+            return libdir ++ "/libzstd.so.1"
     if name == "xml2":
-        if link_stage_file_exists("/usr/lib/x86_64-linux-gnu/libxml2.so"):
+        if link_stage_file_exists(libdir ++ "/libxml2.so"):
             return ""
-        if link_stage_file_exists("/usr/lib/x86_64-linux-gnu/libxml2.so.16"):
-            return "/usr/lib/x86_64-linux-gnu/libxml2.so.16"
+        if link_stage_file_exists(libdir ++ "/libxml2.so.16"):
+            return libdir ++ "/libxml2.so.16"
     ""
 
 fn link_stage_make_darwin_llvm_link_command(llvm_ld: str, obj_path: str, bin_path: str, extras: Vec[str], link_libs: Vec[str], link_args: Vec[str]) -> LinkStageCommand:
@@ -410,23 +447,33 @@ fn link_stage_make_linux_llvm_link_command(llvm_ld: str, obj_path: str, bin_path
     let env: Vec[LinkStageEnvVar] = Vec.new()
     let inputs: Vec[str] = Vec.new()
     let outputs: Vec[str] = Vec.new()
-    let dynamic_linker = link_stage_linux_dynamic_linker()
-    let crt1 = link_stage_linux_crt_object("crt1.o")
-    let crti = link_stage_linux_crt_object("crti.o")
-    let crtn = link_stage_linux_crt_object("crtn.o")
-    let gcc_dir = link_stage_linux_gcc_dir()
+    let sysroot = link_stage_linux_sysroot()
+    let dynamic_linker = link_stage_linux_dynamic_linker(sysroot)
+    let crt1 = link_stage_linux_crt_object(sysroot, "crt1.o")
+    let crti = link_stage_linux_crt_object(sysroot, "crti.o")
+    let crtn = link_stage_linux_crt_object(sysroot, "crtn.o")
+    let gcc_dir = link_stage_linux_gcc_dir(sysroot)
     if dynamic_linker.len() == 0 or crt1.len() == 0 or crti.len() == 0 or crtn.len() == 0 or gcc_dir.len() == 0:
-        with_eprint("error: could not locate Linux x86_64 crt/linker files for direct ld.lld link")
+        if sysroot.len() > 0:
+            with_eprint("error: could not locate Linux " ++ link_stage_linux_arch() ++ " crt/linker files under sysroot " ++ sysroot)
+        else if runtime_sysinfo_os() == "Linux":
+            with_eprint("error: could not locate Linux " ++ link_stage_linux_arch() ++ " crt/linker files for direct ld.lld link")
+        else:
+            with_eprint("error: linking a Linux " ++ link_stage_linux_arch() ++ " binary from this host needs a Linux sysroot (crt1.o, libc, libgcc); set WITH_LINUX_SYSROOT=<dir>")
         return LinkStageCommand { linker: "", args, cwd: "", env, inputs, outputs, cleanup_files: Vec.new() }
 
     args.push("-m")
-    args.push("elf_x86_64")
+    args.push(link_stage_linux_emulation())
     args.push("--eh-frame-hdr")
     args.push("--hash-style=gnu")
     args.push("--build-id")
     args.push("--gc-sections")
     args.push("--icf=all")
     args.push("--as-needed")
+    if sysroot.len() > 0:
+        // Keep every implicit library search inside the sysroot; the
+        // embedded dynamic-linker path below stays the target's own.
+        args.push("--sysroot=" ++ sysroot)
     args.push("-dynamic-linker")
     args.push(dynamic_linker)
     args.push("-o")
@@ -449,16 +496,16 @@ fn link_stage_make_linux_llvm_link_command(llvm_ld: str, obj_path: str, bin_path
         inputs.push(extra)
 
     args.push("-L" ++ gcc_dir)
-    args.push("-L/usr/lib/x86_64-linux-gnu")
-    args.push("-L/lib/x86_64-linux-gnu")
-    args.push("-L/usr/lib")
-    args.push("-L/lib")
+    args.push("-L" ++ sysroot ++ "/usr/lib/" ++ link_stage_linux_multiarch())
+    args.push("-L" ++ sysroot ++ "/lib/" ++ link_stage_linux_multiarch())
+    args.push("-L" ++ sysroot ++ "/usr/lib")
+    args.push("-L" ++ sysroot ++ "/lib")
     for i in 0..link_libs.len() as i32:
         let lib = link_libs.get(i as i64)
         if link_stage_framework_name(lib).len() > 0:
             with_eprint("error: link: \"" ++ lib ++ "\" — Apple frameworks are only available on macOS targets\n")
         else:
-            let fallback_lib = link_stage_linux_system_lib_path(lib)
+            let fallback_lib = link_stage_linux_system_lib_path(sysroot, lib)
             if fallback_lib.len() > 0:
                 args.push(fallback_lib)
                 inputs.push(fallback_lib)
@@ -477,6 +524,12 @@ fn link_stage_make_linux_llvm_link_command(llvm_ld: str, obj_path: str, bin_path
     let cleanup_files = link_stage_collect_cleanup_files(&extras)
     LinkStageCommand { linker: llvm_ld, args, cwd: "", env, inputs, outputs, cleanup_files }
 
+fn link_stage_windows_libpath(var_name: str, fallback: str) -> str:
+    let v = runtime_getenv(var_name)
+    if v.len() > 0:
+        return v
+    fallback
+
 fn link_stage_make_windows_llvm_link_command(llvm_ld: str, obj_path: str, bin_path: str, extras: Vec[str], link_libs: Vec[str], link_args: Vec[str]) -> LinkStageCommand:
     let args: Vec[str] = Vec.new()
     let env: Vec[LinkStageEnvVar] = Vec.new()
@@ -489,9 +542,13 @@ fn link_stage_make_windows_llvm_link_command(llvm_ld: str, obj_path: str, bin_pa
     args.push("/stack:8388608")
     args.push("/opt:ref")
     args.push("/opt:icf")
-    args.push("/libpath:C:/Program Files (x86)/Windows Kits/10/Lib/10.0.19041.0/um/x64")
-    args.push("/libpath:C:/Program Files (x86)/Windows Kits/10/Lib/10.0.19041.0/ucrt/x64")
-    args.push("/libpath:C:/Program Files (x86)/Microsoft Visual Studio/2019/BuildTools/VC/Tools/MSVC/14.29.30133/lib/x64")
+    // Library search paths. On a Windows host these are the standard
+    // MSVC/WinSDK install locations; for a cross link from another host
+    // point them at a splatted lib tree (e.g. xwin output) via the
+    // WITH_WINDOWS_* env vars.
+    args.push("/libpath:" ++ link_stage_windows_libpath("WITH_WINDOWS_UM_LIBDIR", "C:/Program Files (x86)/Windows Kits/10/Lib/10.0.19041.0/um/x64"))
+    args.push("/libpath:" ++ link_stage_windows_libpath("WITH_WINDOWS_UCRT_LIBDIR", "C:/Program Files (x86)/Windows Kits/10/Lib/10.0.19041.0/ucrt/x64"))
+    args.push("/libpath:" ++ link_stage_windows_libpath("WITH_WINDOWS_MSVC_LIBDIR", "C:/Program Files (x86)/Microsoft Visual Studio/2019/BuildTools/VC/Tools/MSVC/14.29.30133/lib/x64"))
     args.push("/out:" ++ bin_path)
     outputs.push(bin_path)
     args.push(obj_path)
@@ -532,10 +589,53 @@ fn link_stage_make_windows_llvm_link_command(llvm_ld: str, obj_path: str, bin_pa
     let cleanup_files = link_stage_collect_cleanup_files(&extras)
     LinkStageCommand { linker: llvm_ld, args, cwd: "", env, inputs, outputs, cleanup_files }
 
+// The lld flavor for a Linux ELF link. The build's llvm_ld metadata
+// records the host flavor (ld64.lld on macOS); the ELF driver ships
+// beside it in the same SDK bin directory.
+fn link_stage_elf_lld_for(llvm_ld: str) -> str:
+    if link_stage_basename(llvm_ld) == "ld.lld":
+        return llvm_ld
+    let sibling = link_stage_dirname(llvm_ld) ++ "/ld.lld"
+    if link_stage_file_exists(sibling):
+        return sibling
+    ""
+
+// The lld flavor for a Windows COFF/PE link. `lld-link` ships beside
+// the host llvm_ld in the same SDK bin directory (a symlink to `lld`
+// in the published SDKs); invoking lld as lld-link performs a native
+// COFF link from any host, so no wine is needed for the link itself.
+fn link_stage_coff_lld_for(llvm_ld: str) -> str:
+    if link_stage_basename(llvm_ld) == "lld-link" or link_stage_basename(llvm_ld) == "lld-link.exe":
+        return llvm_ld
+    let sibling = link_stage_dirname(llvm_ld) ++ "/lld-link"
+    if link_stage_file_exists(sibling):
+        return sibling
+    ""
+
 fn link_stage_make_llvm_link_command(llvm_ld: str, obj_path: str, bin_path: str, extras: Vec[str], link_libs: Vec[str], link_args: Vec[str]) -> LinkStageCommand:
+    // A --target selection overrides the host: pick the target's link
+    // recipe and lld flavor (§18.5 — cross-compilation is a normal mode).
+    if not target_spec_is_native():
+        let cross_kind = target_spec_active_kind()
+        if cross_kind == 1 or cross_kind == 2:
+            let elf_ld = link_stage_elf_lld_for(llvm_ld)
+            if elf_ld.len() == 0:
+                with_eprint("error: cross link needs the ELF lld driver (ld.lld) next to " ++ llvm_ld)
+                return LinkStageCommand { linker: "", args: Vec.new(), cwd: "", env: Vec.new(), inputs: Vec.new(), outputs: Vec.new(), cleanup_files: Vec.new() }
+            return link_stage_make_linux_llvm_link_command(elf_ld, obj_path, bin_path, extras, link_libs, link_args)
+        if target_spec_active_kind() == 5:
+            let coff_ld = link_stage_coff_lld_for(llvm_ld)
+            if coff_ld.len() == 0:
+                with_eprint("error: cross link needs the COFF lld driver (lld-link) next to " ++ llvm_ld)
+                return LinkStageCommand { linker: "", args: Vec.new(), cwd: "", env: Vec.new(), inputs: Vec.new(), outputs: Vec.new(), cleanup_files: Vec.new() }
+            return link_stage_make_windows_llvm_link_command(coff_ld, obj_path, bin_path, extras, link_libs, link_args)
+        with_eprint("error: unsupported cross link target: " ++ target_spec_name())
+        return LinkStageCommand { linker: "", args: Vec.new(), cwd: "", env: Vec.new(), inputs: Vec.new(), outputs: Vec.new(), cleanup_files: Vec.new() }
     let os = runtime_sysinfo_os()
     let arch = runtime_sysinfo_arch()
     if os == "Linux" and arch == "x86_64":
+        return link_stage_make_linux_llvm_link_command(llvm_ld, obj_path, bin_path, extras, link_libs, link_args)
+    if os == "Linux" and (arch == "armv8" or arch == "aarch64"):
         return link_stage_make_linux_llvm_link_command(llvm_ld, obj_path, bin_path, extras, link_libs, link_args)
     if os == "Macos" and (arch == "armv8" or arch == "aarch64"):
         return link_stage_make_darwin_llvm_link_command(llvm_ld, obj_path, bin_path, extras, link_libs, link_args)
@@ -634,15 +734,20 @@ fn link_stage_link_with_extras_and_libs_plan(obj_path: str, bin_path: str, extra
     link_stage_link_with_extras_libs_args_plan(obj_path, bin_path, extras, link_libs, link_args)
 
 fn link_stage_link_with_extras_libs_args_plan(obj_path: str, bin_path: str, extras: Vec[str], link_libs: Vec[str], link_args: Vec[str]) -> LinkStagePlan:
-    if runtime_sysinfo_os() == "Windows":
+    // Cross links never go through the host cc driver: route to the
+    // LLVM linker plan, which dispatches on the active target.
+    if runtime_sysinfo_os() == "Windows" or not target_spec_is_native():
         let root = link_stage_resolve_runtime_root()
         let ld_path = link_stage_read_file_trimmed(root ++ "/llvm_ld")
         if ld_path.len() == 0:
-            with_eprint("error: missing Windows LLVM linker metadata")
+            if runtime_sysinfo_os() == "Windows":
+                with_eprint("error: missing Windows LLVM linker metadata")
+            else:
+                with_eprint("error: cross-target link requires LLVM linker metadata (" ++ root ++ "/llvm_ld)")
             return link_stage_plan_fail()
         return link_stage_link_with_llvm_args_plan(obj_path, bin_path, extras, link_libs, link_args, ld_path)
     let command = link_stage_make_link_command("cc", obj_path, bin_path, extras, link_libs, link_args)
-    link_stage_plan_for_command(command)
+    link_stage_plan_for_command(move command)
 
 fn link_stage_link_with_llvm(obj_path: str, bin_path: str, extras: Vec[str], link_libs: Vec[str], llvm_ld: str) -> bool:
     link_stage_link_with_llvm_result(obj_path, bin_path, extras, link_libs, llvm_ld).ok
@@ -658,7 +763,7 @@ fn link_stage_link_with_llvm_args_plan(obj_path: str, bin_path: str, extras: Vec
     let command = link_stage_make_llvm_link_command(llvm_ld, obj_path, bin_path, extras, link_libs, link_args)
     if command.linker.len() == 0:
         return link_stage_plan_fail()
-    link_stage_plan_for_command(command)
+    link_stage_plan_for_command(move command)
 
 fn link_stage_str_contains(hay: str, needle: str) -> bool:
     let hay_len = hay.len() as i32
@@ -699,6 +804,15 @@ fn link_stage_undefined_symbols_for_object(obj_path: str) -> str:
             nm_tool = link_stage_dirname(ld_path) ++ "/llvm-nm.exe"
         else:
             nm_tool = "llvm-nm.exe"
+    else if not target_spec_is_native():
+        // Cross objects are foreign to the host toolchain; use the
+        // SDK's llvm-nm (beside lld) when it's available.
+        let root = link_stage_resolve_runtime_root()
+        let ld_path = link_stage_read_file_trimmed(root ++ "/llvm_ld")
+        if ld_path.len() > 0:
+            let llvm_nm = link_stage_dirname(ld_path) ++ "/llvm-nm"
+            if link_stage_file_exists(llvm_nm):
+                nm_tool = llvm_nm
     argv = link_stage_argv_append(argv, nm_tool)
     argv = link_stage_argv_append(argv, "-u")
     argv = link_stage_argv_append(argv, obj_path)
@@ -788,10 +902,20 @@ fn link_stage_resolve_runtime_root() -> str:
     // Fall back to compiler-relative runtime dir.
     compiler_dir ++ "/runtime"
 
+// Directory holding the link inputs built FOR the active target:
+// the runtime root itself for native, its cross/<target>/ subdir
+// for a cross target (bridge objects, embedded objects, lld rsp).
+fn link_stage_runtime_variant_dir() -> str:
+    let root = link_stage_resolve_runtime_root()
+    if target_spec_is_native():
+        return root
+    root ++ "/cross/" ++ target_spec_name()
+
 fn link_stage_find_llvm_static_bridge() -> str:
     let root = link_stage_resolve_runtime_root()
-    let bridge_o = root ++ "/llvm_bridge.o"
-    let rsp = root ++ "/llvm_ld.rsp"
+    let variant = link_stage_runtime_variant_dir()
+    let bridge_o = variant ++ "/llvm_bridge.o"
+    let rsp = variant ++ "/llvm_ld.rsp"
     let ld_file = root ++ "/llvm_ld"
     if runtime_read_file(bridge_o).len() > 0 and runtime_read_file(rsp).len() > 0 and runtime_read_file(ld_file).len() > 0:
         return bridge_o
@@ -815,6 +939,15 @@ fn link_stage_artifact_root() -> str:
 
 fn link_stage_find_runtime_object_path(name: str) -> str:
     let root = link_stage_resolve_runtime_root()
+    // Cross targets only ever link runtime objects built for the
+    // target; the embedded objects are host-built and never a valid
+    // fallback here (§18.5: fail loudly, never link native output).
+    if not target_spec_is_native():
+        let cross_path = root ++ "/cross/" ++ target_spec_name() ++ "/" ++ name
+        if runtime_read_file(cross_path).len() > 0:
+            return cross_path
+        with_eprint("error: missing " ++ target_spec_name() ++ " runtime object: " ++ cross_path ++ " (run `with build :cross-rt` first)")
+        return ""
     let p = root ++ "/" ++ name
     if runtime_read_file(p).len() > 0:
         return p
@@ -827,11 +960,29 @@ fn link_stage_find_runtime_object_path(name: str) -> str:
         return tmp_path
     ""
 
+// The platform runtime object for the ACTIVE target (native resolves
+// to the host's, exactly as before cross targets existed).
+fn link_stage_platform_runtime_object() -> str:
+    if not target_spec_is_native():
+        if target_spec_active_kind() == 1:
+            return "rt_linux_x86_64.o"
+        if target_spec_active_kind() == 2:
+            return "rt_linux_aarch64.o"
+        if target_spec_active_kind() == 5:
+            return "rt_windows_x86_64.o"
+        with_eprint("error: unsupported cross runtime platform: " ++ target_spec_name())
+        return ""
+    link_stage_host_platform_runtime_object()
+
 fn link_stage_host_platform_runtime_object() -> str:
     let os = runtime_sysinfo_os()
     let arch = runtime_sysinfo_arch()
     if os == "Linux" and arch == "x86_64":
         return "rt_linux_x86_64.o"
+    if os == "Linux" and (arch == "armv8" or arch == "aarch64"):
+        // No embedded slot yet — resolved from the on-disk runtime root
+        // only (see link_stage_embedded_runtime_object).
+        return "rt_linux_aarch64.o"
     if os == "Macos" and (arch == "armv8" or arch == "aarch64"):
         return "rt_darwin_aarch64.o"
     if os == "Windows" and arch == "x86_64":
@@ -840,7 +991,7 @@ fn link_stage_host_platform_runtime_object() -> str:
     ""
 
 fn link_stage_make_archive(obj_path: str) -> str:
-    if runtime_sysinfo_os() == "Windows":
+    if runtime_sysinfo_os() == "Windows" or target_spec_active_kind() == 5:
         return obj_path
     // Wrap a .o file in a .a archive so the linker treats it as a library
     // (only pulling in symbols that aren't already defined).
@@ -1014,7 +1165,7 @@ fn link_stage_link_object_to_binary_plan_with_units(obj_path: str, extra_objects
                 with_eprint("error: missing rt_core.o")
                 return link_stage_plan_fail()
             extras.push(rt_core_path)
-            let rt_platform_object = link_stage_host_platform_runtime_object()
+            let rt_platform_object = link_stage_platform_runtime_object()
             if rt_platform_object.len() == 0:
                 return link_stage_plan_fail()
             let rt_platform_path = link_stage_find_runtime_object_path(rt_platform_object)
@@ -1058,7 +1209,7 @@ fn link_stage_link_object_to_binary_plan_with_units(obj_path: str, extra_objects
                 with_eprint("error: missing rt_core.o")
                 return link_stage_plan_fail()
             extras.push(rt_core_path)
-            let rt_platform_object = link_stage_host_platform_runtime_object()
+            let rt_platform_object = link_stage_platform_runtime_object()
             if rt_platform_object.len() == 0:
                 return link_stage_plan_fail()
             let rt_platform_path = link_stage_find_runtime_object_path(rt_platform_object)
@@ -1102,7 +1253,7 @@ fn link_stage_link_object_to_binary_plan_with_units(obj_path: str, extra_objects
                 with_eprint("error: missing rt_core.o")
                 return link_stage_plan_fail()
             extras.push(rt_core_path)
-            let rt_platform_object = link_stage_host_platform_runtime_object()
+            let rt_platform_object = link_stage_platform_runtime_object()
             if rt_platform_object.len() == 0:
                 return link_stage_plan_fail()
             let rt_platform_path = link_stage_find_runtime_object_path(rt_platform_object)
@@ -1147,17 +1298,21 @@ fn link_stage_link_object_to_binary_plan_with_units(obj_path: str, extra_objects
     if link_stage_undefined_symbols_need_llvm_bridge(undef):
         let static_bridge = link_stage_find_llvm_static_bridge()
         if static_bridge.len() > 0:
-            // Static LLVM linking: use llvm_bridge.o + LLVM static libs
+            // Static LLVM linking: use llvm_bridge.o + LLVM static libs.
+            // All target-built inputs come from the variant dir (the
+            // cross/<target>/ subdir on a cross link); only the linker
+            // path metadata is the host's.
             let root = link_stage_resolve_runtime_root()
-            let rsp_path = root ++ "/llvm_ld.rsp"
+            let variant = link_stage_runtime_variant_dir()
+            let rsp_path = variant ++ "/llvm_ld.rsp"
             let ld_path = link_stage_read_file_trimmed(root ++ "/llvm_ld")
             extras.push(static_bridge)
             // Include embedded runtime objects for self-contained binary
-            let embedded_path = root ++ "/embedded_objects.o"
+            let embedded_path = variant ++ "/embedded_objects.o"
             if runtime_read_file(embedded_path).len() > 0:
                 extras.push(embedded_path)
             // Include clang bridge for c_import support
-            let clang_bridge_path = root ++ "/clang_bridge.o"
+            let clang_bridge_path = variant ++ "/clang_bridge.o"
             if runtime_read_file(clang_bridge_path).len() > 0:
                 extras.push(clang_bridge_path)
             extras.push("@" ++ rsp_path)

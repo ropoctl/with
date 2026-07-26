@@ -571,6 +571,21 @@ pins it as a deterministic oracle.
 
 ## Field Receiver Chains
 
+> **Superseded by D17 + D21 (2026-07-22).** The receiver-returning Vec model
+> below is retired. `Vec.push` is a Unit-returning `mut self` call on the
+> existing field place; it neither moves the Vec header out nor reinitializes
+> the field from an owned return. Repeated statements mutate the same place,
+> and a pipeline of Unit mutators threads that place under specification §9.6:
+>
+> ```with
+> h.items |> push(a) |> push(b)
+> ```
+>
+> D17 still governs a genuine owned projection transfer: the source projection
+> is reset and the root remains changed-but-valid. That is distinct from the
+> duplicated whole-receiver return rejected by D21. The two move-out models and
+> the Model B decision retained below are historical only.
+
 The chain:
 
 ```with

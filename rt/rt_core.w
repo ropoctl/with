@@ -2394,7 +2394,7 @@ pub fn with_vec_push(v: *mut u8, elem: *const u8) -> Unit:
 pub fn with_vec_get_ptr(v: *mut u8, idx: i64) -> *mut u8:
     let vlen = vec_get_len(v)
     if idx < 0 or idx >= vlen:
-        return 0 as *mut u8
+        with_panic_core(make_str("Vec index out of bounds" as *const u8, 23), make_str("" as *const u8, 0), 0)
     let es = vec_get_elem_size(v)
     (vec_get_ptr_field(v) as i64 + idx * es) as *mut u8
 
@@ -2834,10 +2834,12 @@ pub fn with_hashmap_insert(map: *mut u8, key: *const u8, val: *const u8, is_str_
     unsafe *((hm_occ(m) as i64 + h) as *mut u8) = 1
     hm_set_len(m, hm_len(m) + 1)
 
-pub fn with_hashmap_get(map: *mut u8, key: *const u8, val_out: *mut u8, is_str_key: i64) -> i32:
+// D22 lookup primitive: a nullable pointer observes map-owned value storage.
+// The compiler wraps it as Option[&V]; this function never transfers ownership.
+pub fn with_hashmap_get_ptr(map: *mut u8, key: *const u8, is_str_key: i64) -> *mut u8:
     let _ = is_str_key  // key type already stored in struct
     let m = map as i64
-    if hm_len(m) == 0: return 0
+    if hm_len(m) == 0: return 0 as *mut u8
     let cap = hm_cap(m)
     let ksz = hm_key_size(m)
     let vsz = hm_val_size(m)
@@ -2846,17 +2848,26 @@ pub fn with_hashmap_get(map: *mut u8, key: *const u8, val_out: *mut u8, is_str_k
     var probes: i64 = 0
     while probes < cap:
         if (unsafe hm_occ(m)[h]) == 0:
-            return 0
+            return 0 as *mut u8
         if hm_keys_eq(m, (hm_keys(m) as i64 + h * ksz) as *const u8, key) != 0:
-            if val_out as i64 != 0:
-                rt_memcpy(val_out, (hm_vals(m) as i64 + h * vsz) as *const u8, vsz)
-            return 1
+            return (hm_vals(m) as i64 + h * vsz) as *mut u8
         h = ((h + 1) as u64 % (cap as u64)) as i64
         probes = probes + 1
-    0
+    0 as *mut u8
+
+// TODO(D22): legacy copying helper for internal callers. User-facing get must
+// not lower through this path; remove or narrowly retain it only after every
+// backend has converged on with_hashmap_get_ptr.
+pub fn with_hashmap_get(map: *mut u8, key: *const u8, val_out: *mut u8, is_str_key: i64) -> i32:
+    let value = with_hashmap_get_ptr(map, key, is_str_key)
+    if value as i64 == 0:
+        return 0
+    if val_out as i64 != 0:
+        rt_memcpy(val_out, value as *const u8, hm_val_size(map as i64))
+    1
 
 pub fn with_hashmap_contains(map: *mut u8, key: *const u8, is_str_key: i64) -> i32:
-    with_hashmap_get(map, key, 0 as *mut u8, is_str_key)
+    if with_hashmap_get_ptr(map, key, is_str_key) as i64 != 0: 1 else: 0
 
 pub fn with_hashmap_remove(map: *mut u8, key: *const u8, val_out: *mut u8, is_str_key: i64) -> i32:
     let _ = is_str_key  // key type already stored in struct
@@ -2896,7 +2907,37 @@ pub fn with_hashmap_remove(map: *mut u8, key: *const u8, val_out: *mut u8, is_st
     0
 
 pub fn with_hashmap_len(map: *mut u8) -> i64:
+    if map as i64 == 0:
+        return 0
     hm_len(map as i64)
+
+// Typed drop glue cannot see through HashMap's opaque one-pointer compiler
+// representation. These accessors let it walk only live runtime slots while
+// keeping the table layout private to rt_core.
+pub fn with_hashmap_capacity(map: *mut u8) -> i64:
+    if map as i64 == 0:
+        return 0
+    hm_cap(map as i64)
+
+pub fn with_hashmap_slot_occupied(map: *mut u8, index: i64) -> i32:
+    if map as i64 == 0:
+        return 0
+    let m = map as i64
+    if index < 0 or index >= hm_cap(m):
+        return 0
+    if (unsafe hm_occ(m)[index]) != 0: 1 else: 0
+
+pub fn with_hashmap_key_ptr_at(map: *mut u8, index: i64) -> *mut u8:
+    if with_hashmap_slot_occupied(map, index) == 0:
+        return 0 as *mut u8
+    let m = map as i64
+    (hm_keys(m) as i64 + index * hm_key_size(m)) as *mut u8
+
+pub fn with_hashmap_value_ptr_at(map: *mut u8, index: i64) -> *mut u8:
+    if with_hashmap_slot_occupied(map, index) == 0:
+        return 0 as *mut u8
+    let m = map as i64
+    (hm_vals(m) as i64 + index * hm_val_size(m)) as *mut u8
 
 pub fn with_hashmap_clear(map: *mut u8) -> Unit:
     let m = map as i64

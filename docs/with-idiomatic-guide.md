@@ -1,5 +1,10 @@
 # Idiomatic With
 
+> **D22 status (2026-07-23): A new decision has been made, but implementation
+> is still in progress.** The examples below state the normative uniform
+> map-view and contextual-Copy design. Current compiler disagreements are
+> NON-COMPLIANCE, not alternate idioms.
+
 The principle: **if the compiler already knows it, don't type it.**
 
 Every rule in this guide follows from that. With is designed so
@@ -574,6 +579,43 @@ let report = raw_data
 Collections support implicit iteration: `Vec`, arrays, slices, `HashMap`, and
 `HashSet` flow directly into `map`/`filter`/`count` without an explicit
 `.iter()`, and the result is again a collection (no terminal `.collect()`).
+
+### Let lookup observe and removal transfer
+
+Keyed-map lookup never changes shape according to its value type:
+
+```with
+let job = jobs.get(id)             // Option[&Job]
+let count = counts.get("api")      // Option[&i32]
+let removed = jobs.remove(id)      // Option[Job]
+```
+
+Use an owned annotation or another owned-demand context when an independent
+Copy snapshot matters:
+
+```with
+let count: i32 = counts.get("api") ?? 0
+counts.clear()
+print(count)                        // independent snapshot
+```
+
+Without the annotation, inference preserves the reference and therefore its
+connection to the map. That is useful information, not a nuisance. If a later
+mutation conflicts, the diagnostic explains the relationship and offers the
+owned annotation as a fix. Non-Copy values require an honest ownership choice:
+keep `&V`, call `.cloned()` deliberately, or transfer with `remove`.
+
+Patterns also preserve the exact payload type:
+
+```with
+match jobs.get(id):
+    Some(job) => show(job)          // job: &Job
+    None => show_missing()
+```
+
+`Some(v)` on `Option[&V]` binds `v: &V` even when `V: Copy`; contextual Copy
+materialization happens only at a later owned-value use. This keeps generic code
+uniform and preserves identity until the program actually asks for ownership.
 
 ---
 

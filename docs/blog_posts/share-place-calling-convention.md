@@ -1,5 +1,13 @@
 # Share-Place: The Calling Convention That Makes With Feel Like Python and Prove Like Rust
 
+> **Historical design post — superseded 2026-07-23.** With now makes the
+> ownership contract explicit once in the signature: `&T` borrows and plain `T`
+> consumes, with auto-ref preserving call-site ergonomics. This post is retained
+> as design history and must not be read as current documentation. Every later
+> claim that SHARE-PLACE is “current,” “canonical,” or implementation direction
+> is historical and false. For D22 intersections, `docs/d22-Eric-Ruling.md` is
+> canonical. `mut fn` receivers still mutate their caller's place in place.
+
 There's a trade every systems programmer has made a thousand times without noticing, because it's baked so deep into the languages we use that it looks like the weather.
 
 You have a value. You want to hand it to a function. And before you can even type the call, the language has already made you answer a question that has nothing to do with what you're trying to do:
@@ -105,4 +113,6 @@ You've been paying a tax on that operation your whole career. With just stopped 
 
 ---
 
-*Share-place is specified in `docs/completed/mutability.md` and is the canonical calling convention of the With language. Its receiver modes (`&self` / `mut self` / `move self`), the `Copy` opt-in for aggregate types, and the `&T` niche for explicit read-only contracts are all part of the same one coherent model.*
+*Historical closing claim (superseded): this post originally called
+free-parameter SHARE-PLACE canonical. That claim is false under current §3.8.
+The receiver modes it discussed survive independently under D12/D21.*

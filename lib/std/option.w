@@ -11,4 +11,14 @@
 /// `.unwrap_or(default)` for a safe fallback,
 /// `.is_some()` / `.is_none()` to check,
 /// `.map(fn)` to transform the inner value.
+///
+/// TODO(D22 — implementation in progress): the normative Option surface also
+/// includes `.copied()` for `Option[&T] where T: Copy` and `.cloned()` for
+/// `Option[&T] where T: Clone`. All eliminators preserve view origins until an
+/// explicit ownership boundary; do not implement these as conditional unwrap
+/// return types.
 pub enum Option[T] { Some(T) | None }
+
+// An Option carries no ownership beyond its payload. Copy payloads therefore
+// make the whole wrapper Copy; non-Copy payloads remain single-owner values.
+impl[T: Copy] Copy for Option[T]

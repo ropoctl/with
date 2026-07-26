@@ -173,10 +173,10 @@ fn resolve_normalize_source_text(text: str) -> str:
     out.to_str()
 
 fn resolve_from_root_pool(root_path: str, root_text: str, root_file_id: i32, root_pool: AstPool, pool: InternPool, diags: DiagnosticList, emit_resolve_diags: bool) -> ResolveArtifacts:
-    resolve_from_root_pool_with_prefix(root_path, root_text, root_file_id, root_pool, pool, diags, emit_resolve_diags, 0)
+    resolve_from_root_pool_with_prefix(root_path, root_text, root_file_id, root_pool, pool, move diags, emit_resolve_diags, 0)
 
 fn resolve_from_root_pool_with_prefix(root_path: str, root_text: str, root_file_id: i32, root_pool: AstPool, pool: InternPool, diags: DiagnosticList, emit_resolve_diags: bool, root_prefix_skip: i32) -> ResolveArtifacts:
-    var state = ResolveState.init(pool, diags, emit_resolve_diags)
+    var state = ResolveState.init(pool, move diags, emit_resolve_diags)
     state.root_prefix_skip = root_prefix_skip
     let normalized_root_text = resolve_normalize_source_text(root_text)
     let root_dir = resolve_dirname(root_path)
@@ -204,7 +204,7 @@ fn resolve_from_root_pool_with_prefix(root_path: str, root_text: str, root_file_
             let file_id = state.module_file_ids.get(work as i64)
             var lexer = Lexer.init(text, file_id)
             let tokens = lexer.tokenize()
-            var parser = Parser.init(tokens, text, file_id, state.pool, state.diags)
+            var parser = Parser.init(move tokens, text, file_id, state.pool, move state.diags)
             let parsed = parser.parse_module()
             state.pool = parser.intern
             state.diags = parser.diags

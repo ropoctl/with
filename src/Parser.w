@@ -9,15 +9,16 @@ use Span
 use Lexer
 use InternPool
 use Diagnostic
+use TargetSpec
 
 extern fn with_parse_i64(s: str) -> i64
 extern fn str_from_byte(b: i32) -> str
-extern fn with_sysinfo_arch() -> str
 
 // Canonical active target architecture for @[target("arch")] guards.
-// Until CLI-selected cross targets land (#425) this is the host arch.
+// Resolved from the driver-selected --target (§18.5); native builds
+// resolve to the host arch as before.
 fn parser_active_arch() -> str:
-    let a = with_sysinfo_arch()
+    let a = target_spec_arch()
     if a == "x86_64" or a == "amd64": "x86_64" else: "aarch64"
 pub type Parser {
     tokens: TokenList,
@@ -95,7 +96,7 @@ type InterpolatedExprParseAttempt {
 }
 
 fn Parser.init(tokens: TokenList, source: str, file_id: i32, intern: InternPool, diags: DiagnosticList) -> Parser:
-    Parser.init_with_pool(tokens, source, file_id, intern, diags, AstPool.new())
+    Parser.init_with_pool(move tokens, source, file_id, intern, move diags, AstPool.new())
 
 fn Parser.init_with_pool(tokens: TokenList, source: str, file_id: i32, intern: InternPool, diags: DiagnosticList, pool: AstPool) -> Parser:
     var file_pool = pool
@@ -241,7 +242,7 @@ impl Parser:
             let main_span = Span { file: self.file_id, start: self.pool.get_start(self.explicit_main_decl as NodeId), end: self.pool.get_end(self.explicit_main_decl as NodeId) }
             diag.add_label(main_span, "`fn main` defined here")
         diag.add_help("move the statement inside `fn main`, or remove `fn main` to use implicit main mode")
-        self.diags.emit(diag)
+        self.diags.emit(move diag)
 
     mut fn synthesize_implicit_main():
         if self.implicit_main_mode == 0:
@@ -336,7 +337,7 @@ impl Parser:
         let span = Span { file: self.file_id, start: self.current_start(), end: self.current_end() }
         var diag = Diagnostic.err(msg, span)
         diag.add_help(help)
-        self.diags.emit(diag)
+        self.diags.emit(move diag)
 
     mut fn expect_use_path_segment() -> i32:
         let t = self.peek()
@@ -350,7 +351,7 @@ impl Parser:
             let span = Span { file: self.file_id, start: self.current_start(), end: self.current_end() }
             var diag = Diagnostic.err("'" ++ keyword ++ "' is a reserved keyword and cannot be used as a module name", span)
             diag.add_help("rename the module to avoid the keyword, e.g. '" ++ keyword ++ "s'")
-            self.diags.emit(diag)
+            self.diags.emit(move diag)
             return 0
         self.emit_error("expected identifier")
         0
@@ -404,7 +405,7 @@ impl Parser:
         let span = Span { file: self.file_id, start: self.current_start(), end: self.current_end() }
         var diag = Diagnostic.err(msg, span)
         diag.set_code(code)
-        self.diags.emit(diag)
+        self.diags.emit(move diag)
 
     fn effect_name_bit(name: str) -> i32:
         if name == "read":
@@ -3564,7 +3565,7 @@ impl Parser:
                 let err_span = Span { file: self.file_id, start: start, end: end_pos }
                 var diag = Diagnostic.err("nested implicit closure is ambiguous; use explicit parameter for inner closure", err_span)
                 diag.set_code("E0951")
-                self.diags.emit(diag)
+                self.diags.emit(move diag)
             self.saw_implicit_it = 1
             self.implicit_it_depth = self.implicit_it_depth + 1
             let sym = self.intern.intern("__it")
@@ -4304,7 +4305,7 @@ impl Parser:
         let local_diags = DiagnosticList.init()
         let parse_diags = if use_shared_diags != 0: self.diags else: local_diags
         let first_node = self.pool.node_count()
-        var sub_parser = Parser.init_with_pool(tokens, source_text, 0, self.intern, parse_diags, self.pool)
+        var sub_parser = Parser.init_with_pool(move tokens, source_text, 0, self.intern, move parse_diags, self.pool)
         let result = sub_parser.parse_expr()
         sub_parser.skip_newlines()
         offset_interpolated_expr_spans(sub_parser.pool, first_node, base_start)
@@ -7835,7 +7836,7 @@ impl Parser:
                 let mut_span = Span { file: self.file_id, start: mut_tok_start, end: mut_tok_end }
                 var mdiag = Diagnostic.err("`mut` is not a parameter modifier — parameters are already rebindable", mut_span)
                 mdiag.add_help("remove `mut`; to mutate an independent copy, bind a local `var` inside the function body")
-                self.diags.emit(mdiag)
+                self.diags.emit(move mdiag)
             if is_mut == 1 and is_self_param:
                 extra_flags = extra_flags + FN_PARAM_FLAG_MUT_SELF
             if is_move == 1 and is_self_param:

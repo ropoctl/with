@@ -161,7 +161,7 @@ impl BuildGraphMaterializer:
             if action_name != "build_noop_action":
                 out.error_msg = "non-action target '" ++ name_value.text ++ "' has an action function"
                 return out
-        out.targets.push(target)
+        out.targets.push(move target)
         out
 
     // #686: the module files an action's code can reach — its defining file
@@ -269,6 +269,6 @@ impl BuildGraphMaterializer:
 // materializer stores the Sema (refs cannot be struct fields), so the
 // caller gets it back instead of reusing a moved value (§3.8).
 pub fn materialize_build_graph_from_comptime(sema: Sema, value: ComptimeValue, extras: Vec[ComptimeValue]) -> BuildGraphMaterializeResult:
-    let mat = build_graph_materializer(sema, extras)
+    let mat = build_graph_materializer(move sema, move extras)
     let graph = mat.materialize_build(value)
     BuildGraphMaterializeResult { graph, sema: mat.sema }

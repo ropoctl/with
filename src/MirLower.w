@@ -22,6 +22,25 @@ type DropScope {
     drops: Vec[ScopeEntry],
 }
 
+// Exact move-state snapshot for branch lowering. Lengths are insufficient:
+// reinitializing one pre-existing moved place and moving another can preserve
+// the vector length while replacing its identity. Restoring cloned contents
+// keeps entries and their path storage atomic.
+type MirMoveStateSnapshot {
+    moved_values: Vec[i32],
+    field_base_locals: Vec[i32],
+    field_path_starts: Vec[i32],
+    field_path_counts: Vec[i32],
+    field_path_kinds: Vec[i32],
+    field_path_syms: Vec[i32],
+}
+
+fn mir_clone_i32_vec(values: &Vec[i32]) -> Vec[i32]:
+    let out: Vec[i32] = Vec.new()
+    for i in 0..values.len() as i32:
+        out.push(values.get(i as i64))
+    out
+
 type LoopInfo {
     label: i32,
     target_kind: i32,
@@ -113,6 +132,14 @@ type MirBuilder = ephemeral {
     next_temp: i32,
     cur_node: i32,
     expected_type: i32,
+    // D21 evaluates a pipeline receiver once, then lowers the ordinary method
+    // call against this exact place. The override is scoped by lower_pipeline.
+    pipeline_receiver_override_node: i32,
+    pipeline_receiver_override_place: i32,
+    // D22: node currently being contextual-Copy materialized, so the deref
+    // path's re-entry into lower_expr for the same node lowers the exact &V
+    // value instead of recursing into materialization again.
+    materializing_copy_node: i32,
     in_generator: i32,
     generator_yield_count: i32,
 
@@ -189,6 +216,9 @@ fn MirBuilder.init(sema: &Sema, ast: AstPool, pool: InternPool, fn_sym: i32) -> 
         next_temp: 0,
         cur_node: 0,
         expected_type: 0,
+        pipeline_receiver_override_node: 0,
+        pipeline_receiver_override_place: -1,
+        materializing_copy_node: 0,
         in_generator: 0,
         generator_yield_count: 0,
         regex_capture_pat_nodes: Vec.new(),
@@ -359,18 +389,23 @@ impl MirBuilder:
                 return
             i = i - 1
 
-    fn restore_moved_value_len(len: i32):
-        while self.moved_value_local_ids.len() as i32 > len:
-            self.moved_value_local_ids.pop()
+    fn save_move_state() -> MirMoveStateSnapshot:
+        MirMoveStateSnapshot {
+            moved_values: mir_clone_i32_vec(&self.moved_value_local_ids),
+            field_base_locals: mir_clone_i32_vec(&self.moved_field_base_locals),
+            field_path_starts: mir_clone_i32_vec(&self.moved_field_path_starts),
+            field_path_counts: mir_clone_i32_vec(&self.moved_field_path_counts),
+            field_path_kinds: mir_clone_i32_vec(&self.moved_field_path_kinds),
+            field_path_syms: mir_clone_i32_vec(&self.moved_field_path_syms),
+        }
 
-    fn restore_moved_field_lengths(entry_len: i32, path_len: i32):
-        while self.moved_field_base_locals.len() as i32 > entry_len:
-            self.moved_field_base_locals.pop()
-            self.moved_field_path_starts.pop()
-            self.moved_field_path_counts.pop()
-        while self.moved_field_path_kinds.len() as i32 > path_len:
-            self.moved_field_path_kinds.pop()
-            self.moved_field_path_syms.pop()
+    mut fn restore_move_state(snapshot: &MirMoveStateSnapshot):
+        self.moved_value_local_ids = mir_clone_i32_vec(&snapshot.moved_values)
+        self.moved_field_base_locals = mir_clone_i32_vec(&snapshot.field_base_locals)
+        self.moved_field_path_starts = mir_clone_i32_vec(&snapshot.field_path_starts)
+        self.moved_field_path_counts = mir_clone_i32_vec(&snapshot.field_path_counts)
+        self.moved_field_path_kinds = mir_clone_i32_vec(&snapshot.field_path_kinds)
+        self.moved_field_path_syms = mir_clone_i32_vec(&snapshot.field_path_syms)
 
     fn cancel_scheduled_value_drop_for_local(local_id: i32) -> Unit:
         var i = self.drop_local_ids.len() as i32 - 1
@@ -676,25 +711,23 @@ impl MirBuilder:
             // exclusion.
             self.queue_field_move_reset(place)
 
-    // #697/D17: blank a moved-out Drop-bearing field at the next pending-reset
-    // flush when (i) the move is conditional (branch-scoped flush) or (ii) the
-    // base's value drop is NOT scheduled in this function (share-place param,
-    // borrowed receiver, stmt temp) — the static moved-field exclusion then
-    // never reaches the real drop site (the caller drops the base), so
-    // reset-on-move (§2.5.1) must hold at runtime. Shared by call-argument
+    // #697/D17: blank every moved-out Drop-bearing field at the next
+    // pending-reset flush. §2.5.1 makes the runtime reset unconditional: the
+    // static moved-field exclusion may optimize this function's eventual drop,
+    // but it cannot protect a partially moved aggregate that is subsequently
+    // moved whole across a call or assignment boundary. Shared by call-argument
     // field moves (consume_moved_operand) and returned-out field moves
     // (cancel_scheduled_value_drop_for_receiver_expr).
     mut fn queue_field_move_reset(place: i32) -> Unit:
         let field_ty = self.place_local_type(place)
         if field_ty > 0 and self.sema.type_needs_drop_frozen(field_ty) != 0:
             let base_local = self.body.place_locals.get(place as i64)
-            if self.field_move_in_branch > 0 or self.local_has_scheduled_value_drop(base_local) == 0:
-                self.pending_reset_field_places.push(place)
-                self.pending_reset_field_types.push(field_ty)
-                // The base's drop — scope exit here, or drop-before-overwrite
-                // of the blanked field — must keep its niche guard (§2.5.2).
-                if base_local >= 0:
-                    self.body.mark_local_ever_moved(base_local)
+            self.pending_reset_field_places.push(place)
+            self.pending_reset_field_types.push(field_ty)
+            // The base's drop — scope exit here, or drop-before-overwrite
+            // of the blanked field — must keep its niche guard (§2.5.2).
+            if base_local >= 0:
+                self.body.mark_local_ever_moved(base_local)
 
     mut fn flush_stmt_temp_frame() -> Unit:
         if self.stmt_temp_starts.len() as i32 == 0:
@@ -1530,14 +1563,6 @@ impl MirBuilder:
                 let iret = self.intrinsic_return_type(base_ty, method_name)
                 if iret != 0 and iret != self.sema.ty_void as i32:
                     return iret
-                // Sema reports raw value types for Option-returning intrinsics
-                // (e.g. HashMap.get returns str, not Option[str]). When .unwrap()
-                // is chained, intrinsic_return_type can't match "unwrap" on str.
-                // The unwrap just returns the same type sema already reports.
-                if method_name == "unwrap" or method_name == "expect":
-                    return base_ty
-                if method_name == "is_some" or method_name == "is_none":
-                    return self.sema.ty_bool as i32
             // Qualified enum variant constructor: EnumType.Variant(...)
             let recv_ty = if base_ty != 0 and base_ty != self.sema.ty_void as i32: base_ty else: self.type_receiver_type(base)
             if recv_ty != 0 and recv_ty != self.sema.ty_void as i32 and self.sema.enum_has_variant(recv_ty, method_sym) != 0:
@@ -1558,9 +1583,12 @@ impl MirBuilder:
                 if method_name == "new": return recv_type
                 if method_name == "push" or method_name == "set_i32" or method_name == "clear":
                     return self.sema.ty_void as i32
-                if method_name == "get" or method_name == "remove" or method_name == "pop":
+                if method_name == "get" or method_name == "remove":
                     if tk == TypeKind.TY_GENERIC_INST:
                         return self.sema.get_generic_inst_arg(resolved, 0)
+                if method_name == "pop":
+                    if tk == TypeKind.TY_GENERIC_INST:
+                        return self.sema.find_option_type_for(self.sema.get_generic_inst_arg(resolved, 0))
                 if method_name == "join": return self.sema.ty_str as i32
                 if method_name == "filter": return recv_type
                 if method_name == "map": return self.expr_type(self.cur_node)
@@ -1677,9 +1705,14 @@ impl MirBuilder:
                 if method_name == "new": return recv_type
                 if method_name == "insert" or method_name == "clear":
                     return self.sema.ty_void as i32
-                if method_name == "get" or method_name == "remove":
-                    if tk == TypeKind.TY_GENERIC_INST:
-                        return self.sema.get_generic_inst_arg(resolved, 1)
+                if tk == TypeKind.TY_GENERIC_INST:
+                    let value_ty = self.sema.get_generic_inst_arg(resolved, 1)
+                    if method_name == "get":
+                        // D22 map-view flip retracted until Stage 6 (owned Option[V]);
+                        // see the HashMap.get note in SemaCheck.w.
+                        return self.sema.find_option_type_for(value_ty)
+                    if method_name == "remove":
+                        return self.sema.find_option_type_for(value_ty)
                 if method_name == "values":
                     if tk == TypeKind.TY_GENERIC_INST:
                         return self.sema.find_vec_type_for(self.sema.get_generic_inst_arg(resolved, 1))
@@ -2145,9 +2178,9 @@ impl MirBuilder:
             let range_inclusive = self.ast.get_data2(node)
             var range_elem = self.sema.ty_i32 as i32
             if range_start != 0:
-                range_elem = self.expr_type(range_start)
+                range_elem = self.materialized_operand_type(range_start)
             else if range_end != 0:
-                range_elem = self.expr_type(range_end)
+                range_elem = self.materialized_operand_type(range_end)
             let range_found = self.sema.find_range_type(range_elem, range_inclusive) as i32
             if range_found != 0:
                 return range_found
@@ -2499,9 +2532,7 @@ impl MirBuilder:
                     detail = detail ++ f" typed={if self.sema.typed_expr_types.contains(self.cur_node): self.sema.typed_expr_types.get(self.cur_node).unwrap() else: 0}"
                     detail = detail ++ f" field_ast={self.struct_field_type(base_ty, field_sym)} field_sema={self.struct_field_type(base_ty, sema_field_sym)}"
             with_eprint(f"[mir-lower-fail] kind={node_kind} fn={fn_name}{detail}")
-        var b = self.body
-        b.lowering_failed = 1
-        self.body = b
+        self.body.lowering_failed = 1
 
     mut fn lower_int_lit(value: i64, type_id: i32) -> i32:
         let ty = if type_id == 0 or self.sema.get_type_kind(type_id) == TypeKind.TY_VOID: self.sema.ty_i32 else: type_id
@@ -2716,7 +2747,9 @@ impl MirBuilder:
     mut fn lower_option_unwrap_place(opt_place: i32, opt_ty: i32, result_ty: i32) -> i32:
         let fn_op = self.const_operand(ConstKind.CK_FN, self.sema.pool_lookup_symbol("unwrap"), self.sema.ty_void)
         let args: Vec[i32] = Vec.new()
-        args.push(self.body.new_operand(OperandKind.OK_COPY, opt_place))
+        let opt_op = self.body.new_operand(OperandKind.OK_MOVE, opt_place)
+        self.consume_moved_operand(opt_op)
+        args.push(opt_op)
         args.push(self.lower_str_lit(self.pool.intern("")))
         let args_id = self.body.new_call_args(args)
         self.body.set_call_intrinsic(args_id, MirIntrinsic.OPT_UNWRAP)
@@ -3190,7 +3223,34 @@ impl MirBuilder:
         self.mark_unsupported()
         self.unit_operand()
 
+    fn places_are_identical(a: i32, b: i32) -> i32:
+        if a == b:
+            return 1
+        if a < 0 or b < 0 or a >= self.body.place_locals.len() as i32 or b >= self.body.place_locals.len() as i32:
+            return 0
+        if self.body.place_locals.get(a as i64) != self.body.place_locals.get(b as i64):
+            return 0
+        let a_count = self.body.place_proj_counts.get(a as i64)
+        let b_count = self.body.place_proj_counts.get(b as i64)
+        if a_count != b_count:
+            return 0
+        let a_start = self.body.place_proj_starts.get(a as i64)
+        let b_start = self.body.place_proj_starts.get(b as i64)
+        for i in 0..a_count:
+            if self.body.proj_kinds.get((a_start + i) as i64) != self.body.proj_kinds.get((b_start + i) as i64):
+                return 0
+            if self.body.proj_d0.get((a_start + i) as i64) != self.body.proj_d0.get((b_start + i) as i64):
+                return 0
+        1
+
     mut fn assign_operand_to_place(place: i32, operand_id: i32, span: i32):
+        // An exact self-move transfers ownership out of and immediately back into
+        // the same place. It is a semantic no-op: consuming the source would queue
+        // a reset after the assignment and erase the restored owner (`x = move x`).
+        if operand_id >= 0 and operand_id < self.body.operand_kinds.len() as i32:
+            if self.body.operand_kinds.get(operand_id as i64) == OperandKind.OK_MOVE:
+                if self.places_are_identical(place, self.body.operand_d0.get(operand_id as i64)) != 0:
+                    return
         self.consume_moved_operand(operand_id)
         self.update_string_alias_after_assignment(place, operand_id)
         let rval = self.body.new_rvalue(RvalueKind.RK_USE, operand_id, 0, 0)
@@ -4155,6 +4215,8 @@ impl MirBuilder:
         let ret_ty = self.expr_type(node)
         self.lower_call_with_arg_nodes(fn_op, method_sym, arg_nodes, ret_ty, node)
 
+    // TODO(D22): lower the Sema-proven transparent origin transfer for the
+    // Continue payload. Compiler-generated Try temporaries do not end origins.
     mut fn lower_user_try_question_mark(expr: i32, node: i32) -> i32:
         let branch_fn = self.sema.try_branch_fns.get(node).unwrap()
         let from_break_fn = self.sema.try_from_break_fns.get(node).unwrap()
@@ -4911,6 +4973,34 @@ impl MirBuilder:
         self.body.push_stmt(self.cur_bb, StmtKind.Assign, slice_place, slice_rv, self.ast.get_start(node))
         self.body.new_operand(OperandKind.OK_COPY, slice_place)
 
+    mut fn finish_assignment_to_place(place_expr: i32, place: i32, dest_ty: i32, rhs: i32, rhs_reset_start: i32, rhs_field_reset_start: i32, rhs_move_temp_start: i32) -> i32:
+        // A consuming call in the RHS may move the assignment target itself
+        // (`x = normalize(move x)`). Its source reset must run after the call has
+        // read x but before drop-before-overwrite and the result store. Leaving it
+        // for finish_stmt_temp_frame emits `x = result; x = zero`, erasing the new
+        // owner. Resets created later by moving `rhs` into the destination still
+        // flush at the ordinary statement boundary.
+        self.flush_pending_resets_since(rhs_reset_start, rhs_field_reset_start, rhs_move_temp_start)
+        // An exact `x = move x` (including an identical projected place) moves the
+        // owner out and immediately back into the same storage. Decide that it is a
+        // no-op before drop-before-overwrite; dropping here would destroy the value
+        // that the RHS is meant to restore.
+        if rhs >= 0 and rhs < self.body.operand_kinds.len() as i32:
+            if self.body.operand_kinds.get(rhs as i64) == OperandKind.OK_MOVE:
+                if self.places_are_identical(place, self.body.operand_d0.get(rhs as i64)) != 0:
+                    return rhs
+        if dest_ty != 0 and self.sema.is_copy_frozen(dest_ty) == 0 and self.sema.type_needs_drop_frozen(dest_ty) != 0:
+            // §16.11 / decisions D8: `*p = v` and `p[i] = v` through a RAW
+            // pointer are raw stores — the old pointee may be uninitialized
+            // (fresh allocation) or already moved out, so the compiler cannot
+            // prove a live old value to drop. The programmer drops explicitly
+            // (`let old = *p; drop(old)`). Safe places (bindings, `&mut`
+            // derefs, fields) keep drop-before-overwrite.
+            if self.assign_target_is_raw_pointer_store(place_expr) == 0:
+                self.emit_drop_place_respecting_moved_fields(place, dest_ty)
+        self.assign_operand_to_place(place, rhs, self.ast.get_start(place_expr))
+        rhs
+
     mut fn lower_assign(place_expr: i32, rhs_expr: i32):
         // Multi-index assignment: a[i, j] = value → call multi_index_set
         if self.ast.kind(place_expr) == NodeKind.NK_MULTI_INDEX or self.is_runtime_pair_multi_index(place_expr) != 0:
@@ -4987,20 +5077,14 @@ impl MirBuilder:
         let place = self.lower_expr_place(place_expr)
         let saved_expected = self.expected_type
         let dest_ty = self.expr_type(place_expr)
+        let rhs_reset_start = self.pending_reset_locals.len() as i32
+        let rhs_field_reset_start = self.pending_reset_field_places.len() as i32
+        let rhs_move_temp_start = self.pending_move_temp_locals.len() as i32
         if dest_ty != 0 and dest_ty != self.sema.ty_void:
             self.expected_type = dest_ty
         let rhs = self.lower_expr(rhs_expr)
         self.expected_type = saved_expected
-        if dest_ty != 0 and self.sema.is_copy_frozen(dest_ty) == 0 and self.sema.type_needs_drop_frozen(dest_ty) != 0:
-            // §16.11 / decisions D8: `*p = v` and `p[i] = v` through a RAW
-            // pointer are raw stores — the old pointee may be uninitialized
-            // (fresh allocation) or already moved out, so the compiler cannot
-            // prove a live old value to drop. The programmer drops explicitly
-            // (`let old = *p; drop(old)`). Safe places (bindings, `&mut`
-            // derefs, fields) keep drop-before-overwrite.
-            if self.assign_target_is_raw_pointer_store(place_expr) == 0:
-                self.emit_drop_place_respecting_moved_fields(place, dest_ty)
-        self.assign_operand_to_place(place, rhs, self.ast.get_start(place_expr))
+        let _ = self.finish_assignment_to_place(place_expr, place, dest_ty, rhs, rhs_reset_start, rhs_field_reset_start, rhs_move_temp_start)
 
     // True when an assignment target is a direct deref or index through a
     // raw pointer (`*p = v`, `p[i] = v` with p: *const/*mut T), unwrapping
@@ -5030,6 +5114,9 @@ impl MirBuilder:
     mut fn lower_expr_place(node: i32) -> i32:
         if node == 0:
             return self.place_for_local(0)
+
+        if node == self.pipeline_receiver_override_node and self.pipeline_receiver_override_place >= 0:
+            return self.pipeline_receiver_override_place
 
         let kind = self.ast.kind(node)
 
@@ -5098,6 +5185,16 @@ impl MirBuilder:
         if kind == NodeKind.NK_GROUPED or kind == NodeKind.NK_NO_SUSPEND:
             return self.lower_expr_place(self.ast.get_data0(node))
 
+        // A D21 place-threading pipeline already denotes its receiver place.
+        // Do not materialize its OK_MOVE carrier into a second owned temporary
+        // when the next stage asks for an addressable receiver.
+        if kind == NodeKind.NK_PIPELINE and self.sema.pipeline_carrier_kinds.contains(node) and self.sema.pipeline_carrier_kinds.get(node).unwrap() != 0:
+            let pipeline_op = self.lower_expr(node)
+            if pipeline_op >= 0 and pipeline_op < self.body.operand_kinds.len() as i32:
+                let op_kind = self.body.operand_kinds.get(pipeline_op as i64)
+                if op_kind == OperandKind.OK_COPY or op_kind == OperandKind.OK_MOVE:
+                    return self.body.operand_d0.get(pipeline_op as i64)
+
         if kind == NodeKind.NK_MOVE_ARG:
             let inner = self.ast.get_data0(node)
             let place = self.lower_expr_place(inner)
@@ -5158,9 +5255,9 @@ impl MirBuilder:
             let rhs_op = self.lower_expr(rhs_expr)
             self.expected_type = saved_expected
             self.assign_operand_to_place(place, rhs_op, self.ast.get_start(node))
-            // #606: `let y = xs.push(a)` moves the self-aliasing result into y; cancel
-            // the receiver's drop so the pair (y, xs) drops exactly once. No-op for
-            // non-aliasing RHS; idempotent for already-consumed moved idents.
+            // Ordinary assignment-move transfers a non-Copy RHS place into the
+            // binding. Cancel the source's value drop after the value has been
+            // captured; projected moves also queue their D17 reset below.
             self.cancel_scheduled_value_drop_for_receiver_expr(rhs_expr)
         if is_discard_binding != 0:
             if self.sema.is_copy_frozen(bind_ty) == 0:
@@ -5459,9 +5556,7 @@ impl MirBuilder:
 
         let if_entry_bb = self.cur_bb as i32
         let branch_drop_depth = self.drop_local_ids.len() as i32
-        let branch_moved_value_len = self.moved_value_local_ids.len() as i32
-        let branch_moved_field_len = self.moved_field_base_locals.len() as i32
-        let branch_moved_field_path_len = self.moved_field_path_kinds.len() as i32
+        let branch_move_state = self.save_move_state()
         // Reset-on-move (spec §2.5.1): only flush resets recorded WITHIN a branch,
         // so an outer-scope move's reset is not pulled inside (and made conditional
         // by) this if.
@@ -5494,7 +5589,7 @@ impl MirBuilder:
         self.field_move_in_branch = self.field_move_in_branch + 1
         if regex_capture_node != 0:
             self.lower_regex_capture_bindings_from_option(regex_capture_node, regex_captures_opt_place)
-        let then_op = if want_result != 0: self.lower_expr(then_expr) else: self.lower_expr_discard(then_expr)
+        let then_op = if want_result != 0: self.lower_operand_materialized(then_expr) else: self.lower_expr_discard(then_expr)
         if want_result != 0:
             self.assign_operand_to_place(result_place, then_op, self.ast.get_start(then_expr))
         // Reset-on-move (spec §2.5.1): flush this branch's pending source-resets
@@ -5505,13 +5600,12 @@ impl MirBuilder:
         self.field_move_in_branch = self.field_move_in_branch - 1
         self.terminate(TermKind.TK_GOTO, join_bb, 0, 0, 0)
 
-        self.restore_moved_value_len(branch_moved_value_len)
-        self.restore_moved_field_lengths(branch_moved_field_len, branch_moved_field_path_len)
+        self.restore_move_state(&branch_move_state)
 
         self.switch_to(else_bb)
         self.field_move_in_branch = self.field_move_in_branch + 1
         let else_op = if else_expr_opt != 0:
-            if want_result != 0: self.lower_expr(else_expr_opt) else: self.lower_expr_discard(else_expr_opt)
+            if want_result != 0: self.lower_operand_materialized(else_expr_opt) else: self.lower_expr_discard(else_expr_opt)
         else:
             self.unit_operand()
         if want_result != 0:
@@ -5520,8 +5614,7 @@ impl MirBuilder:
         self.field_move_in_branch = self.field_move_in_branch - 1
         self.terminate(TermKind.TK_GOTO, join_bb, 0, 0, 0)
 
-        self.restore_moved_value_len(branch_moved_value_len)
-        self.restore_moved_field_lengths(branch_moved_field_len, branch_moved_field_path_len)
+        self.restore_move_state(&branch_move_state)
 
         self.expected_type = saved_expected
 
@@ -6447,8 +6540,8 @@ impl MirBuilder:
         let elem_ty = self.sema.infer_for_element_type_frozen(self.expr_type(range_node))
 
         // Evaluate start and end
-        let start_op = if start_node != 0: self.lower_expr(start_node) else: self.int_const_operand(0, elem_ty)
-        let end_op = self.lower_expr(end_node)
+        let start_op = if start_node != 0: self.lower_operand_materialized(start_node) else: self.int_const_operand(0, elem_ty)
+        let end_op = self.lower_operand_materialized(end_node)
 
         // Create counter local
         let counter_local = self.new_temp(elem_ty)
@@ -7852,6 +7945,10 @@ impl MirBuilder:
 
         out
 
+    // TODO(D22): pattern binding is structural projection, never an implicit
+    // owned-value demand. Preserve an Option[&V] payload as &V in every
+    // instantiation, and materialize Copy only at a later recorded demand.
+    // Join lowering must consume the one Sema-resolved D22 join decision.
     mut fn lower_match(scrutinee_expr: i32, arms_start: i32, arms_count: i32, node: i32) -> i32:
         if arms_count == 0:
             return self.unit_operand()
@@ -7881,9 +7978,7 @@ impl MirBuilder:
         // analyzed from the entry move-state, restored after each arm below.
         let match_entry_bb = self.cur_bb as i32
         let branch_drop_depth = self.drop_local_ids.len() as i32
-        let branch_moved_value_len = self.moved_value_local_ids.len() as i32
-        let branch_moved_field_len = self.moved_field_base_locals.len() as i32
-        let branch_moved_field_path_len = self.moved_field_path_kinds.len() as i32
+        let branch_move_state = self.save_move_state()
         let pending_reset_start = self.pending_reset_locals.len() as i32
         let pending_reset_field_start = self.pending_reset_field_places.len() as i32
         let pending_move_temp_start = self.pending_move_temp_locals.len() as i32
@@ -7945,8 +8040,7 @@ impl MirBuilder:
             self.flush_pending_resets_since(pending_reset_start, pending_reset_field_start, pending_move_temp_start)
             self.field_move_in_branch = self.field_move_in_branch - 1
             self.pop_scope_with_goto(join_bb)
-            self.restore_moved_value_len(branch_moved_value_len)
-            self.restore_moved_field_lengths(branch_moved_field_len, branch_moved_field_path_len)
+            self.restore_move_state(&branch_move_state)
 
             dispatch_bb = fail_bb
 
@@ -8347,22 +8441,57 @@ impl MirBuilder:
         self.body.push_stmt(self.cur_bb, StmtKind.Assign, temp_place, rv, self.ast.get_start(arg_node))
         self.body.new_operand(OperandKind.OK_COPY, temp_place)
 
+    // D22 Stage 2 retains the already-supported call-argument lowering while
+    // consuming the new Sema record. Other owned-demand positions are lowered
+    // only in Stage 5; no MIR path re-derives Copy-ness or demand.
     mut fn lower_auto_copy_ref_call_arg(arg_node: i32, expected_ty: i32) -> i32:
         if arg_node == 0 or expected_ty == 0:
             return -1
-        let recorded_ty = self.sema.auto_copy_ref_args.get(arg_node)
-        if not recorded_ty.is_some():
+        if self.sema.has_contextual_copy_adjustment(arg_node) == 0:
             return -1
-        let actual_ty = recorded_ty.unwrap()
-        if self.sema.can_auto_copy_ref_arg_frozen(expected_ty, actual_ty) == 0:
+        let adjustment = self.sema.contextual_copy_adjustment(arg_node)
+        if adjustment.target_type != expected_ty:
             return -1
-        var source = arg_node
+        // Delegate to the single guarded materialization path. Duplicating the
+        // lower_expr_place+deref here (without setting materializing_copy_node)
+        // let lower_expr_place's fallback re-enter lower_expr, which materializes
+        // the &V→V copy a second time, then this path dereferenced the resulting
+        // owned value as if it were the &V — reading a bad address.
+        self.materialize_contextual_copy(arg_node)
+
+    // D22 Stage 5: materialize the owned Copy pointee of a shared-reference
+    // node whose Sema record marks a contextual-Copy adjustment. Reuses the
+    // exact call-argument mechanism (OK_COPY of the deref place). The re-entry
+    // guard makes the deref's own place lowering read the exact &V value when a
+    // node kind falls back to value materialization inside lower_expr_place.
+    mut fn materialize_contextual_copy(node: i32) -> i32:
+        var source = node
         while self.ast.kind(source) == NodeKind.NK_GROUPED or self.ast.kind(source) == NodeKind.NK_NO_SUSPEND:
             source = self.ast.get_data0(source)
         if self.ast.kind(source) == NodeKind.NK_UNARY and self.ast.get_data0(source) == UnaryOp.UOP_REF:
             return self.body.new_operand(OperandKind.OK_COPY, self.lower_expr_place(self.ast.get_data1(source)))
-        let place = self.lower_expr_place(arg_node)
+        let saved = self.materializing_copy_node
+        self.materializing_copy_node = node
+        let place = self.lower_expr_place(node)
+        self.materializing_copy_node = saved
         self.body.new_operand(OperandKind.OK_COPY, self.new_deref_place(place))
+
+    // Lower an owned-demand operand, materializing a contextual-Copy adjustment
+    // when present. Kept for call sites that lower a specific owned-demand
+    // position (range bounds, if/match joins); lower_expr also materializes
+    // adjusted nodes so every value position is covered uniformly.
+    mut fn lower_operand_materialized(node: i32) -> i32:
+        if node == 0 or self.sema.has_contextual_copy_adjustment(node) == 0:
+            return self.lower_expr(node)
+        self.materialize_contextual_copy(node)
+
+    // The owned value type an owned-demand position observes for `node`: the
+    // materialized Copy pointee when a contextual-Copy adjustment applies,
+    // otherwise the node's exact expression type.
+    mut fn materialized_operand_type(node: i32) -> i32:
+        if node != 0 and self.sema.has_contextual_copy_adjustment(node) != 0:
+            return self.sema.contextual_copy_adjustment(node).owned_value_type
+        self.expr_type(node)
 
     mut fn lower_auto_deref_call_arg(arg_node: i32, expected_ty: i32) -> i32:
         if arg_node == 0 or expected_ty == 0:
@@ -8946,7 +9075,7 @@ impl MirBuilder:
         if type_name_sym == 0:
             return MirIntrinsic.NONE
         let type_name = self.pool.resolve_symbol(type_name_sym)
-        // HashMap.get and SlotMap.get return Option-wrapped values.
+        // HashMap.get and SlotMap.get return borrowed Option-wrapped values.
         if type_name == "HashMap":
             if method_name == "get": return MirIntrinsic.MAP_GET
         if type_name == "HashSet":
@@ -8983,7 +9112,7 @@ impl MirBuilder:
             recv_type = self.type_receiver_type(self_expr)
         if recv_type == 0 or recv_type == self.sema.ty_void:
             // Fall back to call's return type for static constructors (Vec.new())
-            let ret_type = self.expr_type(node)
+                let ret_type = self.method_call_result_type(node)
             let ret_name_sym = self.sema.get_type_name(ret_type)
             if self.ast.kind(self_expr) == NodeKind.NK_IDENT:
                 let type_sym = self.ast.get_data0(self_expr)
@@ -9013,7 +9142,7 @@ impl MirBuilder:
             if enum_accessor_recv_type != 0 and self.sema.type_has_drop_impl(enum_accessor_recv_type) != 0:
                 return self.lower_drop_glue_and_consume(self_expr, "explicit.drop", node)
 
-        if self.is_option_type(enum_accessor_recv_type) != 0 and (method_name == "map" or method_name == "and_then" or method_name == "or_else" or method_name == "inspect" or method_name == "cloned"):
+        if self.is_option_type(enum_accessor_recv_type) != 0 and (method_name == "map" or method_name == "and_then" or method_name == "or_else" or method_name == "filter" or method_name == "inspect" or method_name == "cloned"):
             return self.lower_option_combinator_method(self_expr, method_name, arg_start, arg_count, node)
 
         if self.is_option_type(enum_accessor_recv_type) != 0 and method_name == "zip":
@@ -9056,23 +9185,13 @@ impl MirBuilder:
 
         var intrinsic = self.classify_intrinsic(enum_accessor_recv_type, method_name)
 
-        // When classify_intrinsic fails for "unwrap"/"expect"/"is_some", handle as Option
-        // intrinsic. Sema's type system returns the raw value type for HashMap.get
-        // (e.g., i32 instead of Option[i32]), so classify_intrinsic can't match Option.
-        // Two fallbacks:
-        // 1. Receiver is a direct call to HashMap.get/Vec.get (chained: map.get(k).unwrap())
-        // 2. No sig exists for this method on the receiver type (let x = map.get(k); x.unwrap())
+        // Parse/lowering timing can leave a direct Option-producing intrinsic
+        // without its resolved receiver type. Classify only that known producer;
+        // an arbitrary unresolved method name is never evidence of Option.
         if intrinsic == MirIntrinsic.NONE:
             if method_name == "unwrap" or method_name == "expect" or method_name == "is_some" or method_name == "is_none":
-                var is_option_method = false
                 let recv_intr = self.receiver_option_intrinsic(self_expr)
                 if recv_intr != MirIntrinsic.NONE:
-                    is_option_method = true
-                else if callee_sym == method_sym:
-                    // Unresolved method — no sig found for unwrap/expect/is_some/is_none on the receiver type.
-                    // User-defined types with these names would have a sig. This is an Option intrinsic.
-                    is_option_method = true
-                if is_option_method:
                     if method_name == "unwrap":
                         intrinsic = MirIntrinsic.OPT_UNWRAP
                     else if method_name == "expect":
@@ -9101,7 +9220,7 @@ impl MirBuilder:
             let dyn_args_id = self.body.new_call_args(dyn_args)
             self.body.set_call_intrinsic(dyn_args_id, MirIntrinsic.DYN_CALL)
             self.body.set_call_ast_node(dyn_args_id, node)
-            var dyn_ret_ty = self.expr_type(node)
+            var dyn_ret_ty = self.method_call_result_type(node)
             if dyn_ret_ty == 0:
                 dyn_ret_ty = self.sema.ty_void as i32
             let dyn_result = self.new_temp(dyn_ret_ty)
@@ -9169,7 +9288,7 @@ impl MirBuilder:
                 self.require_generic_call_contract(gc_args_id, callee_sym, method_sym, self_expr, recorded_method_sig.is_some(), "method-gc")
                 self.body.set_call_ast_node(gc_args_id, node)
                 self.record_call_contract(gc_args_id, node, gc_sig_idx)
-                var gc_ret_ty = self.expr_type(node)
+                var gc_ret_ty = self.method_call_result_type(node)
                 if gc_ret_ty == 0:
                     gc_ret_ty = self.sema.ty_i32 as i32
                 let gc_result = self.new_temp(gc_ret_ty)
@@ -9229,8 +9348,14 @@ impl MirBuilder:
             let method_arg = if has_resolved_method_args != 0: self.sema.get_resolved_call_arg(node, i) else: self.ast.get_extra(arg_start + i)
             arg_nodes.push(method_arg)
 
-        let ret_ty = self.expr_type(node)
+        let ret_ty = self.method_call_result_type(node)
         self.lower_call_with_arg_nodes_recv(fn_op, callee_sym, recv_op, arg_nodes, ret_ty, node)
+
+    mut fn method_call_result_type(node: i32) -> i32:
+        let pipeline_ret = self.sema.pipeline_call_return_types.get(node)
+        if pipeline_ret.is_some():
+            return pipeline_ret.unwrap()
+        self.expr_type(node)
 
     mut fn lower_intrinsic_call(intrinsic: MirIntrinsic, self_expr: i32, method_sym: i32, arg_start: i32, arg_count: i32, node: i32) -> i32:
         // Emit a call terminator with a ConstKind.CK_FN operand and intrinsic tag.
@@ -9255,23 +9380,17 @@ impl MirBuilder:
                 let recv_kind = self.sema.get_type_kind(recv_resolved)
                 let raw_pointer_option_receiver = recv_kind == TypeKind.TY_PTR and (intrinsic == MirIntrinsic.OPT_UNWRAP or intrinsic == MirIntrinsic.OPT_EXPECT or intrinsic == MirIntrinsic.OPT_IS_SOME or intrinsic == MirIntrinsic.OPT_IS_NONE or intrinsic == MirIntrinsic.OPT_FILTER)
                 var recv_op = 0
-                if raw_pointer_option_receiver:
+                let recv_owner = self.sema.method_owner_symbol_for_type(recv_type_for_args)
+                if recv_owner != 0 and self.sema.builtin_method_requires_move_receiver(recv_owner, method_sym) != 0:
+                    let recv_place = self.lower_expr_place(self_expr)
+                    recv_op = self.body.new_operand(OperandKind.OK_MOVE, recv_place)
+                else if raw_pointer_option_receiver:
                     recv_op = self.lower_expr(self_expr)
                 else:
                     recv_op = self.lower_receiver_with_method_autoderef_for_method(self_expr, method_sym)
                 let channel_endpoint_method = intrinsic == MirIntrinsic.CHAN_SEND or intrinsic == MirIntrinsic.CHAN_RECV or intrinsic == MirIntrinsic.CHAN_CLOSE
                 if intrinsic != MirIntrinsic.FIBER_CANCEL and not channel_endpoint_method:
                     self.consume_moved_operand(recv_op)
-                // #606: a self-aliasing push returns the receiver. If the receiver is an
-                // intermediate stmt-temp (e.g. a pipeline stage `… |> push(x)`), its
-                // stmt-temp would be flushed-as-drop and double-free the buffer the result
-                // carries forward into the next stage / binding. Cancel that temp's drop so
-                // the final owner drops it once. No-op for named-local receivers (not
-                // stmt-temps) — those stay live for statement reuse.
-                if intrinsic == MirIntrinsic.VEC_PUSH:
-                    let push_recv_local = mir_place_plain_local(&self.body, self.body.operand_d0.get(recv_op as i64))
-                    if push_recv_local >= 0:
-                        self.cancel_stmt_temp_for_local(push_recv_local)
                 call_args.push(recv_op)
         for i in 0..arg_count:
             let arg_node = self.ast.get_extra(arg_start + i)
@@ -9282,9 +9401,7 @@ impl MirBuilder:
             call_args.push(self.source_location_operand(node))
 
         let args_id = self.body.new_call_args(call_args)
-        var ret_type = self.expr_type(node)
-        if intrinsic == MirIntrinsic.VEC_PUSH and self.expected_type == self.sema.ty_void as i32:
-            ret_type = self.sema.ty_void as i32
+        var ret_type = self.method_call_result_type(node)
         // For static constructors (Vec.new, HashMap.new), expr_type often returns
         // the bare struct type (TypeKind.TY_STRUCT) instead of the generic instance
         // (TypeKind.TY_GENERIC_INST). Use the expected type from the let binding if available.
@@ -9345,18 +9462,7 @@ impl MirBuilder:
         if kind == NodeKind.NK_GROUPED:
             self.cancel_scheduled_value_drop_for_receiver_expr(self.ast.get_data0(expr))
             return
-        // #606: a self-aliasing mut-self call (`xs.push(a)` returns `xs`) whose result
-        // escapes (returned/bound/moved out) carries the receiver's buffer with it. The
-        // call node is not an ident, so recurse into the receiver and cancel ITS drop —
-        // otherwise the receiver stays drop-scheduled while its aliasing result also
-        // drops -> double-free. Gated to `push` whose result type == receiver type, so
-        // non-aliasing methods (len/get/pop/remove -> different type) never match.
         if kind == NodeKind.NK_CALL:
-            let callee = self.ast.get_data0(expr)
-            if self.ast.kind(callee) == NodeKind.NK_FIELD_ACCESS and self.ast.get_data1(callee) == self.sema.syms.push:
-                let recv = self.ast.get_data0(callee)
-                if self.expr_type(expr) != 0 and self.expr_type(expr) == self.expr_type(recv):
-                    self.cancel_scheduled_value_drop_for_receiver_expr(recv)
             return
         if kind == NodeKind.NK_FIELD_ACCESS:
             let root_sym = self.place_expr_root_symbol(expr)
@@ -9367,8 +9473,7 @@ impl MirBuilder:
             // a Copy field of a Drop struct moved degrades the owner's whole-value Drop
             // into a partial drop that emits nothing (the fields are not individually
             // needs-drop) — silently bypassing the user `Drop` impl and leaking. Only an
-            // owning/aliasing (non-Copy) field read carries the receiver's buffer out
-            // (the #606 self-aliasing case).
+            // owning (non-Copy) field read moves storage out of the projection.
             let field_ty = self.expr_type(expr)
             if field_ty != 0 and self.sema.is_copy_frozen(field_ty) != 0:
                 return
@@ -9685,6 +9790,9 @@ impl MirBuilder:
         self.body.push_stmt(self.cur_bb, StmtKind.Assign, place, rv, self.ast.get_start(question_node))
         self.body.new_operand(if self.sema.is_copy_frozen(result_tuple_ty) != 0: OperandKind.OK_COPY else: OperandKind.OK_MOVE, place)
 
+    // TODO(D22): builtin Option/Result `?` has the same transparent-origin
+    // contract as user Try. Preserve the exact payload type and the recorded
+    // origin set through this generated branch.
     mut fn lower_question_mark(expr: i32, node: i32) -> i32:
         if self.sema.try_branch_fns.contains(node):
             return self.lower_user_try_question_mark(expr, node)
@@ -9702,6 +9810,9 @@ impl MirBuilder:
         let question_ty = self.expr_type(node)
         self.lower_question_mark_value(value_op, value_ty, question_ty, node, expr, &cleanup_task_ops, cleanup_task_ops.len() as i32)
 
+    // TODO(D22): consume one Sema-resolved Join[T,U] decision here. Do not
+    // re-derive the result from payload Copy-ness; materialize only arms Sema
+    // marked for owned demand and retain unioned origins for a view result.
     mut fn lower_double_question(expr: i32, default_expr: i32, node: i32) -> i32:
         let value_op = self.lower_expr(expr)
         let value_ty = self.expr_type(expr)
@@ -9779,10 +9890,8 @@ impl MirBuilder:
         if self.sema.get_generic_inst_base(resolved as i32) == self.sema.syms.vec: 1 else: 0
 
     mut fn lower_owned_receiver_place(self_expr: i32, value_ty: i32) -> i32:
-        let saved_expected = self.expected_type
-        self.expected_type = value_ty
-        let value_op = self.lower_expr(self_expr)
-        self.expected_type = saved_expected
+        let source_place = self.lower_expr_place(self_expr)
+        let value_op = self.body.new_operand(OperandKind.OK_MOVE, source_place)
         self.materialize_operand(value_op, value_ty, self.ast.get_start(self_expr))
 
     mut fn emit_vec_new_into(vec_place: i32, span: i32):
@@ -10160,8 +10269,7 @@ impl MirBuilder:
             self.mark_unsupported()
             return self.unit_operand()
         let left_place = self.lower_owned_receiver_place(self_expr, left_ty)
-        let right_op = self.lower_expr(self.ast.get_extra(arg_start))
-        let right_place = self.materialize_operand(right_op, right_ty, span)
+        let right_place = self.lower_owned_receiver_place(self.ast.get_extra(arg_start), right_ty)
         let result_local = self.new_temp(result_ty)
         let result_place = self.place_for_local(result_local)
         let left_some_bb = self.new_block()
@@ -10428,6 +10536,10 @@ impl MirBuilder:
         self.forget_string_flow_facts()
         self.operand_for_place(result_place, result_ty)
 
+    // TODO(D22): cloned/copied are explicit ownership boundaries specifically
+    // for Option[&T]. Lower the pointee operation selected by Sema and end the
+    // origin only on the successful owned result. The current cloned branch is
+    // the pre-D22 Option[T] behavior.
     mut fn lower_option_combinator_method(self_expr: i32, method_name: str, arg_start: i32, arg_count: i32, node: i32) -> i32:
         if method_name == "cloned":
             if arg_count != 0:
@@ -10447,11 +10559,7 @@ impl MirBuilder:
             self.mark_unsupported()
             return self.unit_operand()
 
-        let saved_expected = self.expected_type
-        self.expected_type = value_ty
-        let value_op = self.lower_expr(self_expr)
-        self.expected_type = saved_expected
-        let value_place = self.materialize_operand(value_op, value_ty, self.ast.get_start(self_expr))
+        let value_place = if method_name == "cloned": self.lower_expr_place(self_expr) else: self.lower_owned_receiver_place(self_expr, value_ty)
         var mapper_op = 0
         if method_name != "cloned":
             mapper_op = self.lower_expr(self.ast.get_extra(arg_start))
@@ -10484,6 +10592,34 @@ impl MirBuilder:
         let some_idx = self.enum_variant_index_for_type(value_ty, self.sema.syms.some)
         let downcast_place = self.body.new_downcast_place(value_place, some_idx, value_ty)
         let payload_place = self.body.new_field_place(downcast_place, 0, payload_ty)
+        if method_name == "filter":
+            let filter_args: Vec[i32] = Vec.new()
+            let filter_ref_ty = self.sema.find_exact_type(TypeKind.TY_REF, payload_ty, 0, 0) as i32
+            filter_args.push(self.operand_for_place_arg(payload_place, payload_ty, filter_ref_ty, span))
+            let keep_op = self.lower_call_with_operand_args(mapper_op, filter_args, self.sema.ty_bool as i32, node)
+            let keep_bb = self.new_block()
+            let reject_bb = self.new_block()
+            let keep_vals: Vec[i32] = Vec.new()
+            keep_vals.push(1)
+            let keep_targets: Vec[i32] = Vec.new()
+            keep_targets.push(keep_bb as i32)
+            let keep_table = self.body.new_switch_table(keep_vals, keep_targets)
+            self.terminate(TermKind.TK_SWITCH_INT, keep_op, keep_table, reject_bb, 0)
+
+            self.switch_to(keep_bb)
+            let kept_fields: Vec[i32] = Vec.new()
+            kept_fields.push(self.operand_for_place(payload_place, payload_ty))
+            self.assign_enum_variant_to_place(result_place, result_ty, self.sema.syms.some, kept_fields, span)
+            self.terminate(TermKind.TK_GOTO, join_bb, 0, 0, 0)
+
+            self.switch_to(reject_bb)
+            let rejected_fields: Vec[i32] = Vec.new()
+            self.assign_enum_variant_to_place(result_place, result_ty, self.sema.syms.none, rejected_fields, span)
+            self.terminate(TermKind.TK_GOTO, join_bb, 0, 0, 0)
+
+            self.switch_to(join_bb)
+            self.forget_string_flow_facts()
+            return self.operand_for_place(result_place, result_ty)
         if method_name == "and_then":
             let call_args: Vec[i32] = Vec.new()
             call_args.push(self.operand_for_place(payload_place, payload_ty))
@@ -10533,11 +10669,7 @@ impl MirBuilder:
             self.mark_unsupported()
             return self.unit_operand()
 
-        let saved_expected = self.expected_type
-        self.expected_type = value_ty
-        let value_op = self.lower_expr(self_expr)
-        self.expected_type = saved_expected
-        let value_place = self.materialize_operand(value_op, value_ty, self.ast.get_start(self_expr))
+        let value_place = self.lower_owned_receiver_place(self_expr, value_ty)
         var mapper_op = 0
         var context_message_op = 0
         var context_fn_op = 0
@@ -10653,10 +10785,12 @@ impl MirBuilder:
             return self.unit_operand()
         self.lower_expr(self.ast.get_extra(arg_start + idx))
 
+    // TODO(D22): unwrap_or and unwrap_or_else use the same contextual join as
+    // `??`. Lower its resolved arm adjustments and origin union rather than
+    // assuming the success payload already has the result type.
     mut fn lower_unwrap_or_method(self_expr: i32, arg_start: i32, arg_count: i32, node: i32) -> i32:
-        let value_op = self.lower_expr(self_expr)
         let value_ty = self.expr_type(self_expr)
-        let value_place = self.materialize_operand(value_op, value_ty, self.ast.get_start(self_expr))
+        let value_place = self.lower_owned_receiver_place(self_expr, value_ty)
 
         let some_bb = self.new_block()
         let none_bb = self.new_block()
@@ -10723,11 +10857,7 @@ impl MirBuilder:
             self.mark_unsupported()
             return self.unit_operand()
         let span = self.ast.get_start(node)
-        let saved_expected = self.expected_type
-        self.expected_type = value_ty
-        let value_op = self.lower_expr(self_expr)
-        self.expected_type = saved_expected
-        let value_place = self.materialize_operand(value_op, value_ty, self.ast.get_start(self_expr))
+        let value_place = self.lower_owned_receiver_place(self_expr, value_ty)
         let fallback_op = self.lower_expr(self.ast.get_extra(arg_start))
 
         let success_bb = self.new_block()
@@ -11281,6 +11411,27 @@ impl MirBuilder:
     mut fn lower_pipeline(lhs_expr: i32, fn_expr: i32, args_start: i32, args_count: i32, node: i32) -> i32:
         if self.sema.pipeline_method_calls.contains(node):
             let method_sym = self.sema.pipeline_method_calls.get(node).unwrap()
+            if self.sema.pipeline_carrier_kinds.contains(node) and self.sema.pipeline_carrier_kinds.get(node).unwrap() != 0:
+                let recv_place = self.lower_expr_place(lhs_expr)
+                let call_count_before = self.body.call_arg_starts.len() as i32
+                let saved_override_node = self.pipeline_receiver_override_node
+                let saved_override_place = self.pipeline_receiver_override_place
+                self.pipeline_receiver_override_node = lhs_expr
+                self.pipeline_receiver_override_place = recv_place
+                let _ = self.lower_method_call(lhs_expr, method_sym, args_start, args_count, node)
+                self.pipeline_receiver_override_node = saved_override_node
+                self.pipeline_receiver_override_place = saved_override_place
+                let call_count_after = self.body.call_arg_starts.len() as i32
+                // Ordinary argument evaluation may lower calls of its own
+                // before the stage call. lower_method_call creates the stage's
+                // call record last, after all receiver/argument evaluation.
+                if call_count_after > call_count_before:
+                    self.body.set_call_pipeline_receiver_place(call_count_after - 1, recv_place)
+                else:
+                    sema_phase_bug("BUG: D21 pipeline stage lowered no method call")
+                let recv_ty = self.expr_type(node)
+                let carrier_kind = if self.sema.is_copy_frozen(recv_ty) != 0: OperandKind.OK_COPY else: OperandKind.OK_MOVE
+                return self.body.new_operand(carrier_kind, recv_place)
             return self.lower_method_call(lhs_expr, method_sym, args_start, args_count, node)
         let fn_op = self.lower_expr(fn_expr)
         let callee_sym =
@@ -11384,6 +11535,17 @@ impl MirBuilder:
     mut fn lower_expr(node: i32) -> i32:
         if node == 0:
             return self.unit_operand()
+
+        if node == self.pipeline_receiver_override_node and self.pipeline_receiver_override_place >= 0:
+            return self.body.new_operand(OperandKind.OK_COPY, self.pipeline_receiver_override_place)
+
+        // D22 Stage 5: an owned-demand position recorded a contextual-Copy
+        // adjustment on this node (binary/unary operands, receivers, enum
+        // payloads, casts, joins, range bounds, …). Materialize the owned Copy
+        // pointee here so every value position is covered by one MIR path; the
+        // guard lets the deref's place lowering read the exact &V value.
+        if self.materializing_copy_node != node and self.sema.has_contextual_copy_adjustment(node) != 0:
+            return self.materialize_contextual_copy(node)
 
         self.cur_node = node
         let kind = self.ast.kind(node)
@@ -11693,18 +11855,15 @@ impl MirBuilder:
             // block and constant-folding the surrounding null check.
             let saved_expected = self.expected_type
             let target_ty = self.expr_type(target)
+            let rhs_reset_start = self.pending_reset_locals.len() as i32
+            let rhs_field_reset_start = self.pending_reset_field_places.len() as i32
+            let rhs_move_temp_start = self.pending_move_temp_locals.len() as i32
             if target_ty != 0 and target_ty != self.sema.ty_void as i32:
                 self.expected_type = target_ty
             let rhs_op = self.lower_expr(rhs_node)
             self.expected_type = saved_expected
             let place = self.lower_expr_place(target)
-            // §16.11 / decisions D8: raw-pointer stores do not drop the old
-            // pointee (see lower_assign for the statement-position twin).
-            if target_ty != 0 and self.sema.is_copy_frozen(target_ty) == 0 and self.sema.type_needs_drop_frozen(target_ty) != 0:
-                if self.assign_target_is_raw_pointer_store(target) == 0:
-                    self.emit_drop_place_respecting_moved_fields(place, target_ty)
-            self.assign_operand_to_place(place, rhs_op, self.ast.get_start(target))
-            return rhs_op
+            return self.finish_assignment_to_place(target, place, target_ty, rhs_op, rhs_reset_start, rhs_field_reset_start, rhs_move_temp_start)
 
         if kind == NodeKind.NK_IF_EXPR:
             return self.lower_if(self.ast.get_data0(node), self.ast.get_data1(node), self.ast.get_data2(node), node, 1)
@@ -11827,7 +11986,7 @@ impl MirBuilder:
                         // never registered; the fn-level frame exposed it.
                         if vc_arg != 0:
                             let vc_arg_drop_ty = if vc_payload_ty != 0: vc_payload_ty else: self.expr_type(vc_arg)
-                            if self.sema.type_needs_drop_frozen(vc_arg_drop_ty) != 0:
+                            if self.sema.is_copy_frozen(vc_arg_drop_ty) == 0:
                                 self.consume_moved_operand(vc_arg_op)
                     let vc_fid = self.body.new_agg_fields(vc_fields, vc_names)
                     let vc_rv = self.body.new_rvalue(RvalueKind.RK_AGGREGATE, 1, vc_fid, vc_variant_idx)
@@ -12002,13 +12161,20 @@ impl MirBuilder:
                 sl_fields.push(f_op)
                 sl_names.push(resolved_name)
                 self.expected_type = saved_expected
-                // #605: a Drop-bearing field value is moved into the aggregate; mark
+                // #605: a non-Copy field value is moved into the aggregate; mark
                 // the source consumed so it is not also dropped at its scope exit
-                // (otherwise its destructor runs twice -> double-free). Gated on a
-                // Drop impl: non-Drop value types are left to copy, which the
-                // codebase relies on to share data across constructions and which is
-                // harmless without a destructor.
-                if self.sema.type_needs_drop_frozen(f_ty) != 0:
+                // (otherwise the buffer it now shares with the aggregate is freed
+                // twice -> double-free). The gate must match the drop scheduler,
+                // which schedules a value drop for every non-Copy local
+                // (is_copy_frozen == 0 in lower_let_binding) — including
+                // compiler-managed heap types (HashMap/Vec/str) that own a buffer
+                // but carry no user Drop impl, so type_needs_drop_frozen reports 0
+                // for them. Gating the consume on type_needs_drop_frozen left those
+                // fields dropped-and-aliased: the exact double-free that blocked
+                // self-host (sema_empty_state and every struct built from moved
+                // non-Copy locals). A genuinely POD non-Copy field gets a no-op
+                // drop that the moved-skip elides — harmless.
+                if self.sema.is_copy_frozen(f_ty) == 0:
                     self.consume_moved_operand(f_op)
             if self.sema.type_decl_nodes.contains(sl_name_sym):
                 let sl_td_node = self.sema.type_decl_nodes.get(sl_name_sym).unwrap()
@@ -12040,7 +12206,7 @@ impl MirBuilder:
                             sl_fields.push(def_op)
                             sl_names.push(decl_field_name)
                             self.expected_type = saved_expected
-                            if self.sema.type_has_drop_impl(decl_field_ty) != 0:
+                            if self.sema.is_copy_frozen(decl_field_ty) == 0:
                                 self.consume_moved_operand(def_op)
             let sl_fid = self.body.new_agg_fields(sl_fields, sl_names)
             let sl_rv = self.body.new_rvalue(RvalueKind.RK_AGGREGATE, 0, sl_fid, 0)
@@ -12062,11 +12228,11 @@ impl MirBuilder:
             let range_inclusive = self.ast.get_data2(node)
             var range_elem = self.sema.ty_i32 as i32
             if range_start_node != 0:
-                range_elem = self.expr_type(range_start_node)
+                range_elem = self.materialized_operand_type(range_start_node)
             else if range_end_node != 0:
-                range_elem = self.expr_type(range_end_node)
-            let start_op = if range_start_node != 0: self.lower_expr(range_start_node) else: self.int_const_operand(0, range_elem)
-            let end_op = self.lower_expr(range_end_node)
+                range_elem = self.materialized_operand_type(range_end_node)
+            let start_op = if range_start_node != 0: self.lower_operand_materialized(range_start_node) else: self.int_const_operand(0, range_elem)
+            let end_op = self.lower_operand_materialized(range_end_node)
             let incl_op = self.int_const_operand(range_inclusive, self.sema.ty_bool)
             let range_fields: Vec[i32] = Vec.new()
             let range_names: Vec[i32] = Vec.new()
@@ -12115,7 +12281,7 @@ impl MirBuilder:
                 // source so its destructor is not also run at its scope exit (which
                 // would double-free). Paired with the tuple's element-drop
                 // (mir_emit_drop_tuple_ptr) — both land together.
-                if self.sema.type_needs_drop_frozen(elem_ty) != 0:
+                if self.sema.is_copy_frozen(elem_ty) == 0:
                     self.consume_moved_operand(elem_op)
             let tup_fid = self.body.new_agg_fields(tup_fields, tup_names)
             let tup_rv = self.body.new_rvalue(RvalueKind.RK_AGGREGATE, 0, tup_fid, 0)
@@ -12179,7 +12345,7 @@ impl MirBuilder:
                 // #605/#606: move a Drop element into the array; consume the source so
                 // it is not also dropped at scope exit. Paired with the array's
                 // element-drop (mir_emit_drop_array_ptr) — both land together.
-                if self.sema.type_needs_drop_frozen(self.expr_type(elem_node)) != 0:
+                if self.sema.is_copy_frozen(self.expr_type(elem_node)) == 0:
                     self.consume_moved_operand(arr_elem_op)
             let arr_fid = self.body.new_agg_fields(arr_fields, arr_names)
             let arr_rv = self.body.new_rvalue(RvalueKind.RK_AGGREGATE, 0, arr_fid, 0)
@@ -12239,7 +12405,7 @@ impl MirBuilder:
                 // source so it is not also dropped at scope exit. Paired with the
                 // enum's variant-aware payload drop (mir_emit_drop_enum_ptr).
                 let vs_arg_drop_ty = if vs_payload_ty != 0: vs_payload_ty else: self.expr_type(vs_arg)
-                if self.sema.type_needs_drop_frozen(vs_arg_drop_ty) != 0:
+                if self.sema.is_copy_frozen(vs_arg_drop_ty) == 0:
                     self.consume_moved_operand(vs_arg_op)
             let vs_fid = self.body.new_agg_fields(vs_fields, vs_names)
             let vs_rv = self.body.new_rvalue(RvalueKind.RK_AGGREGATE, 1, vs_fid, vs_variant_idx)
@@ -13196,6 +13362,7 @@ fn lower_generator_next_body(sema: &Sema, source: MirBody, fn_node: i32) -> MirB
         out.call_sig_indices.push(source.call_sig_indices.get(ca as i64))
         out.call_mono_syms.push(source.call_mono_syms.get(ca as i64))
         out.call_contract_required.push(source.call_contract_required.get(ca as i64))
+        out.call_pipeline_receiver_places.push(source.call_pipeline_receiver_places.get(ca as i64))
         for ai in 0..count:
             out.call_arg_operands.push(source.call_arg_operands.get((start + ai) as i64))
 
@@ -13311,7 +13478,7 @@ impl MirModule:
         for bi in 0..self.bodies.len() as i32:
             let body = self.bodies.get(bi as i64)
             let call_count = body.call_arg_starts.len() as i32
-            if body.call_sig_indices.len() as i32 != call_count or body.call_mono_syms.len() as i32 != call_count or body.call_contract_required.len() as i32 != call_count:
+            if body.call_sig_indices.len() as i32 != call_count or body.call_mono_syms.len() as i32 != call_count or body.call_contract_required.len() as i32 != call_count or body.call_pipeline_receiver_places.len() as i32 != call_count:
                 sema_phase_bug(f"BUG: MIR call-contract tables are not parallel in body {body.fn_sym}")
             for ci in 0..call_count:
                 if not body.call_requires_contract(ci):
@@ -13444,12 +13611,12 @@ fn lower_module(input_sema: Sema, ast_pool: AstPool, pool: InternPool) -> MirLow
             let source_body = lower_fn_with_sig(move source_builder, decl as i32, sig_idx)
             let ctor_body = lower_generator_constructor(sema, ast_pool, pool, decl as i32, sig_idx)
             let next_body = lower_generator_next_body(sema, source_body, decl as i32)
-            mir_mod.add_body(ctor_body)
-            mir_mod.add_body(next_body)
+            mir_mod.add_body(move ctor_body)
+            mir_mod.add_body(move next_body)
             continue
         var builder = MirBuilder.init(&sema, ast_pool, pool, mir_fn_sym)
         let body = lower_fn(move builder, decl as i32)
-        mir_mod.add_body(body)
+        mir_mod.add_body(move body)
 
     for gi in 0..sema.fn_clause_group_count():
         let dispatch_sym = sema.fn_clause_group_name(gi)
@@ -13468,7 +13635,7 @@ fn lower_module(input_sema: Sema, ast_pool: AstPool, pool: InternPool) -> MirLow
             if mir_mod.find_body(mono_sym) < 0:
                 let lowered = lower_concrete_specialization(move sema, ast_pool, pool, specialization)
                 sema = lowered.sema
-                mir_mod.add_body(lowered.body)
+                mir_mod.add_body(move lowered.body)
             specialization = specialization + 1
         sema.preregister_mir_types()
         let before_drop_registration = sema.concrete_specialization_nodes.len() as i32
@@ -13875,7 +14042,7 @@ impl MirModule:
         var stack: Vec[i32] = Vec.new()
         stack.push(start_idx)
         while stack.len() > 0:
-            let idx = stack.pop()
+            let idx = stack.remove(stack.len() - 1)
             if idx < 0 or idx >= body_count:
                 continue
             if visited.get(idx as i64) != 0:
@@ -13958,7 +14125,7 @@ impl MirModule:
             if scc.len() == 1:
                 let recursive_violation = tailrec_verify_recursive_edges(sema, ast_pool.get_data1(decl_node), &scc_syms, 1, 0, tailrec_no_drop_state())
                 if recursive_violation.node != 0:
-                    violations.push(recursive_violation)
+                    violations.push(move recursive_violation)
                 continue
 
             var all_annotated = 1
@@ -13978,7 +14145,7 @@ impl MirModule:
                 if member_decl != 0:
                     let recursive_violation = tailrec_verify_recursive_edges(sema, ast_pool.get_data1(member_decl), &scc_syms, 1, 0, tailrec_no_drop_state())
                     if recursive_violation.node != 0:
-                        violations.push(recursive_violation)
+                        violations.push(move recursive_violation)
                         recursive_violation_found = 1
                         break
             if recursive_violation_found != 0:

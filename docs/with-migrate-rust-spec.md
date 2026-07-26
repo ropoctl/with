@@ -2,6 +2,12 @@
 
 **Best-effort migration from Rust to With.**
 
+> **D22 status (2026-07-23): A new decision has been made, but implementation
+> is still in progress.** Rust `HashMap::get -> Option<&V>` maps directly to
+> With's uniform `HashMap.get -> Option[&V]`. Preserve `.copied()` and
+> `.cloned()` as explicit ownership boundaries; do not collapse lookup into an
+> owned result because the current compiler happens to accept it.
+
 The output is a starting point, not a finished product. It handles
 syntax, common patterns, and structural differences automatically.
 It flags what it can't translate. The programmer finishes the job.
@@ -405,6 +411,25 @@ vec![1, 2, 3]              →  [1, 2, 3]   // @migrate: verify Vec literal synt
 vec![]                      →  Vec.new()
 HashMap::new()              →  HashMap.new()
 ```
+
+Rust keyed-map reads preserve their shape:
+
+```rust
+map.get(&key)               // Option<&V>
+map.get(&key).copied()      // Option<V> where V: Copy
+map.get(&key).cloned()      // Option<V> where V: Clone
+```
+
+```with
+map.get(key)                // Option[&V]
+map.get(key).copied()       // Option[V] where V: Copy
+map.get(key).cloned()       // Option[V] where V: Clone
+```
+
+With may contextually materialize `&Copy` at an established owned-value demand,
+but that does not change the translated API signature or pattern payload type.
+`remove` remains the consuming transfer when the entry itself should leave the
+map.
 
 #### Range syntax
 

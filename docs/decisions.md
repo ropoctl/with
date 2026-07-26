@@ -10,6 +10,281 @@ decision supersedes an earlier one, say so in both.
 
 ---
 
+## Enum discriminant resolution is enum-scoped; no bare-name fallback
+
+**Date:** 2026-07-25
+**Status:** Accepted
+**Deciders:** Rob O'Callahan
+
+**Decision.** `enum_variant_discriminant_for_type` and
+`type_reflection_variant_discriminant` trust `disc_values` **only** through the
+qualified `Enum.Variant` key. When the qualified key is absent they fall through
+to the variant `index` (for payload enums) rather than to the bare variant-name
+key.
+
+**Context.** `disc_values` is populated only for DiscEnums (`enum X: i32: A =
+0`), keyed by BOTH the bare variant-name sym and the qualified `X.A` sym. Payload
+enums (`enum Option[T] { Some(T) | None }`) never register `disc_values`; their
+discriminant is the declaration index. The bare key is therefore shared across
+every enum that declares a variant of that name. The compiler's own `enum
+CliOneLinerMode { None = 0 }` set `disc_values["None"] = 0`, and the old bare
+fallback made `enum_variant_discriminant_for_type(Option[..], None)` return 0
+instead of 1. For a niche-encoded `Option[&V]` (the D22 map-view type), codegen's
+`RK_DISCRIMINANT` computes `None = (ptr == null) = 1`, so `x.is_none()` lowered
+to `discriminant == 0` (i.e. `is_some`) — every niche `is_none` was inverted,
+sending `None` into `unwrap` (`unwrap on None` abort). This is why head
+self-hosting aborted at `CodegenDispatch.mir_indirect_value_local_ptr`: the
+niche `Option[&i64]` returned by `mir_local_types.get(..)` never crashed on a
+tiny program (no other enum named a `None` variant), only inside the full
+compiler.
+
+**Alternatives weighed.** (a) Register `disc_values` for payload enums too — but
+the bare key still collides, so it only papers over the lookup; the bare entry
+stays ambiguous. (b) Make codegen's niche path derive the discriminant from the
+semantic disc — insufficient, because the bug is that the semantic disc itself
+was resolved through a colliding global name key. (c, chosen) Never consult the
+bare `disc_values` key: both enum kinds register their qualified variant in
+`variant_lookup`, so `qualified_enum_variant_sym` always yields the genuine
+`Enum.Variant` key for a valid enum decl; DiscEnums resolve via that qualified
+`disc_values` entry, payload enums fall through to `index` (== their implicit
+discriminant). No enum's discriminant is ever read through a name another enum
+can shadow.
+
+**Reopen if** a variant discriminant is ever needed without a resolvable owning
+enum type; then it must be stored per-enum, never under a bare global name.
+
+---
+
+## D22 — Keyed-map lookup returns a uniform view; Copy materializes only under owned demand
+
+**Date:** 2026-07-23
+**Status:** Accepted — BDFL ruling. A new decision has been made, but
+implementation is still in progress; the compiler/stdlib are NON-COMPLIANT
+until the D22 requirements and pins pass.
+**Deciders:** Eric (BDFL)
+
+**Authority:** `docs/d22-Eric-Ruling.md` is the canonical and complete D22
+ruling. This entry is only a compact index and rationale summary; any omission
+or conflict here is false and must be repaired in favor of Eric's ruling.
+
+**Decision.** `HashMap[K, V].get` and `BTreeMap[K, V].get` return
+`Option[&V]` for every `V`. Their return shape never depends on whether `V` is
+`Copy`. Lookup observes map-owned storage; `remove` transfers ownership and
+returns `Option[V]`. The view from `get` originates only in the receiver, not
+the transient key.
+
+A `&T` remains a reference during inference, unannotated binding, inferred
+return, pattern projection, and closure capture. When `T: Copy`, it may satisfy
+an independently established owned demand: an explicit/declared target, a
+resolved by-value argument/component/receiver, a resolved operator contract,
+or an owned branch-join result. The compiler copies the pointee at that demand
+boundary and then applies ordinary value coercions. Raw pointers do not
+participate, and this is not a receiver-ABI change.
+
+Patterns are structural projections, not owned-demand positions. `Some(v)` on
+`Option[&V]` binds `v: &V` in every instantiation; nested projection through a
+reference produces reference subviews. `unwrap`, `expect`, and `?` likewise
+preserve the exact payload type. `??`, `unwrap_or`, and `unwrap_or_else` use the
+general join rule: all-reference paths preserve the reference and union their
+origins; an enclosing expected owned type or any independently-owned reaching
+expression anchors an owned result and compatible `&Copy` paths materialize.
+The rule is independent of arm order. Removing the last owned anchor may
+change an inferred result back to a reference; an explicit target type pins
+the intended result.
+
+Origins follow semantic values through `Option`, `Result`, tuples, patterns,
+branches, and compiler-generated elimination. Wrapper spelling never erases a
+view origin. A contextual Copy read, explicit clone, or consuming ownership
+transfer ends the origin only for the independent owned result. D22 also
+standardizes `Option[&T].copied() -> Option[T]` for `T: Copy` and
+`Option[&T].cloned() -> Option[T]` for `T: Clone` as explicit ownership
+boundaries.
+
+**Diagnostic contract.** If a later error depends on a join's owned anchor,
+the diagnostic identifies that anchor and the relevant materialized arms. A
+view-invalidating mutation explains that the binding views its collection and
+offers an owned type annotation for `Copy` pointees. A non-`Copy` `??` mismatch
+explains the borrowed-success/owned-default split and suggests `.cloned()`, a
+borrowed default, or `remove` only when each remedy is actually applicable.
+
+**Why this is the With answer.** Rust and Vale give keyed lookup one borrowed
+shape. Zig keeps two uniformly typed operations (`get` by value and `getPtr`
+by address); Go and Swift return values because their value/GC models make
+that safe. None makes `get` itself change shape by generic instantiation. With
+keeps that uniform contract and spends compiler complexity at the place where
+the programmer's intent becomes knowable: an owned-value demand. Python/Mojo
+users get `counts.get(k) ?? 0` and ordinary arithmetic without sigils; Rust
+users get a stateable borrowing API; C/C++ users retain native, explicit
+ownership. Reference identity and lifetime remain real information until an
+owned context deliberately spends them.
+
+**Alternatives rejected.** Copy-or-view lookup was rejected because a method's
+public return shape would vary by instantiation and forwarding generic APIs
+could not state one contract. Uniform borrow with only explicit dereference or
+`.copied()` was safe and pure but imposed Rust-shaped ceremony on the common
+Copy case. Eager materialization at `unwrap` or pattern binding merely moved
+the conditional return shape to every elimination spelling and made generic
+patterns unstable. Ambient `&Copy -> Copy` inference was rejected because an
+unannotated binding would silently discard identity and origin information.
+
+**Supersedes.** This reverses §3.8's former call-site-only boundary for Copy
+pointee reads and retires
+`test/compile_errors/err_ref_copy_no_return_coercion.w` as a language
+requirement. The fixture remains temporarily as a marked NON-COMPLIANCE pin
+until implementation converts it to a must-compile test. D22 also supersedes
+every active statement that `HashMap.get` or `BTreeMap.get` returns
+`Option[V]`. No decision-log rationale for the old call-site-only boundary was
+found; this record does not invent one.
+
+`Vec`, string, array, and slice indexing/lookup signatures are not
+restandardized here. D22's general expression, pattern, join, and origin rules
+apply to their existing signatures; changing those signatures is a separate
+D23-candidate ruling. `SlotMap.get` already has the required uniform
+`Option[&T]` contract.
+
+**Required pins.** Origin survives `unwrap`; origin survives pattern/`if let`;
+origin survives `?`; two borrowed `??` paths union origins; an annotated Copy
+snapshot remains usable after map mutation; a removed owned value remains
+usable after mutation; and mutation after the final view use remains accepted
+as the NLL precision control. A mixed five-arm match pins one owned anchor,
+four materialized view arms, arm-order independence, and an explicit result
+annotation that stabilizes later edits. Non-`Copy` `??` diagnostics pin every
+applicable remedy and never recommend an unavailable clone or invalid borrow.
+
+**Implementation sequencing.** Doctrine lands first. The excluded
+`test/non_compliant/d22/` matrix versions the acceptance criteria without
+weakening the green battery. Transparent-carrier origin propagation lands
+before contextual Copy reads and join materialization; implementation design
+is a separate follow-up and must preserve the one ABI descriptor rule.
+
+**What would reopen this.** Evidence that contextual Copy materialization
+cannot be defined as one expected-type operation across calls, returns,
+operators, and joins without changing inference or ABI unpredictably; or a
+uniform alternative that preserves map API contracts, Copy ergonomics, view
+identity, and generic forwarding with less language machinery. Implementation
+inconvenience alone does not reopen it.
+
+---
+
+## D21 — Unit-returning mutator pipelines thread the receiver place; `mut fn` cannot duplicate receiver ownership
+
+**Date:** 2026-07-22
+**Status:** Accepted — BDFL ruling; implementation is NON-COMPLIANT pending the
+compiler/stdlib follow-up.
+**Deciders:** Eric (BDFL)
+
+**Decision.** A pipeline stage that resolves to a `mut fn` whose resolved
+concrete return type is `Unit` performs the ordinary mutating call and continues
+with the same receiver place. The test is static after return inference,
+overload resolution, and generic substitution; it is not restricted to a
+literal `-> Unit` annotation. A `mut fn` stage with any other return type
+continues with its returned value. `Never` diverges under the ordinary rules and
+has no continuation.
+
+A named receiver remains its original place. An rvalue receiver is materialized
+as a statement temporary. If that place remains the pipeline's final value, an
+ordinary value context may move it out; if a non-Unit stage switches the
+pipeline to another value, the receiver temporary is dropped at statement end.
+All argument evaluation, exclusivity, view-liveness, aliasing, and mutation
+ordering are exactly those of the corresponding ordinary calls — pipelines do
+not mint a second place-mutation regime.
+
+The receiver contract and the return contract remain distinct. A `mut fn` may
+return useful values, including a Copy result, a tracked view, a fresh owned
+value, or ownership moved from a projection whose source is reset under D17.
+It may not return the non-Copy receiver itself, or duplicate ownership of
+storage the receiver still owns, because the caller retains the receiver place.
+Receiver-returning fluency is a consuming contract and is spelled `move fn`.
+
+**Supersedes.** This reverses the receiver-returning `Vec.push` design shipped
+in `b99fd86c` and recorded by
+`docs/feature_plans/stdlib-fluent-builder-blocker.md` and the historical
+`docs/completed/build-plan.md`. It also supersedes the receiver-return/move-out/
+reinitialize field-chain model in `docs/completed/drop-move-ownership.md` for
+Unit mutators. `Vec.push`, `Vec.clear`, and `Vec.set_i32` are Unit-returning
+in-place mutators; their pipeline fluency comes from place-threading, never from
+an owned copy of the receiver.
+
+D16 and D17 remain the ordinary ownership laws beneath this ruling: D16 governs
+explicitly moved rvalue roots and statement-temporary destruction; D17 permits
+a sound projection transfer only because reset-on-move removes that ownership
+from the receiver. Neither permits the duplicated whole-receiver ownership this
+ruling rejects.
+
+**Why this is the With answer.** Vale's `List.add` has two overloads: a borrowed
+receiver returning void and an owned receiver returning the List; its compiler
+borrows a named local receiver and preserves ownership for a non-local
+expression. That proves the ownership split is coherent, but Vale's fluent form
+is a dot chain, not With's pipeline. Rust `Vec::push`, Swift `Array.append`, and
+Zig `ArrayList.append` are Unit/void in-place mutators; Go's `append` returns a
+new slice header and requires assignment. With already knows both facts needed
+to remove the ceremony safely — the receiver is a place and Unit carries no
+information — so the compiler threads the place only in that information-free
+case.
+
+This follows the mission literally: compiler complexity replaces programmer
+ceremony without weakening ownership. It also preserves meaningful results:
+`v |> try_push(x)` carries the returned bool, and `v |> pop() |> unwrap()`
+carries the returned Option while leaving `v` alive and mutated.
+
+**Alternatives rejected.**
+
+- *Keep one universal pipeline rewrite and add Vale-style `mut`/`move`
+  overloads.* This preserves `x |> f(a) == f(x, a)` as a single law and keeps
+  value-category intelligence local to overload selection. Rejected because a
+  natural chain works for a temporary but breaks on a named place after its
+  first Unit result, forcing statements or `(move v)` where the compiler already
+  knows how to preserve the place.
+- *Thread the place after every `mut fn`, regardless of return type.* Rejected by
+  `let succeeded = v |> try_push(x)`: it would bind/move `v` and silently discard
+  the bool the API deliberately returned. With already has receiver-only builder
+  semantics in `with ... as mut`; pipelines continue with meaningful results.
+- *Let a `mut fn` return its non-Copy receiver.* Unsound: the caller retains the
+  receiver place while the return creates a second owner of the same storage.
+  Resetting or zeroing one side merely moves or destroys the caller's value and
+  does not make the declared `mut` contract truthful.
+
+**Required pins.** Named-place Unit chains; rvalue-rooted Unit chains; ordinary
+assignment-move capture; generic resolved-Unit vs resolved-non-Unit stages; a
+named mixed chain (`push` then `pop`) that returns the element while leaving the
+receiver live and mutated; the rvalue mixed chain whose returned Option arrives
+and whose hidden Vec drops exactly once at statement end; `Never` divergence;
+ordinary argument-independence acceptance/rejection; and a compile error for a
+`mut fn` that duplicates its non-Copy receiver into an owned return. Moved-out
+projection, Copy, view, and fresh-owned returns remain accepted controls.
+
+**What would reopen this.** A pipeline model that can carry both receiver place
+and method result without ambiguity or new ceremony, or an ownership model that
+can truthfully return a receiver while the caller retains its place without
+creating two owners. Implementation inconvenience does not reopen it.
+
+---
+
+## D20 — The spec leads; spec changes are solemn
+
+**Date:** 2026-07-22
+**Status:** Accepted.
+**Deciders:** Eric (BDFL)
+
+**Decision.** The specification leads the implementation: a spec change is a
+ruling that the product is NON-COMPLIANT until the implementation catches
+up. There is no implement-first-spec-after, no holding spec text until code
+lands, and no syncing the spec to the implementation. And spec changes are
+solemn: only Eric authors or blesses normative spec text — the exact words
+(D16 precedent). Agents draft and propose; a mission directive or agreed
+direction is not approval of wording.
+
+**Context.** During the #691 flip an agent added a §2.5.1 ownership
+paragraph on the strength of the D18 mission directive plus the
+spec-first sequencing rule — conflating sequence authority with authoring
+authority, and then offering to "revert the spec until the code lands,"
+which inverts the entire model. The spec is the bible: it moves first, by
+ruling, and reality is measured against it.
+
+**What would reopen this.** Nothing.
+
+---
+
 ## D19 — Verification cost scales with blast radius; batteries bless batches
 
 **Date:** 2026-07-22
@@ -112,7 +387,8 @@ scope) but may not reintroduce ownerless allocations.
 ## D17 — Consuming a field writes the root; `move` applies to a place
 
 **Date:** 2026-07-21
-**Status:** Accepted.
+**Status:** Accepted for projection transfers. D21 supersedes any
+receiver-returning extrapolation from this rule.
 **Deciders:** Eric (BDFL)
 
 **Decision.** Ownership-forcing effects (consume/escape_value) do not cross
@@ -125,8 +401,16 @@ suffices for methods that hand a field to a consuming callee; the
 Alongside it, `move` applies to a place: `f(move self.r)` is the explicit
 spelling; the field is blanked through whatever pointer reaches the base
 (#697 machinery), so the caller's later drop skips it. POD-field moves are
-plain copies. The required-move rule for plain non-Copy args and §2.4's
-partial-move ban for Drop-impl owners are unchanged.
+plain copies. Under §3.8 a plain-`T` parameter consumes without an extra
+call-site `move`; explicit `move self.r` remains a legal intent spelling.
+Section 2.4's partial-move ban for Drop-impl owners is unchanged.
+
+**D21 boundary.** "A field transfer writes the root" does not mean "a mutable
+borrow may return an owned copy of the root." A transferred non-Copy projection
+remains valid only because reset-on-move blanks that projection. D21 supersedes
+any broader reading that would let a `mut fn` return the whole non-Copy receiver
+or storage whose ownership the receiver retains; the sound projection-transfer
+rule above remains in force for `pop`, `remove`, `take`, and equivalent APIs.
 
 **The Copy-projection distinction (load-bearing).** A COPY-typed projection
 (raw pointer, handle) keeps the old promotion: escaping it captures the
@@ -143,7 +427,7 @@ without the Copy guard breaks aliasing-escape contracts (the pin caught
 it). Threading `&mut`-style out-params instead is forbidden by §1.4/§3.3.
 
 **Enforced by:** the m-probe matrix in the D17 commit, `--dump-abi`
-verdicts (field-consuming receiver: eff=[write] SHARE-PLACE), drop-audit
+verdicts (field-consuming `mut fn` receiver: eff=[write], by-place), drop-audit
 field_take cells, and the #697/#698 debug-alloc fixtures. Would reopen on:
 per-field effect summaries (which could carry field-precise consume without
 promotion), or a change to reset-on-move that makes field blanks
@@ -154,24 +438,26 @@ observable.
 ## D16 — `move x` is rvalue-uniform: it always moves, callee-independent
 
 **Date:** 2026-07-21
-**Status:** Accepted.
+**Status:** Accepted; D21 relies on this statement-temporary rule and does not
+change explicit `move` semantics.
 **Deciders:** Eric (BDFL)
 
 **Decision.** `move x` at a call site always moves: the value is materialized
 as a statement temporary and the source binding is reset immediately. An owned
-(consuming) callee consumes the temporary through the call; a share-place
+(plain `T`) callee consumes the temporary through the call; a borrowing (`&T`)
 callee borrows the temporary, which is destroyed at the end of the enclosing
 statement (§2.4's temporary rule). `move x`'s caller-visible contract is
 therefore callee-independent: after the statement, the binding is invalid and
-the value is gone. The required-move error for plain non-Copy args to owned
-params is unchanged; there is NO diagnostic for `move` into a borrowing callee
-— post-ruling it is meaningful (early destruction), not noise.
+the value is gone. Plain `T` already declares consumption and needs no
+call-site acknowledgment; there is likewise no diagnostic for `move` into a
+borrowing callee — it is meaningful early destruction, not noise.
 
-**Context.** Before this ruling, `f(move x)` into a share-place param
+**Context.** Before this ruling, `f(move x)` into a borrowing param
 borrowed: the binding was statically invalidated but the value silently lived
 until the caller's scope exit — a deferred-drop lie (a lock/fd moved into a
-consumer for deterministic release stayed held), contradicting mutability.md's
-satisfaction table ("move x … yes, owned"). Found while grounding #697/#691.
+consumer for deterministic release stayed held). Found while grounding
+#697/#691. The later D5 supersession made the borrowing mode explicit as `&T`;
+the rvalue-uniform temporary rule remains the same.
 
 **Alternatives weighed.**
 - *Make it illegal* (`move` iff callee consumes; Rust/Vale make the construct
@@ -195,11 +481,10 @@ ownership follows the contract (D6 stays intact). The implementation may later
 elide the temporary copy by aliasing the source storage; this entry fixes the
 semantics, not the materialization strategy.
 
-**Enforced by:** test/debug_alloc/da_move_into_shareplace_timing.w (timing),
+**Enforced by:** test/debug_alloc/da_move_into_shareplace_timing.w (legacy
+fixture name; timing),
 drop-audit cell move_into_borrow/bare (exactly-once). Would reopen on: a
-share-place ABI change that makes borrowing a doomed temporary unsound, or a
-future explicit parameter-mode syntax that makes callee modes visible at the
-declaration.
+borrowing ABI change that makes borrowing a doomed temporary unsound.
 
 ---
 
@@ -355,7 +640,7 @@ the exact user-visible version while keeping semantic build inputs truthful.
 
 ---
 
-## D12 — `mut fn` mutates in place on every owner type; the receiver MODE decides share-place, not the owner's type (primitives and str included)
+## D12 — `mut fn` mutates in place on every owner type; receiver MODE decides by-place semantics (primitives and str included)
 
 **Date:** 2026-07-17
 **Status:** Accepted — BDFL ruling. **Deciders:** Eric (BDFL)
@@ -366,13 +651,13 @@ A `mut fn` receiver borrows the caller's place and mutates it in place for
 **every** owner type — scalar primitives (`i32`, `u64`, `f64`, `bool`,
 `char`, …), `str`, distinct/newtypes over them, and aggregates alike.
 `extend i32: mut fn bump(): self += 1` works: `x.bump()` on a `var x`
-mutates `x`. The lowering is D5 share-place / `PassMode::IndirectPlace`
+mutates `x`. The lowering is a receiver-mode `PassMode::IndirectPlace`
 (a pointer to the caller's slot) computed once by `compute_fn_abi` (D6) —
 the same ABI aggregates already use — so no new mechanism is introduced;
 the previous restriction to STRUCT/GENERIC_INST/ENUM owners was an
 incompleteness, not a design.
 
-**The governing principle: the receiver MODE decides share-place, the
+**The governing principle: the receiver MODE decides by-place behavior, the
 owner's type does not.** `i32` is `Copy`, but `mut fn` still borrows in
 place, because mode wins over Copy-ness — exactly as it already does for
 Copy structs. `f(x)` (by-value param) copies; `x.bump()` (`mut fn`
@@ -416,11 +701,12 @@ Mission filter: §9.5 already promises "mut self mutates in place"
 generically with no primitive carve-out — so this is spec-leads-compiler
 (the spec is right, the impl was incomplete). Ergonomics-first wants
 `hp.damage(30)` over `hp = Health(hp.value - 30)`. "Safe as Rust" is a
-bar, not a compass — share-place on a primitive is exactly as safe (the
-borrow is exclusive for the call, D5); nothing becomes silently wrong.
+bar, not a compass — a by-place mutable receiver on a primitive is exactly as
+safe (the borrow is exclusive for the call); nothing becomes silently wrong.
 
-Builds on D5 (share-place calling convention), D6 (`FnAbi`/`PassMode`
-single source), D7 (receiver-mode keywords). Sibling of D11 (both are
+Builds on D6 (`FnAbi`/`PassMode` single source) and D7 (receiver-mode
+keywords). It is independent of D5's now-superseded free-parameter default.
+Sibling of D11 (both are
 core-type surface rulings taken in-scope for v0.16.0 rather than
 deferred).
 
@@ -436,8 +722,8 @@ ownership op × receiver mode) per the receiver-ABI-change rule.
 
 ### What would reopen this
 
-A drop/lifetime cell that cannot be made sound for a share-place scalar
-or fat-pointer receiver without violating D5's exclusive-borrow contract.
+A drop/lifetime cell that cannot be made sound for an exclusive by-place scalar
+or fat-pointer receiver.
 
 ---
 
@@ -665,7 +951,7 @@ A method's receiver is expressed by a keyword on the declaration, not by a
 parameter. `self` is never declared and its type is never spelled:
 
 - `fn m()` inside `impl`/`extend`/`type` — instance, **read borrow** (`self: &Self`)
-- `mut fn m()` inside a type — instance, **mutable share-place borrow** (`mut self: Self`)
+- `mut fn m()` inside a type — instance, **by-place mutable borrow** (`mut self: Self`)
 - `move fn m()` inside a type — instance, **consuming** (`move self: Self`)
 - top-level `fn Type.name()` — **associated**, no receiver (no `static` keyword)
 
@@ -725,7 +1011,7 @@ the surface).
 Swift is the model: `SelfAccessKind` (`include/swift/AST/Decl.h:262` —
 `NonMutating`/`Mutating`/`Consuming`/`Borrowing`) is a **decl** property and
 `self` is a compiler-synthesised `getImplicitSelfDecl()`. `mutating ⇒ inout
-self` (OwnershipManifesto) is verbatim With's share-place (D5). Swift threads a
+self` (OwnershipManifesto) is verbatim With's by-place receiver mode (D12). Swift threads a
 persisted `SelfAccessKind`; we take a cheaper route (parser desugar to shapes
 sema already handles). Rust's `&self`/`&mut self`/`self` shorthand and Swift's
 implicit `self` both confirm "no receiver type annotation" as the ergonomic
@@ -757,10 +1043,12 @@ truth** for both the callee prologue (`declare_function`) and every call site
 (`push_call_arg`). No code may re-derive "how is this argument passed" from the
 type or context on its own — it reads the descriptor.
 
-`PassMode` meanings: `Direct` = by value (Copy/scalar); `Indirect` = pointer to a
-callee-owned copy (byval); `IndirectPlace` = pointer to the CALLER's place
-(share-place — callee mutates the caller's data and does NOT drop it); `Fat` =
-dyn-trait fat pointer; `Ignore` = zero-sized.
+`PassMode` meanings: `Direct` = direct value; `Indirect` = pointer to a
+callee-owned value (byval); `IndirectPlace` = pointer to a borrowed caller place
+(used by in-place receiver modes; the callee does NOT drop it); `Fat` =
+dyn-trait fat pointer; `Ignore` = zero-sized. Source ownership is declared by
+the signature: an indirect physical ABI never turns plain consuming `T` into a
+borrow.
 
 ### Why (the reference consensus)
 
@@ -785,81 +1073,60 @@ path, `T**` on the generic path, both "working") is the textbook symptom.
   `internal_abi_needs_indirect_param`, byval masks, `fn_ref_param_*`) are being
   consolidated into `FnAbi`; after consolidation, re-introducing a per-path ABI
   derivation is a regression.
-- Share-place (D5) is `PassMode::IndirectPlace`, driven by the effect (P0). The
-  callee-no-drop and the caller-address-passing are consistent because they read
-  the same `ArgAbi` — this is *why* the descriptor is the right home for it.
+- Explicit reference parameters use the ABI of their reference type. A
+  compiler-modeled borrowed place, such as an in-place receiver, uses the
+  appropriate by-place descriptor. Callee no-drop and caller address-passing
+  remain consistent because both read the same `ArgAbi` — this is *why* the
+  descriptor is the right home. Inferred body effects never change a declared
+  mode.
 
 ### Consequences (the rewire)
 
 Build `FnAbi`/`ArgAbi`/`PassMode` + `compute_fn_abi(sig)` (behavior-neutral —
 reproduce today's classifications, resolving the transparent divergence to one
 form) → route `declare_function` + one `push_call_arg` through it (the cathedral,
-descriptor-driven; the transparent bug fixed by unification) → flip
-`IndirectPlace` on for share-place. The landed `mir_ref_arg_ptr` brick is the
-`IndirectPlace` marshalling arm.
+descriptor-driven; the transparent bug fixed by unification). The landed
+`mir_ref_arg_ptr` brick is the `IndirectPlace` marshalling arm for declared
+by-place contracts.
 
 ---
 
-## D5 — The calling convention is SHARE-PLACE by default (restore mutability.md); do not revert to move
+## D5 — Historical SHARE-PLACE free-parameter design — SUPERSEDED
 
 **Date:** 2026-07-05
-**Status:** Accepted — CANONICAL, load-bearing, protected
-**Spec:** `docs/completed/mutability.md` (authoritative) · **Deciders:** Eric (BDFL, original author of the design)
+**Status:** Superseded. The current BDFL ruling is specification §3.8:
+`&T` borrows and plain `T` consumes; the signature states the mode.
+**Historical design:** `docs/completed/mutability.md` · **Deciders:** Eric (BDFL)
 
-### Decision
+### Supersession
 
-With's calling convention for a non-`Copy` value passed `f(x)` is an **ephemeral
-shared-place alias**: the callee operates on the **caller's** place (reads and
-mutations are caller-visible), the caller retains ownership, and the destructor
-runs in the caller's scope. `move`/`copy` at the call site are required **only**
-when the callee's inferred effect summary on that parameter is `consume` or
-`escape_value`; `escape_view` is governed by view-origin lifetime tracking. This
-is the full model in `docs/completed/mutability.md` (effect summaries, the
-Copy/non-Copy split, receiver modes `&self`/`mut self`/`move self`, `&T` niche,
-`@[effect(...)]` pinning). It is authoritative.
+Free-function SHARE-PLACE is retired. A read-only or view-producing parameter
+is declared `&T`; a plain `T` is owned by the callee and is consumed without a
+redundant call-site `move` annotation. Body-inferred effects remain analysis
+facts, but they do not reinterpret a declared ownership mode or silently move
+destructor timing between scopes. Auto-ref preserves the ergonomic call surface:
+callers write `peek(x)` for `peek(x: &T)` and `take(x)` for `take(x: T)`.
 
-### Why (Eric, verbatim intent)
+This supersession does **not** change receiver modes. `mut fn` still mutates its
+receiver place in place, `move fn` consumes it, and D21 pipeline place-threading
+remains current. `PassMode::IndirectPlace` remains an ABI mechanism for
+compiler-modeled borrowed places such as in-place receivers, never a
+source-level default for plain `T`; explicit `&T` has the ABI of its reference
+value.
 
-"mutability.md's shared-place design was my explicit design and will, and yes it
-was unique to With — a calling card, a statement of what With means. Subsequent
-agents have trampled it." The share-place default is the anti-ceremony mission
-made concrete: `bump(p)` mutates `p` with no `&mut` tax — Python-shaped
-ergonomics with static, borrow-checked safety. No systems reference does this
-(Vale/Rust move; Zig/Go copy); Python is the only prior art, and With makes it
-statically safe. This is the point of With.
+### Historical record — not current doctrine
 
-### The regression being corrected
+D5 previously made a plain non-`Copy` free parameter an inferred shared-place
+alias. The caller retained ownership, body effects selected borrowing versus
+transfer, and the design sought Python-shaped mutation without call-site
+reference syntax. That was an accepted design at the time and explains legacy
+effect summaries, `SHARE-PLACE` diagnostics, tests, and ABI comments.
 
-The implementation drifted to **move + callee-drop**: by-value non-`Copy` params
-are treated as consumed and dropped by the callee (`lower_fn_with_sig` schedules
-a value-drop for every non-Copy param; #605 treats a moved-in value as consumed;
-argument lowering `OK_MOVE`s non-Copy args). That is Rust/Vale semantics, not
-With's. It was a silent agent "simplification," and it is wrong.
-
-### Protection (this is the point of writing it down)
-
-- **Do not revert to move-by-default.** If a future agent finds by-value non-Copy
-  params being moved/consumed/callee-dropped by default, that is the bug to fix
-  toward share-place — never a behavior to preserve, extend, or re-introduce.
-- **Do not propose move-by-default or copy-by-default** as a "simplification,"
-  performance win, or Vale/Rust-alignment. The mission's "as safe as Rust" is a
-  safety bar; share-place meets it via effect summaries + borrow checking without
-  adopting Rust's move-by-default.
-- Before touching parameter passing, argument/call lowering, drop scheduling, or
-  effect inference, re-read `mutability.md` in full and preserve share-place.
-- CLAUDE.md "Language Design Philosophy" carries the standing guardrail.
-
-### Consequences (the implementation work)
-
-Restore the model end to end: infer per-parameter effect summaries
-(read/write/consume/escape_value/escape_view) from bodies; make the default
-non-Copy call a share-place borrow (pass a reference to the caller's place, no
-callee-drop, destructor in the caller's scope); require `move`/`copy` only for
-consume/escape_value; keep escape_view under view-origin tracking; the borrow
-checker enforces aliasing conflicts via effect summaries. Receiver modes and the
-`Copy` opt-in are already aligned (Cycle 1). Deferred follow-ons (the other
-receiver/param calls, queued bug fixes) are in
-`docs/resume_after_mutability_fixed.md`.
+That design is now void for free parameters. No instruction, protection,
+restoration task, or “canonical” claim from the former D5 text remains active.
+Do not restore it from history. The only retained lesson is provenance: source
+ownership must follow the current declared signature, while receiver modes and
+view-origin analysis continue under their own current rulings.
 
 ---
 

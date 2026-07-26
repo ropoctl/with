@@ -2,6 +2,12 @@
 
 **Best-effort migration from Go to With.**
 
+> **D22 status (2026-07-23): A new decision has been made, but implementation
+> is still in progress.** Owning-map `get` uniformly produces `Option[&V]`;
+> scalar Go map reads recover value ergonomics through contextual Copy
+> materialization, while non-Copy ownership requires explicit clone or removal.
+> Translator output must follow the specification, not current compiler gaps.
+
 Go and With occupy similar territory — simple languages for
 building servers, CLI tools, and infrastructure. The syntax
 translation is straightforward. The semantic gap is garbage
@@ -218,7 +224,7 @@ for k, v := range m { ... }
 // With
 var m = HashMap[str, i32].new()
 m.insert("key", 42)
-let v = m.get("key")          // returns Option[i32]
+let v = m.get("key")          // returns Option[&i32]
 m.remove("key")
 for (k, v) in m: ...
 ```
@@ -228,6 +234,12 @@ for (k, v) in m: ...
 `delete(m, key)` → `m.remove(key)`.
 Two-value map access `v, ok := m[key]` → `let v = m.get(key)`
 (Option encodes the `ok` boolean).
+
+The view contract is uniform for generic and concrete maps. An owned scalar
+target or scalar default establishes Copy materialization, so common Go code
+does not gain borrow ceremony. For a non-Copy `V`, the migrator must preserve a
+borrow, emit an explicit `.cloned()` when source semantics require a copy, or
+use `remove` only when the Go operation semantically consumes the entry.
 
 #### Control flow
 
@@ -362,13 +374,20 @@ with 15 lines of error checking becomes 3 lines.
 ```go
 func divide(a, b int) (int, error) { ... }  →  fn divide(a: i32, b: i32) -> Result[i32, Error]
 func minmax(s []int) (int, int) { ... }     →  fn minmax(s: &Vec[i32]) -> (i32, i32)
-func get(m map[K]V, k K) (V, bool) { ... }  →  fn get(m: &HashMap[K, V], k: K) -> Option[V]
+func get(m map[K]V, k K) (V, bool) { ... }  →  fn get(m: &HashMap[K, V], k: K) -> Option[&V]  // borrowed lookup
 ```
 
 **Heuristics:**
 - `(T, error)` → `Result[T, Error]`
 - `(T, bool)` → `Option[T]` (common in map lookups, type assertions)
 - Everything else → tuple
+
+The generic `(V, bool)` map idiom needs semantic classification. A function
+that merely forwards a borrowed map lookup returns `Option[&V]`. A function
+whose Go contract promises an independent `V` must either add the appropriate
+Copy/Clone requirement and materialize or clone, or accept an owned/mutable map
+and consume via `remove`. It is forbidden to claim an owned `Option[V]` while
+only borrowing the map.
 
 #### `defer`
 

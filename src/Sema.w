@@ -361,6 +361,19 @@ fn sema_effect_bits_text(bits: i32) -> str:
 
 // ── Sema state ───────────────────────────────────────────────────
 
+// D22 Stage 2: one semantic record for a shared-reference expression that an
+// independently resolved owned context will materialize. `exact_source_type`
+// remains &T. `owned_value_type` is T, and `target_type` is the destination
+// after any ordinary value coercion. A differing `post_copy_type` records that
+// final coercion explicitly for later MIR/backend consumption.
+type ContextualCopyAdjustment {
+    source_node: i32,
+    exact_source_type: i32,
+    owned_value_type: i32,
+    target_type: i32,
+    post_copy_type: i32,
+}
+
 type Sema {
     pool: InternPool,
     diags: DiagnosticList,
@@ -449,16 +462,18 @@ type Sema {
     effect_flow_edges: Vec[i32],
     effect_flow_projections: Vec[i32],
 
-    // #D5/P1 share-place: recorded plain (non-move/copy) non-Copy value arguments.
-    // A plain argument to a share-place param leaves ownership with the caller;
-    // a plain argument to an OWNED param (consume/escape_value → not
-    // value_ref_abi) is an ordinary ownership transfer per §3.8 — the consuming
-    // signature is the contract, so no call-site `move` spelling is required.
-    // Recorded in pass 1; liveness resolved post-fixpoint with COMPLETE effects.
-    // Stride-9 records: [arg_node, callee_sig, callee_pi, file_id, root_sym,
-    // field_sym, use_seq, loop_depth, liveness] — liveness stamped at body end
-    // (0=unknown, 1=last-use, 2=live-after); backs the `move-sites` analysis
-    // request (docs/deep-debugging-tools.md).
+    // #D5/P1 share-place: recorded plain (non-move/copy) non-Copy value arguments,
+    // flattened as 3-tuples [arg_node, callee_sig, callee_pi]. A plain argument is
+    // share-place (the caller keeps ownership); after effects finalize,
+    // `finalize_call_site_ownership` errors on any whose param is OWNED
+    // (consume/escape_value → not value_ref_abi), requiring an explicit
+    // `move`/`copy`. Recorded in pass 1, resolved post-fixpoint so the ownership
+    // verdict uses COMPLETE effects (a forward-ref owned param must not slip
+    // through as share-place — that would be a double-free).
+    // Stride-8 records: [arg_node, callee_sig, callee_pi, file_id, root_sym,
+    // use_seq, loop_depth, liveness] — liveness stamped at body end (0=unknown,
+    // 1=last-use, 2=live-after); backs the `move-sites` analysis request
+    // (docs/deep-debugging-tools.md).
     consume_call_sites: Vec[i32],
     // move-sites: use sequencing. ONE persistent map per key kind, one owner —
     // bodies are separated by an epoch packed into every value (epoch*2^32 +
@@ -805,8 +820,12 @@ type Sema {
     comp_resolved: HashMap[i32, i32],
     // Surviving generic comptime-if wrapper node → selected branch node.
     comptime_selected_branches: HashMap[i32, i32],
-    // Pipeline method calls: NK_PIPELINE node → method-name symbol.
+    // Pipeline method calls: NK_PIPELINE node → method-name symbol. D21 keeps
+    // the ordinary call result separate from the value carried to the next
+    // stage: carrier kind 1 threads the receiver place, 0 threads the result.
     pipeline_method_calls: HashMap[i32, i32],
+    pipeline_call_return_types: HashMap[i32, i32],
+    pipeline_carrier_kinds: HashMap[i32, i32],
     // Operator method calls: NK_BINARY node -> resolved function symbol, plus
     // node -> 1 when the right operand is the receiver.
     operator_method_calls: HashMap[i32, i32],
@@ -833,9 +852,11 @@ type Sema {
     // consumed by MirLower.lower_call_arg to borrow the place instead of
     // moving the collection.
     slice_coerce_args: HashMap[i32, i32],
-    // Shared-reference call argument node -> checked reference type when its
-    // Copy pointee is passed by value.
-    auto_copy_ref_args: HashMap[i32, i32],
+    // D22 Stage 2 contextual-Copy decisions. The node map indexes the single
+    // structured record consumed by later stages; expression type inference
+    // never reads this sidecar and therefore remains exact.
+    contextual_copy_adjustment_indices: HashMap[i32, i32],
+    contextual_copy_adjustments: Vec[ContextualCopyAdjustment],
     // #604 stage 1: >0 while resolving a function-signature parameter type —
     // the only position where `[]mut T` is legal in this release.
     in_param_type_position: i32,
@@ -1326,6 +1347,21 @@ fn sema_clone_i32_vec(values: &Vec[i32]) -> Vec[i32]:
     let out: Vec[i32] = Vec.new()
     for i in 0..values.len() as i32:
         out.push(values.get(i as i64))
+    out
+
+// Deep-clone a HashMap[str, str] so the destination owns independent backing
+// arrays and string payloads. A plain `dst = src.field` only shallow-copies the
+// map header, leaving both maps pointing at one buffer — two owners that
+// double-free at teardown (Zcu.c_import_omitted_symbols aliased into the round's
+// Sema was exactly this bug). Mirrors sema_clone_str_vec's owned-text policy.
+fn sema_clone_str_str_hashmap(src: &HashMap[str, str]) -> HashMap[str, str]:
+    var out: HashMap[str, str] = HashMap.new()
+    let ks = src.keys()
+    for i in 0..ks.len() as i32:
+        let k = ks.get(i as i64)
+        let v = src.get(k)
+        if v.is_some():
+            out.insert(sema_owned_text(k), sema_owned_text(v.unwrap()))
     out
 
 impl Sema:
@@ -1936,6 +1972,8 @@ fn sema_empty_state(pool: InternPool, diags: DiagnosticList, ast: AstPool) -> Se
         comp_resolved: sema_new_map_i32_i32(),
         comptime_selected_branches: sema_new_map_i32_i32(),
         pipeline_method_calls: sema_new_map_i32_i32(),
+        pipeline_call_return_types: sema_new_map_i32_i32(),
+        pipeline_carrier_kinds: sema_new_map_i32_i32(),
         operator_method_calls: sema_new_map_i32_i32(),
         operator_method_reversed: sema_new_map_i32_i32(),
         try_continue_tys: sema_new_map_i32_i32(),
@@ -1952,7 +1990,8 @@ fn sema_empty_state(pool: InternPool, diags: DiagnosticList, ast: AstPool) -> Se
         autoderef_step_starts: sema_new_map_i32_i32(),
         autoderef_step_counts: sema_new_map_i32_i32(),
         slice_coerce_args: sema_new_map_i32_i32(),
-        auto_copy_ref_args: sema_new_map_i32_i32(),
+        contextual_copy_adjustment_indices: sema_new_map_i32_i32(),
+        contextual_copy_adjustments: Vec.new(),
         in_param_type_position: 0,
         autoderef_step_fns: Vec.new(),
         autoderef_step_tys: Vec.new(),
@@ -2110,7 +2149,7 @@ fn sema_empty_state(pool: InternPool, diags: DiagnosticList, ast: AstPool) -> Se
     return s
 
 fn Sema.placeholder(pool: InternPool, diags: DiagnosticList, ast: AstPool) -> Sema:
-    return sema_empty_state(pool, diags, ast)
+    return sema_empty_state(pool, move diags, ast)
 
 // #602: mark param `idx` of extern/c_import fn `name_sym` as retaining its ptr.
 impl Sema:
@@ -2197,7 +2236,7 @@ impl Sema:
             self.register_retains_entry(self.ast.get_extra(ep + i))
 
 fn Sema.init(pool: InternPool, diags: DiagnosticList, ast: AstPool) -> Sema:
-    var s = sema_empty_state(pool, diags, ast)
+    var s = sema_empty_state(pool, move diags, ast)
 
     // Index 0 = error type (sentinel).
     s.add_type(TypeKind.TY_ERR, 0, 0, 0)
@@ -3172,10 +3211,11 @@ impl Sema:
                 continue
             let te_start = self.type_d1.get(ti as i64)
             if self.type_extra_matches(te_start, args, arg_count) != 0:
-                // interior-mut cache: HashMap is a stable heap handle, so inserting
-                // through a copy of the handle keeps `self` a read borrow (D7).
-                var gic = self.generic_inst_cache
-                gic.insert(key, ti)
+                // Memoize the resolved instance. Mutate the cache in place; do
+                // NOT bind `self.generic_inst_cache` into a local — that shallow-
+                // copies the handle and schedules a drop that frees `self`'s
+                // buffer at scope end (aliasing XOR mutation; §2.5.1 / D7).
+                self.generic_inst_cache.insert(key, ti)
                 return ti as TypeId
         0 as TypeId
 
@@ -4762,18 +4802,19 @@ impl Sema:
         let tk = self.get_type_kind(resolved)
         if tk == TypeKind.TY_GENERIC_INST:
             let base_sym = self.get_generic_inst_base(resolved as i32)
-            // A5 (#606): a std Vec[T] needs drop iff its element T needs drop. POD-element
-            // Vecs (Vec[i32], Vec[str], …) stay non-drop — freeing those buffers is the
-            // separate wide flip, not element drop. str is Copy, so Vec[str] is non-drop.
+            // #691/D18 (supersedes A5/#606): every Vec owns and frees its heap
+            // buffer at scope end — ownership is a property of the handle, not
+            // its contents (§2.5.1). Element drops still run only when the
+            // element type needs them; a POD-element Vec's drop is just the
+            // buffer free.
             if base_sym == self.syms.vec:
-                return self.type_needs_drop(self.get_generic_inst_arg(resolved as i32, 0))
+                return 1
             let base_name = self.pool_resolve(base_sym)
             if base_name == "Sender" or base_name == "Receiver":
                 return 1
         if self.needs_drop_visit.contains(resolved as i32):
             return 0
-        var __ndv_in = self.needs_drop_visit
-        __ndv_in.insert(resolved as i32)
+        self.needs_drop_visit.insert(resolved as i32)
         var result = 0
         if tk == TypeKind.TY_TUPLE:
             let te_start = self.get_type_d0(resolved)
@@ -4802,8 +4843,7 @@ impl Sema:
                             result = 1
                             break
                     vidx = vidx + 1
-        var __ndv_out = self.needs_drop_visit
-        let _ = __ndv_out.remove(resolved as i32)
+        let _ = self.needs_drop_visit.remove(resolved as i32)
         result
 
     mut fn emit_implicit_drop_view_use_error(view_sym: i32, origin_sym: i32, origin_node: i32):
@@ -4819,7 +4859,7 @@ impl Sema:
         if origin_node != 0:
             diag.add_label(Span { file: self.local_file_id, start: self.ast.get_start(origin_node), end: self.ast.get_end(origin_node) }, "`" ++ origin_name ++ "` is destroyed before `" ++ view_name ++ "` drops")
         diag.add_help("declare `" ++ view_name ++ "` after `" ++ origin_name ++ "`, or clear/drop `" ++ view_name ++ "` before `" ++ origin_name ++ "` goes out of scope")
-        self.diags.emit(diag)
+        self.diags.emit(move diag)
 
     mut fn emit_returned_view_origin_use_error(view_sym: i32, use_node: i32):
         let origin_sym = self.binding_poisoned_origin_sym(view_sym)
@@ -4839,7 +4879,7 @@ impl Sema:
         if use_node != 0:
             diag.add_label(Span { file: self.local_file_id, start: self.ast.get_start(use_node), end: self.ast.get_end(use_node) }, "view is used here after a possible origin died")
         diag.add_help("copy the data out before the origin's scope ends, or declare `" ++ origin_name ++ "` in the outer scope")
-        self.diags.emit(diag)
+        self.diags.emit(move diag)
 
     fn binding_decl_node(sym: i32) -> i32:
         if self.binding_decl_nodes.contains(sym):
@@ -5361,12 +5401,8 @@ impl Sema:
             else if declared == ReceiverMode.Read and required_mode != "read":
                 let keyword = if required_mode == "mut": "mut fn" else: "move fn"
                 self.emit_error(f"read receiver is too weak; compiler effects require `{keyword}` for '{name}'", node)
-            // D21: a `mut fn` receiver may thread its place through consuming
-            // pipeline calls (take-and-return stays an in-place update of the
-            // receiver place), so a declared Mut receiver is never escalated to
-            // `move fn` here. The current effect fixpoint over-approximates
-            // those pipelines as consume/escape; the place-threading analysis
-            // that re-tightens this check lands with the D21 implementation.
+            else if declared == ReceiverMode.Mut and required_mode == "move":
+                self.emit_error(f"mut receiver is too weak; compiler effects require `move fn` for '{name}'", node)
 
 fn receiver_required_mode_text(eff: i32) -> str:
     if (eff & (EFF_CONSUME | EFF_ESCAPE_VALUE)) != 0: return "move"
@@ -5581,12 +5617,30 @@ impl Sema:
                     self.consume_call_sites.set_i32((i + 8) as i64, verdict)
             i = i + 9
 
-    // #D5 superseded (§3.8): the consuming signature is the authoritative
-    // ownership contract, so a plain non-Copy argument to an owned parameter
-    // is an ordinary ownership transfer — `move x`/`copy x` remain explicit
-    // spellings of intent, never required ceremony. The recorded stride-9
-    // sites still carry the liveness verdicts that back the `move-sites`
-    // analysis request; no call-site diagnostic is emitted.
+    // #D5/P1: with effects + share-place ABI final, a plain non-Copy argument passed
+    // to an OWNED parameter (consume/escape_value → not share-place) must be given up
+    // explicitly. Emit the "requires move/copy" error for each such NAMED binding
+    // (an rvalue is consumed directly and needs nothing). Runs after
+    // assign_share_place_abi so the share-place verdict is complete — never
+    // mis-classifying a forward-reference owned param as share-place.
+    mut fn finalize_call_site_ownership():
+        let n = self.consume_call_sites.len() as i32
+        var i = 0
+        while i + 8 < n:
+            let arg_node = self.consume_call_sites.get(i as i64)
+            let callee_sig = self.consume_call_sites.get((i + 1) as i64)
+            let callee_pi = self.consume_call_sites.get((i + 2) as i64)
+            let file_id = self.consume_call_sites.get((i + 3) as i64)
+            i = i + 9
+            // share-place param: the caller keeps ownership; no transfer needed.
+            // D5 call-site `move` ceremony retired (spec §3.8: a plain call f(x)
+            // is always legal; a consuming signature never requires a redundant
+            // call-site `move`). The transfer is decided by the callee signature,
+            // not by a spelling at the call site, so this site emits no diagnostic.
+            if self.sig_param_uses_value_ref_abi(callee_sig, callee_pi) != 0:
+                continue
+            let _ = arg_node
+            let _ = file_id
 
     fn get_sig(name: i32) -> i32:
         if self.sig_lookup.contains(name):
@@ -5860,11 +5914,10 @@ impl Sema:
         self.fixpoint_effect_flow()
         self.finalize_receiver_requirements()
         self.enforce_receiver_modes()
-        // #D5/P1: classify share-place params (IndirectPlace) from the final
-        // effect. §3.8: the consuming signature is the ownership contract, so
-        // plain args to owned params transfer ownership without call-site
-        // `move` ceremony — no post-fixpoint call-site diagnostic runs.
+        // #D5/P1: classify share-place params (IndirectPlace) from the final effect,
+        // then require explicit move/copy for plain args to owned params.
         self.assign_share_place_abi()
+        self.finalize_call_site_ownership()
         self.check_reachable_comptime_errors()
 
     mut fn prepare_for_comptime_transform():
@@ -5985,7 +6038,7 @@ impl Sema:
         diag.set_origin(origin_file, origin_fn, origin_line as i32, node)
         if suggestion.len() > 0:
             diag.add_help("did you mean '" ++ suggestion ++ "'?")
-        self.diags.emit(diag)
+        self.diags.emit(move diag)
 
     // ── Type compatibility ───────────────────────────────────────────
 
@@ -6517,8 +6570,7 @@ impl Sema:
             // Break copy-check recursion on cyclic type graphs.
             if self.copy_visit_stack.contains(resolved as i32):
                 return 0
-            var __cvs_in = self.copy_visit_stack
-            __cvs_in.insert(resolved as i32)
+            self.copy_visit_stack.insert(resolved as i32)
 
             var out = 1
             if tk == TypeKind.TY_ARRAY:
@@ -6533,8 +6585,7 @@ impl Sema:
             else: // TypeKind.TY_RANGE
                 out = self.is_copy(self.get_type_d0(resolved))
 
-            var __cvs_out = self.copy_visit_stack
-            let _ = __cvs_out.remove(resolved as i32)
+            let _ = self.copy_visit_stack.remove(resolved as i32)
             return out
         if tk == TypeKind.TY_ENUM:
             // Enums are non-Copy by default; opt-in via `impl Copy for T`.
@@ -6569,8 +6620,7 @@ impl Sema:
             return self.drop_method_cache.get(type_name).unwrap()
 
         let has = self.select_trait_impl(type_name, self.syms.drop)
-        var __dc = self.drop_method_cache
-        __dc.insert(type_name, has)
+        self.drop_method_cache.insert(type_name, has)
         has
 
     fn record_drop_consumed_field(owner_sym: i32, field_sym: i32):

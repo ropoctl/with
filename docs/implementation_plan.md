@@ -1,5 +1,13 @@
 # Implementation Plan for Open Issue Campaign
 
+> **D22 override (2026-07-23): A new decision has been made, but implementation
+> is still in progress.** This older issue ordering does not contain the D22
+> implementation design. `docs/d22-Eric-Ruling.md` is canonical and complete;
+> specification v7.2, requirements, and `docs/decisions.md` D22 are derivative.
+> The approved sequence is `docs/d22-implementation-plan.md`, which may organize
+> the work but cannot amend the ruling. Do not fold D22 into an old issue by
+> analogy.
+
 This plan orders the enriched open issues so implementation can proceed without
 building features on unstable semantic ground. It is intentionally conservative:
 finish substrate and decision issues first, then high-impact correctness bugs,
@@ -30,7 +38,7 @@ install targets.
 These unblock later work by settling grammar/API questions and keeping the
 spec, requirements, and implementation inventories synchronized.
 
-- `#386` Regenerate docs/requirements.md against current spec v7.1
+- `#386` Maintain docs/requirements.md against current spec v7.2
 - `#410` Add the spec inventory gate (keywords/attributes/CLI/modules vs spec tables)
 - `#385` Stdlib uses an '=' body introducer not in §29.13 — spec it or migrate
 - `#381` Decide the spawn keyword: spec it or remove it
@@ -106,6 +114,7 @@ is stable.
 - `#444` Borrow checker Rule 7: implicit drop is a use (§21.1)
 - `#362` Make ephemerality provenance-tracked and modular
 - `#378` Implement returned-view origin tracking (§21.1 Rule 6) with the §22.3 diagnostic contract
+- `D22` Follow `docs/d22-implementation-plan.md`: transparent origins, uniform keyed-map views, contextual Copy/joins, explicit ownership boundaries, diagnostics, and cross-backend verification
 - `#477` Make stdlib guards and borrowed-data iterators canonically ephemeral (§5.3)
 - `#355` Make unproven ephemeral task escape a hard error
 - `#350` Implement position-based Task disposition semantics

@@ -1,12 +1,22 @@
 # The With Programming Language — Implementation Notes
 
-**Companion to:** Specification v6.5
+**Companion to:** Specification v7.2
 **Status:** Non-normative. Guidance for compiler and runtime engineers.
 **Scope:** Implementation strategies, trade-offs, and architectural
 decisions that do not affect language semantics.
 
 The spec defines *what* the language guarantees. This document explains
 *how* to implement those guarantees efficiently.
+
+> **D22 active delta (2026-07-23): A new decision has been made, but
+> implementation is still in progress.** Owning keyed-map lookup now has the
+> uniform `Option[&V]` contract, Copy materialization is contextual, patterns
+> preserve exact projected types, and transparent carriers preserve view
+> origins. Notes below that describe the current compiler are evidence about
+> implementation seams, not authority to retain non-compliant behavior. See
+> `docs/d22-Eric-Ruling.md` first: it is canonical and complete, and every
+> conflict in these non-normative notes is false. Specification §§3.4, 3.8,
+> 9.7, 10, 13.3, 21.1 and `decisions.md` D22 are conforming projections.
 
 ---
 
@@ -153,19 +163,22 @@ When a function returns an ephemeral value, the caller sees only:
 parameter is actually borrowed — it treats all of them conservatively.
 This is less precise than Rust but eliminates lifetime annotations.
 
-**Stdlib narrowing (spec §21.1 Rule 6):** The compiler has built-in
-knowledge of standard library types (HashMap, Vec, slice iterators,
-etc.) and correctly narrows the borrow to the relevant parameter. For
-example, `HashMap.get(&self, key: &K) -> Option[&V]` borrows only
-from `&self`, not from `key`. The stdlib achieves this via `unsafe`
-internally — users never see it. The compiler encodes this knowledge
-as a whitelist of stdlib function signatures with explicit borrow
-provenance annotations.
+**Stdlib narrowing and transparent propagation (spec §21.1 Rules 6 and 10;
+D22):** The compiler may seed a precise origin for a standard-library producer.
+For example, `HashMap.get(&self, key: &K) -> Option[&V]` borrows only from
+`&self`, not from `key`. That producer classification is only the start of the
+proof. The origin must then survive every transparent carrier, payload
+projection, pattern, `?`, `??`, and Option/Result eliminator until an explicit
+ownership boundary creates an independent value.
 
-**Implementation:** The borrow checker maintains a mapping from known
-stdlib function signatures to their precise borrow outputs. When a
-call to a known function is encountered, the borrow checker uses the
-precise provenance instead of the conservative all-inputs default.
+**Current non-compliance and TODO:** The current checker contains special
+knowledge for selected producers, but does not yet implement D22's general
+transparent-carrier transfer. In particular, a producer origin can be lost at
+an Option eliminator. Do not add another eliminator whitelist. The implementation
+must follow `docs/d22-implementation-plan.md` and use one semantic
+origin-transfer mechanism shared by all equivalent spellings. It must prove
+both rejection and non-rejection controls from §21.1 Rule 10 before this note is
+marked compliant.
 
 For user code, the conservative default applies. The precision loss
 is small in practice. It occasionally forces a programmer to
@@ -3441,6 +3454,38 @@ runtime — a dynamic backstop for any retention the static check cannot see.
 References: Go's cgo pointer contract + `cgocheck` dynamic enforcement (adopted:
 contract + debug-mode teeth); Rust unsafe-docs-only and Zig manual (rejected: no
 guardrail). See decisions.md D4.
+
+## 63. D22 Doctrine-to-Implementation Seam Inventory (implementation in progress)
+
+**Status (2026-07-23): A new decision has been made, but implementation is
+still in progress.** This section records where the current implementation must
+be reconciled with `docs/d22-Eric-Ruling.md`, the canonical and complete ruling.
+The approved architecture and sequence are in
+`docs/d22-implementation-plan.md`; this non-normative inventory names the
+cross-layer seams that plan must close and cannot amend either document.
+
+- **Lookup contracts:** HashMap, BTreeMap, comptime evaluation, native LLVM,
+  emit-C, and runtime paths must all agree that `get` observes through
+  `Option[&V]` and `remove` transfers through `Option[V]`.
+- **Contextual materialization:** expected-type propagation, returns,
+  assignments, call arguments, operators, method receivers, and heterogeneous
+  joins must share the §3.8 owned-demand rule. Inference-only contexts and
+  pattern projection must preserve `&T`.
+- **Joins:** `??`, `if`, `match`, and collection/tuple construction must use one
+  deterministic join operation, including origin unions when the joined result
+  remains a view and diagnostic notes when reaching arms materialize.
+- **Origin transfer:** Option/Result construction, `Some`/`Ok` projection,
+  patterns, `?`, `??`, `unwrap`, `expect`, `unwrap_or`, and equivalent builtin
+  lowering must preserve origin sets as transparent semantic data rather than
+  lose them at temporary or intrinsic boundaries.
+- **Ownership boundaries:** contextual Copy materialization, explicit cloning,
+  and consuming removal end an origin only for the newly independent owned
+  result. They do not erase origins from sibling values or source carriers.
+- **Diagnostics:** mutation-after-view and non-Copy owned-default failures need
+  the normative diagnostics and applicability-checked remedies from §22.3.
+- **Acceptance evidence:** the excluded D22 NON-COMPLIANT fixture matrix is the
+  versioned statement of intent. It must not enter an active green lane until
+  each expected verdict is actually implemented.
 
 ---
 

@@ -1,6 +1,9 @@
 # The Four Disciplines — memory-model framing note
 
-Status: adopted as a framing note (BDFL, 2026-07-21). Restructuring §1.4 of
+Status: adopted as a framing note (BDFL, 2026-07-21), amended by D21's
+receiver-return and pipeline ruling (2026-07-22) and D22's uniform map-view,
+contextual-Copy, and transparent-origin ruling (2026-07-23). D22 is normative
+but implementation is still in progress. Restructuring §1.4 of
 the specification around this taxonomy is deliberately deferred until the
 Sema-split campaign has stress-tested it: if "is this monotone or linear?"
 turns out to be the question that resolves that campaign's design forks, the
@@ -56,6 +59,12 @@ monolith.
   whole root. Copy-typed projections keep the promotion: escaping a copied
   pointer field captures the root's content by aliasing, and nothing is
   blanked.
+- **A mutable borrow cannot duplicate its linear root into an owned return**
+  (D21). A `mut fn` may transfer a projection only when D17/reset-on-move
+  blanks that projection; returning the whole non-Copy receiver while its
+  caller retains the root place would create two owners. Unit-returning mutator
+  pipeline stages therefore keep carrying the one receiver place rather than
+  manufacturing an owned receiver return.
 - **`move` is rvalue-uniform and callee-independent** (D16): after
   `f(move x)` the binding is invalid and the value is destroyed or
   transferred by the end of the statement, whatever the callee's inferred
@@ -63,6 +72,18 @@ monolith.
 - **A monotone handle inside a linear value** (the pools inside `Sema`) is
   ordinary: the handle is just a Copy value; the discipline lives in the
   context type's API, not at the use site.
+- **An ephemeral view remains ephemeral through transparent carriers** (D22).
+  `Option`, `Result`, patterns, `?`, `??`, and eliminators reorganize access but
+  do not mint independence; their outputs retain the union of reaching origins.
+  Temporaries and lowering artifacts are not ownership boundaries.
+- **Contextual Copy materialization is the ephemeral-to-linear seam** (D22).
+  A shared `&T` stays a view during inference and structural projection. Only
+  established owned-value demand may copy a `Copy` pointee into a new origin-free
+  value. Explicit clone and consuming transfer are the corresponding non-Copy
+  ownership boundaries.
+- **Keyed-map lookup observes; removal transfers** (D22). `HashMap.get` and
+  `BTreeMap.get` uniformly return `Option[&V]`; `remove` returns `Option[V]`.
+  Copy-ness never changes the public lookup signature.
 
 ## Open question (BDFL, after the Sema split)
 

@@ -5,7 +5,7 @@ comptime fn i32_pop_val() -> i32:
     v.push(10)
     v.push(20)
     v.push(30)
-    v.pop()
+    v.pop().unwrap()
 
 comptime fn i32_pop_remaining() -> Vec[i32]:
     var v = Vec[i32].new()

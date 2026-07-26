@@ -157,7 +157,17 @@ pub fn build_graph_assemble_to_object(root: str, target: &BuildGraphTarget) -> i
     if build_graph_rt_mkdir_p(output_dir) != 0:
         build_graph_rt_eprint("error: could not create object output directory for target '" ++ target.name ++ "': " ++ output_dir)
         return 1
-    let rc = build_graph_rt_assemble_to_object(source_path, output_path)
+    // An optional `triple=<llvm-triple>` arg assembles for that target
+    // instead of the host (cross-target runtime objects).
+    var asm_triple = ""
+    if target.args.len() > 0:
+        let arg0 = target.args.get(0)
+        if arg0.starts_with("triple="):
+            asm_triple = arg0.slice(7, arg0.len())
+    let rc = if asm_triple.len() > 0:
+        build_graph_rt_assemble_to_object_for_triple(source_path, output_path, asm_triple)
+    else:
+        build_graph_rt_assemble_to_object(source_path, output_path)
     if rc != 0:
         build_graph_rt_eprint("error: compile_asm_object target '" ++ target.name ++ "' failed")
     rc
@@ -287,8 +297,17 @@ pub fn build_graph_embed_object_files(root: str, target: &BuildGraphTarget) -> i
     var has_darwin_runtime = false
     var has_linux_runtime = false
     var has_windows_runtime = false
-    if build_graph_host_target_kind() == 3 or build_graph_host_target_kind() == 4:
+    // The embed target's entry names the PLATFORM the assembly is for
+    // (e.g. "linux_x86_64" for a cross-built compiler); empty = host.
+    var macho_sections = build_graph_host_target_kind() == 3 or build_graph_host_target_kind() == 4
+    var coff_sections = build_graph_host_target_kind() == 5
+    if target.entry.len() > 0:
+        macho_sections = target.entry.starts_with("darwin")
+        coff_sections = target.entry.starts_with("windows")
+    if macho_sections:
         asm_text = asm_text ++ ".section __TEXT,__const\n.subsections_via_symbols\n\n"
+    else if coff_sections:
+        asm_text = asm_text ++ ".section .rdata,\"dr\"\n\n"
     else:
         asm_text = asm_text ++ ".section .rodata\n\n"
     for ii in 0..target.inputs.len() as i32:

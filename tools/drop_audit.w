@@ -14,8 +14,8 @@
 //                                   # baseline=installed `with`
 //
 // Verdicts: PASS | LEAK | DOUBLE-FREE | VALUE-FAIL | COMPILE-FAIL | RUN-FAIL.
-// POD-container cells EXPECT leak-count>0 while A5/#608 stands (the #691
-// wide flip lands by flipping those expectations to PASS).
+// POD-container cells expect CLEAN allocator verdicts (#691/D18: every Vec
+// frees its buffer at scope exit and on reassignment).
 // Run BEFORE and AFTER any change to drop scheduling, ownership lowering,
 // or receiver modes (CLAUDE.md gate).
 
@@ -65,7 +65,7 @@ fn resource_prelude() -> str:
     "    unsafe { R { id: id, ptr: with_alloc(16), slot: slot } }\n"
 
 // A cell: name, generated source, expected final drop-sum printed by main,
-// and whether the allocator must be clean (POD cells expect leaks, #608).
+// and whether the allocator must be clean (all cells, post-#691).
 type Cell { name: str, source: str, expect_sum: i32, expect_clean: bool }
 
 // `decls` holds the shape types and the `fn go(slot)` scenario; main just
@@ -163,6 +163,21 @@ fn sc_move_then_reassign(shape: str) -> str:
     "    a = " ++ shape_mk(shape, "2") ++ "\n" ++
     "    let _k = 0\n"
 
+// #691: an RHS call may consume and return the assignment target, so its
+// reset must precede drop-before-overwrite. A direct self-move is a no-op.
+fn sc_move_reassign_same_place(shape: str) -> str:
+    shape_decls(shape) ++
+    "fn normalize(x: " ++ shape_ty(shape) ++ ") -> " ++ shape_ty(shape) ++ ":\n" ++
+    "    var out = x\n" ++
+    "    out\n" ++
+    "fn go(slot: *mut i32):\n" ++
+    "    var a" ++ shape_ann(shape) ++ " = " ++ shape_mk(shape, "1") ++ "\n" ++
+    "    a = normalize(move a)\n" ++
+    "    a = move a\n" ++
+    "    for _i in 0..1:\n" ++
+    "        a = normalize(move a)\n" ++
+    "    let _k = 0\n"
+
 fn sc_consume_call(shape: str) -> str:
     shape_decls(shape) ++
     "fn eat(x: " ++ shape_ty(shape) ++ "):\n" ++
@@ -258,6 +273,27 @@ fn sc_partial_move() -> str:
     "    take(move tmp)\n" ++
     "    let _k = s.tag\n"
 
+// #706: a branch can remove a moved-field entry that predates its snapshot and
+// add a different entry without changing the entry count. Length-only restore
+// kept the replacement while truncating its path, causing an OOB read during
+// the next field move. The early return keeps runtime drop state path-local.
+fn sc_branch_move_state_identity() -> str:
+    "type Pair { a: R, b: R }\n" ++
+    "fn eat(x: R):\n" ++
+    "    let y = move x\n" ++
+    "fn go(slot: *mut i32):\n" ++
+    "    var pair = Pair { a: mk(1, slot), b: mk(2, slot) }\n" ++
+    "    var first = pair.a\n" ++
+    "    eat(move first)\n" ++
+    "    var take_branch = true\n" ++
+    "    if take_branch:\n" ++
+    "        pair.a = mk(3, slot)\n" ++
+    "        var second = pair.b\n" ++
+    "        eat(move second)\n" ++
+    "        return\n" ++
+    "    var fallback = pair.b\n" ++
+    "    eat(move fallback)\n"
+
 fn sc_recv_mut() -> str:
     "extend R:\n    mut fn poke(): self.id = self.id + 0\n" ++
     "fn go(slot: *mut i32):\n" ++
@@ -284,11 +320,11 @@ fn sc_vec_elem() -> str:
     "    v.push(mk(2, slot))\n" ++
     "    let _k = 0\n"
 
-// POD-container cells: pin the provisional A5/#608 status — the buffers do
-// NOT free, so the allocator verdict EXPECTS leaks until #691 flips this.
+// POD-container cells: #691/D18 — every Vec frees its buffer at scope exit
+// and on reassignment, so the allocator verdict must be CLEAN.
 fn pod_cell(name: str, body: str) -> Cell:
     let src = "fn main:\n" ++ body ++ "    print_i32(0)\n"
-    Cell { name: name, source: src, expect_sum: 0, expect_clean: false }
+    Cell { name: name, source: src, expect_sum: 0, expect_clean: true }
 
 fn build_cells() -> Vec[Cell]:
     var cells: Vec[Cell] = Vec.new()
@@ -322,6 +358,8 @@ fn build_cells() -> Vec[Cell]:
     cells.push(cell("consume_call/rcbare", sc_consume_call("rcbare"), 1))
     cells.push(cell("match_consume/enum", sc_match_consume(), 1))
     cells.push(cell("partial_move/field", sc_partial_move(), 1))
+    cells.push(cell("branch_move_state_identity/field", sc_branch_move_state_identity(), 6))
+    cells.push(cell("move_reassign_same_place/bare", sc_move_reassign_same_place("bare"), 1))
     // #697: share-place receiver field take (caller-side drop of the holder).
     cells.push(cell("field_take/field", sc_field_take("field", false), 1))
     cells.push(cell("field_take/boxfield", sc_field_take("boxfield", false), 1))
@@ -333,8 +371,8 @@ fn build_cells() -> Vec[Cell]:
     cells.push(cell("recv_move_consume/bare", sc_recv_move(), 1))
     cells.push(cell("recv_bare_self_replace/bare", sc_recv_replace(), 3))
     cells.push(cell("vec_elem_drop/vec", sc_vec_elem(), 3))
-    cells.push(pod_cell("pod_vec_scope_exit/EXPECT-LEAK", "    var v: Vec[i32] = Vec.new()\n    v.push(1)\n"))
-    cells.push(pod_cell("pod_vec_reassign/EXPECT-LEAK", "    var v: Vec[i32] = Vec.new()\n    v.push(1)\n    var w: Vec[i32] = Vec.new()\n    w.push(2)\n    v = w\n"))
+    cells.push(pod_cell("pod_vec_scope_exit/EXPECT-CLEAN", "    var v: Vec[i32] = Vec.new()\n    v.push(1)\n"))
+    cells.push(pod_cell("pod_vec_reassign/EXPECT-CLEAN", "    var v: Vec[i32] = Vec.new()\n    v.push(1)\n    var w: Vec[i32] = Vec.new()\n    w.push(2)\n    v = w\n"))
     cells
 
 // ── Runner ───────────────────────────────────────────────────────────────

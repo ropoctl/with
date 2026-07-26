@@ -33,6 +33,7 @@ use BuildGraphCache
 use compiler.DriverOptions
 use Analysis
 use ReceiverMigration
+use TargetSpec
 
 extern fn with_arg_count() -> i32
 extern fn with_arg_at(idx: i32) -> str
@@ -805,6 +806,11 @@ fn run_cli(argc: i32) -> i32:
         comp.configure(opt_level, no_std, alloc_mode, runtime_available)
         comp.set_prelude_mode(prelude_mode)
         comp.set_overflow_mode(driver_internal_overflow_mode())
+        let ir_target = driver_parse_build_target(argc)
+        if not ir_target.ok:
+            with_eprint("error: " ++ ir_target.error_msg)
+            return 1
+        comp.set_target_kind(ir_target.kind)
         let pool = comp.compile_file(source)
         if pool.decl_count() == 0:
             with_eprint("error: IR generation failed during compilation")
@@ -1448,31 +1454,31 @@ unsafe fn run_build_action_from_build_w(root: str, cfg: ProjectConfig, target: &
     if target.action_fn == 0:
         with_eprint("error: action target '" ++ target.name ++ "' is missing an evaluator action function")
         return build_action_run_result(1)
-    let result = comptime_eval_tool_action_result(sema_ptr, (*sema_ptr).ast, (*sema_ptr).pool, target.action_fn, cfg.package_name, cfg.package_version, root, target.name, target.inputs, target.output, target.extra_outputs, target.args, target.write_scopes, target.timeout_ms, target.cwd, target.env, target.network, if options.strict_effects: 1 else: 0)
+    let result = comptime_eval_tool_action_result(sema_ptr, (*sema_ptr).ast, (*sema_ptr).pool, target.action_fn, cfg.package_name, cfg.package_version, root, target.name, move target.inputs, target.output, target.extra_outputs, move target.args, target.write_scopes, target.timeout_ms, target.cwd, move target.env, target.network, if options.strict_effects: 1 else: 0)
     if result.runtime_exit_code != 0:
         if result.runtime_stderr.len() > 0:
             with_ewrite(result.runtime_stderr)
         with_eprint("error: action target '" ++ target.name ++ f"' failed with exit code {result.runtime_exit_code}")
-        return build_action_run_result_with_effects(result.runtime_exit_code, result.effect_records)
+        return build_action_run_result_with_effects(result.runtime_exit_code, move result.effect_records)
     if result.error_msg.len() > 0:
         with_eprint("error: action target '" ++ target.name ++ "' failed during comptime evaluation: " ++ result.error_msg ++ "\n")
-        return build_action_run_result_with_effects(1, result.effect_records)
+        return build_action_run_result_with_effects(1, move result.effect_records)
     if result.value.kind != ComptimeValueKind.CV_INT and result.value.kind != ComptimeValueKind.CV_BOOL:
         with_eprint("error: action target '" ++ target.name ++ "' did not return an integer exit code")
-        return build_action_run_result_with_effects(1, result.effect_records)
+        return build_action_run_result_with_effects(1, move result.effect_records)
     let rc = result.value.data0 as i32
     if rc != 0:
         with_eprint("error: action target '" ++ target.name ++ f"' failed with exit code {rc}")
-        return build_action_run_result_with_effects(rc, result.effect_records)
+        return build_action_run_result_with_effects(rc, move result.effect_records)
     if with_fs_file_exists(output_path) == 0:
         with_eprint("error: action target '" ++ target.name ++ "' did not produce declared output: " ++ output_path)
-        return build_action_run_result_with_effects(1, result.effect_records)
+        return build_action_run_result_with_effects(1, move result.effect_records)
     for oi in 0..target.extra_outputs.len() as i32:
         let extra_output = build_graph_resolve_project_path(root, target.extra_outputs.get(oi as i64))
         if with_fs_file_exists(extra_output) == 0:
             with_eprint("error: action target '" ++ target.name ++ "' did not produce declared output: " ++ extra_output)
-            return build_action_run_result_with_effects(1, result.effect_records)
-    build_action_run_result_with_effects(0, result.effect_records)
+            return build_action_run_result_with_effects(1, move result.effect_records)
+    build_action_run_result_with_effects(0, move result.effect_records)
 
 fn load_build_graph_from_build_w(root: str, cfg: &ProjectConfig, options: &BuildCommandOptions) -> BuildGraphLoadResult:
     // D19/#702: the evaluated graph is pure data; when the build sources,
@@ -1514,7 +1520,7 @@ fn load_build_graph_from_build_w(root: str, cfg: &ProjectConfig, options: &Build
         graph.ok = false
         graph.error_msg = eval_result.error_msg
         return BuildGraphLoadResult { graph, sema }
-    let materialized = materialize_build_graph_from_comptime(sema, eval_result.value, eval_result.extras)
+    let materialized = materialize_build_graph_from_comptime(move sema, eval_result.value, move eval_result.extras)
     build_cache_record_build_effects(root, eval_result.effect_records)
     build_cache_graph_write(root, graph_cache_key, &materialized.graph)
     BuildGraphLoadResult { graph: materialized.graph, sema: materialized.sema }
@@ -2128,9 +2134,10 @@ fn build_command_validate_target(options: &BuildCommandOptions, cfg: &ProjectCon
     if options.target_kind < 0:
         with_eprint("error: invalid with.toml: unsupported target.default '" ++ cfg.target_default ++ "'")
         return 1
-    // §18.5: non-native target selections must fail loudly until
-    // cross-target codegen/linking exists; never fall back to native.
-    if not build_graph_target_is_host(options.target_kind):
+    // §18.5: a non-native target selection either has a real cross
+    // path (target_spec_cross_supported) or fails loudly; it never
+    // falls back to native output.
+    if not build_graph_target_is_host(options.target_kind) and not target_spec_cross_supported(options.target_kind):
         with_eprint("error: cross-target build for '" ++ build_graph_target_name(options.target_kind) ++ "' is not implemented yet; host is " ++ build_graph_target_name(build_graph_host_target_kind()))
         return 1
     0
@@ -2371,7 +2378,7 @@ fn dump_ast(source_file: str, no_std: bool, alloc_mode: bool, include_header: bo
     let tokens = lexer.tokenize()
     var intern = InternPool.init()
     var diags = DiagnosticList.init()
-    var parser = Parser.init(tokens, text, 0, intern, diags)
+    var parser = Parser.init(move tokens, text, 0, intern, move diags)
     let pool = parser.parse_module()
     intern = parser.intern
     diags = parser.diags
@@ -2650,7 +2657,7 @@ fn discover_test_functions(text: str) -> TestDiscovery:
     let tokens = lexer.tokenize()
     var intern = InternPool.init()
     var diags = DiagnosticList.init()
-    var parser = Parser.init(tokens, text, 0, intern, diags)
+    var parser = Parser.init(move tokens, text, 0, intern, move diags)
     let pool = parser.parse_module()
     intern = parser.intern
     diags = parser.diags
@@ -2681,7 +2688,7 @@ fn discover_bench_functions(text: str) -> BenchDiscovery:
     let tokens = lexer.tokenize()
     var intern = InternPool.init()
     var diags = DiagnosticList.init()
-    var parser = Parser.init(tokens, text, 0, intern, diags)
+    var parser = Parser.init(move tokens, text, 0, intern, move diags)
     let pool = parser.parse_module()
     intern = parser.intern
     diags = parser.diags

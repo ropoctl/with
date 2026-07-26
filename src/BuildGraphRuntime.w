@@ -27,6 +27,7 @@ extern fn with_clock_nanos() -> i64
 extern fn with_write(s: str) -> Unit
 extern fn with_eprint(s: str) -> Unit
 extern fn wl_assemble_to_object(source_path: str, output_path: str) -> i32
+extern fn wl_assemble_to_object_for_triple(source_path: str, output_path: str, triple: str) -> i32
 extern fn wl_compile_ir_to_object(source_path: str, output_path: str) -> i32
 
 pub fn build_graph_rt_exec_argv(args: str) -> i32:
@@ -94,6 +95,9 @@ pub fn build_graph_rt_write_file(path: str, data: str) -> i32:
 
 pub fn build_graph_rt_assemble_to_object(source_path: str, output_path: str) -> i32:
     wl_assemble_to_object(source_path, output_path)
+
+pub fn build_graph_rt_assemble_to_object_for_triple(source_path: str, output_path: str, triple: str) -> i32:
+    wl_assemble_to_object_for_triple(source_path, output_path, triple)
 
 pub fn build_graph_rt_compile_ir_to_object(source_path: str, output_path: str) -> i32:
     wl_compile_ir_to_object(source_path, output_path)

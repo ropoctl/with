@@ -1,12 +1,18 @@
-# Share-Place Restoration — Working Plan
+# Share-Place Restoration — Historical Plan (Superseded)
 
-Restoring `docs/completed/mutability.md` (canonical; see `decisions.md` D5,
-CLAUDE.md guardrail). The effect-summary layer already exists and is complete;
-the drift is that lowering/ABI ignore it and hard-code move+callee-drop for every
-non-`Copy` value param. **Directive (Eric, 2026-07-05): REMOVE the move-by-default
-vestiges — do not gate them — so no future agent is tempted to restore them.**
+> **SUPERSEDED (2026-07-23). Do not execute this plan.** Specification §3.8
+> states the current rule: `&T` borrows and plain `T` consumes. The historical
+> implementation details below are retained only to explain existing code and
+> commits; they are not a backlog. Every “canonical,” “directive,” phase, and
+> imperative below is void. For D22, `docs/d22-Eric-Ruling.md` is canonical and
+> every conflict here is false.
 
-## Target semantics (from the doc)
+The historical target was to restore `docs/completed/mutability.md`, which was
+then treated as canonical under D5. The plan regarded effect summaries as
+complete and move+callee-drop as drift. Its 2026-07-05 removal directive is
+recorded here only as superseded provenance and must not be executed.
+
+## Historical target semantics — superseded
 
 - Non-`Copy` `f(x)` default = **ephemeral shared-place alias**: callee gets a
   pointer to the caller's place, mutations are caller-visible, caller keeps
