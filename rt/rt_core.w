@@ -625,7 +625,7 @@ fn alloc_no_reuse_on() -> i32:
 let NEVER_FREE_DISABLED: i32 = 0
 let NEVER_FREE_ALWAYS: i32 = 1
 let NEVER_FREE_ENV: i32 = 2
-let NEVER_FREE_MODE: i32 = 1
+let NEVER_FREE_MODE: i32 = 0
 
 var never_free_state: i32 = 0       // env-mode cache: 0=unread,1=off,2=on
 
