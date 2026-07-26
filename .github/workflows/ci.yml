@@ -36,12 +36,19 @@ jobs:
 
       - name: Add swap headroom
         run: |
-          set -euo pipefail
-          sudo fallocate -l 24G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
+          # Best-effort: the runner already has an active /swapfile, so add a
+          # second one on the larger /mnt volume. Never fail the job over this.
+          set -uo pipefail
+          if sudo fallocate -l 20G /mnt/swapfile 2>/dev/null \
+             || sudo dd if=/dev/zero of=/mnt/swapfile bs=1M count=20480 status=none; then
+            sudo chmod 600 /mnt/swapfile
+            sudo mkswap /mnt/swapfile >/dev/null
+            sudo swapon /mnt/swapfile && echo "added 20G swap at /mnt/swapfile"
+          else
+            echo "warning: could not create extra swapfile; continuing"
+          fi
           free -h
+          swapon --show || true
 
       - name: libxml2 soname shim (ld.lld wants libxml2.so.16)
         run: |
