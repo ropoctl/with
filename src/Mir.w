@@ -524,7 +524,16 @@ impl MirModule:
             self.sema_type_d2.push(sema.type_d2.get(i as i64))
         for i in 0..sema.type_extra.len() as i32:
             self.sema_type_extra.push(sema.type_extra.get(i as i64))
-        self.sema_bitpacked_types = sema.bitpacked_types
+        // Deep-copy, never alias: `sema` is a borrow whose bitpacked_types buffer
+        // is owned by the caller's Sema (→ last_sema). A shallow handle assignment
+        // would share it with this MirModule (→ last_mir_module); both drop at
+        // teardown → double free. Same policy as the type Vecs above.
+        let bitpacked_keys = sema.bitpacked_types.keys()
+        for i in 0..bitpacked_keys.len() as i32:
+            let tid = bitpacked_keys.get(i as i64)
+            let flag = sema.bitpacked_types.get(tid)
+            if flag.is_some():
+                self.sema_bitpacked_types.insert(tid, flag.unwrap())
 
     fn mir_is_bitpacked(tid: i32) -> bool:
         self.sema_bitpacked_types.contains(tid)
