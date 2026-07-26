@@ -73,6 +73,16 @@ type MirBuilder = ephemeral {
     moved_field_path_syms: Vec[i32],
     stmt_temp_locals: Vec[i32],
     stmt_temp_starts: Vec[i32],
+    // Per-stmt-temp-frame baselines into pending_move_temp_locals /
+    // pending_reset_locals / pending_reset_field_places, captured at
+    // push_stmt_temp_frame. flush_stmt_temp_frame flushes only the deferred
+    // cleanup created WITHIN the frame — a nested frame (e.g. an `if`-condition
+    // inside a call argument) must not drop or blank an enclosing call's earlier
+    // move-arg-temps or moved-from sources, which are still read by the call
+    // emitted after the frame closes.
+    stmt_move_temp_starts: Vec[i32],
+    stmt_reset_starts: Vec[i32],
+    stmt_reset_field_starts: Vec[i32],
     pending_reset_locals: Vec[i32],
     // Field-place niche (Slice E): a conditionally-moved Drop-bearing field place
     // and its sema type, blanked at the branch/statement boundary so the owner's
@@ -178,6 +188,9 @@ fn MirBuilder.init(sema: &Sema, ast: AstPool, pool: InternPool, fn_sym: i32) -> 
         moved_field_path_syms: Vec.new(),
         stmt_temp_locals: Vec.new(),
         stmt_temp_starts: Vec.new(),
+        stmt_move_temp_starts: Vec.new(),
+        stmt_reset_starts: Vec.new(),
+        stmt_reset_field_starts: Vec.new(),
         pending_reset_locals: Vec.new(),
         pending_reset_field_places: Vec.new(),
         pending_reset_field_types: Vec.new(),
@@ -619,6 +632,9 @@ impl MirBuilder:
     fn push_stmt_temp_frame() -> i32:
         let depth = self.stmt_temp_starts.len() as i32
         self.stmt_temp_starts.push(self.stmt_temp_locals.len() as i32)
+        self.stmt_move_temp_starts.push(self.pending_move_temp_locals.len() as i32)
+        self.stmt_reset_starts.push(self.pending_reset_locals.len() as i32)
+        self.stmt_reset_field_starts.push(self.pending_reset_field_places.len() as i32)
         depth
 
     fn stmt_temp_needs_drop(type_id: i32) -> i32:
@@ -743,7 +759,30 @@ impl MirBuilder:
         while self.stmt_temp_locals.len() as i32 > start:
             self.stmt_temp_locals.pop()
         self.stmt_temp_starts.pop()
-        self.flush_pending_resets()
+        // Flush the deferred cleanup created WITHIN this frame only. An enclosing
+        // call's move-arg-temps and moved-from source resets (pushed before this
+        // frame opened) are still read by a call emitted after this frame closes —
+        // dropping a temp or blanking a source here would corrupt what the pending
+        // call reads. They flush at the outer statement boundary, after that call.
+        let move_temp_start =
+            if self.stmt_move_temp_starts.len() as i32 > 0:
+                let mts = self.stmt_move_temp_starts.get((self.stmt_move_temp_starts.len() as i32 - 1) as i64)
+                self.stmt_move_temp_starts.pop()
+                mts
+            else: 0
+        let reset_start =
+            if self.stmt_reset_starts.len() as i32 > 0:
+                let rs = self.stmt_reset_starts.get((self.stmt_reset_starts.len() as i32 - 1) as i64)
+                self.stmt_reset_starts.pop()
+                rs
+            else: 0
+        let reset_field_start =
+            if self.stmt_reset_field_starts.len() as i32 > 0:
+                let rfs = self.stmt_reset_field_starts.get((self.stmt_reset_field_starts.len() as i32 - 1) as i64)
+                self.stmt_reset_field_starts.pop()
+                rfs
+            else: 0
+        self.flush_pending_resets_since(reset_start, reset_field_start, move_temp_start)
 
     mut fn flush_pending_resets() -> Unit:
         self.flush_pending_resets_since(0, 0, 0)
