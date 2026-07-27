@@ -81,6 +81,12 @@ jobs:
           }
           # The SDK linker must load against the soname shim.
           "${LLVM_PREFIX}/bin/ld.lld" --version
+          # Expose the SDK's ld.lld on PATH for the build steps. The compiler
+          # emits `-fuse-ld=lld`, so gcc's collect2 searches PATH for `ld.lld`
+          # at every link; without it the first host-tool link (with-sha256)
+          # dies with "collect2: fatal error: cannot find 'ld'". The SDK bin
+          # ships no cc/gcc, so this does not shadow the host C driver.
+          echo "${LLVM_PREFIX}/bin" >> "$GITHUB_PATH"
 
       - name: Build stage1 (seed -> stage1)
         run: src/main build :stage1
