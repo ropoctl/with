@@ -19,7 +19,7 @@ jobs:
       # Bound aggregate parallelism so peak RSS fits a 16 GB runner (+ swap).
       WITH_BUILD_JOBS: "2"
       SEED_REPO: ropoctl/with
-      SEED_TAG: seed-08-d5bae558
+      SEED_TAG: seed-09-ac8193d5
       SEED_ASSET: with-linux-x86_64
       SDK_REPO: withlang-dev/with
       SDK_TAG: v0.15.1
