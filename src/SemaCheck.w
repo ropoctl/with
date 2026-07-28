@@ -2069,20 +2069,26 @@ impl Sema:
         "'" ++ self.pool_resolve(sym)
 
     fn save_label_registry() -> LabelRegistryState:
+        // `&self` cannot move, so naming a field here bit-copies its Vec
+        // header — aliasing the buffer `self` still owns. A closure nests
+        // save/reset/restore, so the inner reset frees a buffer the outer
+        // restore then drops again. Clone every Vec (as the effect-param
+        // save above already does) so the saved state owns independent
+        // backing; scalar fields are Copy.
         LabelRegistryState {
-            label_syms: self.fn_label_syms,
-            label_nodes: self.fn_label_nodes,
-            label_paths: self.fn_label_paths,
-            label_orders: self.fn_label_orders,
-            label_used: self.fn_label_used,
-            goto_syms: self.fn_goto_syms,
-            goto_nodes: self.fn_goto_nodes,
-            goto_paths: self.fn_goto_paths,
-            goto_orders: self.fn_goto_orders,
-            init_nodes: self.fn_init_nodes,
-            init_paths: self.fn_init_paths,
-            init_orders: self.fn_init_orders,
-            scope_stack: self.fn_label_scope_stack,
+            label_syms: sema_clone_i32_vec(&self.fn_label_syms),
+            label_nodes: sema_clone_i32_vec(&self.fn_label_nodes),
+            label_paths: sema_clone_str_vec(&self.fn_label_paths),
+            label_orders: sema_clone_i32_vec(&self.fn_label_orders),
+            label_used: sema_clone_i32_vec(&self.fn_label_used),
+            goto_syms: sema_clone_i32_vec(&self.fn_goto_syms),
+            goto_nodes: sema_clone_i32_vec(&self.fn_goto_nodes),
+            goto_paths: sema_clone_str_vec(&self.fn_goto_paths),
+            goto_orders: sema_clone_i32_vec(&self.fn_goto_orders),
+            init_nodes: sema_clone_i32_vec(&self.fn_init_nodes),
+            init_paths: sema_clone_str_vec(&self.fn_init_paths),
+            init_orders: sema_clone_i32_vec(&self.fn_init_orders),
+            scope_stack: sema_clone_i32_vec(&self.fn_label_scope_stack),
             next_scope_id: self.fn_label_next_scope_id,
             order_counter: self.fn_label_order_counter,
         }
