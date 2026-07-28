@@ -354,7 +354,7 @@ fn ret_host_bin(path: str) -> str:
 fn ret_release_compiler_path() -> str:
     ret_host_bin("out/release/bin/with")
 
-fn ret_stage_fixpoint_path(name: str) -> str:
+fn ret_stage_bin_path(name: str) -> str:
     "out/stage/bin/" ++ name
 
 fn ret_append_test_marker(ctx: &ActionCtx, combined: str, target_name: str, entry: str) -> str:
@@ -611,10 +611,11 @@ fn ret_require_test_green(ctx: &ActionCtx, compiler_sha: str) -> i32:
     0
 
 // D19: evidence is written once by the step that produces it and only read
-// thereafter. The fixpoint tier records what it verified — the fixpoint
-// object shas, bound to the exact release binary present at verification —
-// so the bless step never re-hashes or (worse) rebuilds fixpoint objects to
-// re-derive facts the fixpoint run already proved.
+// thereafter. The fixpoint tier records what it verified — the stage2 and
+// stage3 binary shas (byte-identical at fixpoint), bound to the exact release
+// binary present at verification — so the bless step never re-hashes or
+// (worse) rebuilds the stages to re-derive facts the fixpoint run already
+// proved.
 pub fn run_fixpoint_evidence_action(ctx: ActionCtx) -> i32:
     let fs = ctx.fs()
     if fs.mkdir_all("out/.build-state") != 0:
@@ -625,10 +626,10 @@ pub fn run_fixpoint_evidence_action(ctx: ActionCtx) -> i32:
     let compiler_sha = ret_sha256_file(ctx, "fixpoint-evidence-compiler", compiler_path)
     if compiler_sha.len() == 0:
         return ret_fail(ctx, "could not hash " ++ compiler_path)
-    let stage2_sha = ret_sha256_file(ctx, "fixpoint-evidence-stage2", ret_stage_fixpoint_path("with-stage2-fixpoint.o"))
-    let stage3_sha = ret_sha256_file(ctx, "fixpoint-evidence-stage3", ret_stage_fixpoint_path("with-stage3-fixpoint.o"))
+    let stage2_sha = ret_sha256_file(ctx, "fixpoint-evidence-stage2", ret_stage_bin_path("with-stage2"))
+    let stage3_sha = ret_sha256_file(ctx, "fixpoint-evidence-stage3", ret_stage_bin_path("with-stage3"))
     if stage2_sha.len() == 0 or stage3_sha.len() == 0:
-        return ret_fail(ctx, "could not hash fixpoint objects")
+        return ret_fail(ctx, "could not hash fixpoint stage binaries")
     let evidence =
         "{\n" ++
         "  \"compiler_sha256\": \"" ++ ret_json_escape(compiler_sha) ++ "\",\n" ++

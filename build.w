@@ -1608,6 +1608,7 @@ pub fn build(ctx: BuildCtx) -> Build:
     stage3 = stage3.extra_output("out/command/stage3")
     stage3 = stage3.write_scope("out/stage/bin")
     stage3 = stage3.dep("stage2")
+    stage3 = stage3.dep("compiler-main-source")
     stage3 = stage3.dep("compat-runtime-source")
     stage3 = stage3.dep("embedded-clang-resource-source")
     out = out.add_target(stage3)
@@ -1649,10 +1650,17 @@ pub fn build(ctx: BuildCtx) -> Build:
     selfcheck = selfcheck.dep("stage2")
     out = out.add_target(selfcheck)
 
-    var fixpoint_compare = target_new(.FixpointCompare, "fixpoint-compare", stage_compiler_obj("with-stage2-fixpoint.o"))
-    fixpoint_compare = fixpoint_compare.arg(stage_compiler_obj("with-stage3-fixpoint.o"))
-    fixpoint_compare = fixpoint_compare.dep("stage2-fixpoint-object")
-    fixpoint_compare = fixpoint_compare.dep("stage3-fixpoint-object")
+    // The fixpoint gate is `with-stage2` == `with-stage3` byte-for-byte — the
+    // canonical self-host invariant, matching CI's `cmp`. Both stage binaries
+    // are already built by the stage2/stage3 targets, so comparing them needs
+    // no extra work and also proves link determinism. The object-level
+    // `--emit-obj` compare (stage2/stage3-fixpoint-object) is retained only as
+    // the on-demand `:fixpoint-diff` diagnostic to localize *which* object
+    // diverges when the binary compare fails; it is off the happy path.
+    var fixpoint_compare = target_new(.FixpointCompare, "fixpoint-compare", stage_compiler_bin("with-stage2"))
+    fixpoint_compare = fixpoint_compare.arg(stage_compiler_bin("with-stage3"))
+    fixpoint_compare = fixpoint_compare.dep("stage2")
+    fixpoint_compare = fixpoint_compare.dep("stage3")
     out = out.add_target(fixpoint_compare)
 
     var bless_manifest = target_new(.Action, "bless-manifest", "").output("out/.build-state/blessed-manifest")
@@ -1666,12 +1674,14 @@ pub fn build(ctx: BuildCtx) -> Build:
     var fixpoint_evidence = target_new(.Action, "fixpoint-evidence", "").output("out/.build-state/fixpoint-evidence.json")
     fixpoint_evidence.action = run_fixpoint_evidence_action
     fixpoint_evidence = fixpoint_evidence.input(host_bin("out/bin/with-sha256"))
-    fixpoint_evidence = fixpoint_evidence.input(stage_compiler_obj("with-stage2-fixpoint.o"))
-    fixpoint_evidence = fixpoint_evidence.input(stage_compiler_obj("with-stage3-fixpoint.o"))
+    fixpoint_evidence = fixpoint_evidence.input(stage_compiler_bin("with-stage2"))
+    fixpoint_evidence = fixpoint_evidence.input(stage_compiler_bin("with-stage3"))
     fixpoint_evidence = fixpoint_evidence.input(release_compiler_bin("with"))
     fixpoint_evidence = fixpoint_evidence.write_scope("out/.build-state")
     fixpoint_evidence = fixpoint_evidence.write_scope("out/command/fixpoint-evidence")
     fixpoint_evidence = fixpoint_evidence.dep("fixpoint-compare")
+    fixpoint_evidence = fixpoint_evidence.dep("stage2")
+    fixpoint_evidence = fixpoint_evidence.dep("stage3")
     fixpoint_evidence = fixpoint_evidence.dep("with-sha256")
     fixpoint_evidence = fixpoint_evidence.dep("build")
     out = out.add_target(fixpoint_evidence)
