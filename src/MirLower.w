@@ -1404,9 +1404,8 @@ impl MirBuilder:
         self.alias_types.push(ty)
 
     fn symbol_text(sym: i32) -> &str:
-        let pool_text = self.pool.resolve_symbol(sym)
-        if pool_text.len() > 0:
-            return pool_text
+        if self.pool.resolve_symbol(sym).len() > 0:
+            return self.pool.resolve_symbol(sym)
         self.sema.pool_resolve(sym)
 
     fn symbols_match(a: i32, b: i32) -> bool:
