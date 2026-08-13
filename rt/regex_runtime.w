@@ -31,6 +31,7 @@ use std.re.pcre2_dfa_match
 use std.re.pcre2_substitute
 use std.re.pcre2_substring
 use std.re.pcre2_pattern_info
+use std.re.pcre2posix
 use std.re.pcre2_serialize
 use std.re.pcre2_convert
 use std.re.pcre2_script_run
