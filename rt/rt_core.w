@@ -607,6 +607,44 @@ fn alloc_no_reuse_on() -> i32:
         return 1
     0
 
+// BOOTSTRAP UNBLOCK — never-free mode. When active, every free is a no-op:
+// nothing is reclaimed, so no buffer is ever reallocated, and a shallow-aliased
+// owning handle dropped twice can never corrupt or double-free (the second free
+// simply does nothing). Unconditionally memory-SAFE (it only leaks) and fully
+// deterministic (it changes no emitted byte), so a leak-mode compiler still
+// fixpoints. It exists solely to bootstrap a properly-freeing compiler across the
+// D22 container-drop-glue double-free; it is NOT a fix for the ownership bug.
+//
+// NEVER_FREE_MODE is a compile-time constant — the moral equivalent of #ifdef.
+// Because it is constant, the optimizer folds the guard in rt_free at build time:
+//   0 = disabled  — free normally; never_free_on() folds to 0 and the free-path
+//                   guard vanishes entirely (zero overhead; safe shipped default).
+//   1 = always    — free is unconditionally a no-op (a leak-mode binary).
+//   2 = env-gated — free is a no-op iff WITH_NEVER_FREE=1 (cached, read once),
+//                   matching the existing WITH_ALLOC_* runtime escape hatches.
+let NEVER_FREE_DISABLED: i32 = 0
+let NEVER_FREE_ALWAYS: i32 = 1
+let NEVER_FREE_ENV: i32 = 2
+let NEVER_FREE_MODE: i32 = 1
+
+var never_free_state: i32 = 0       // env-mode cache: 0=unread,1=off,2=on
+
+fn never_free_on() -> i32:
+    if NEVER_FREE_MODE == NEVER_FREE_DISABLED:
+        return 0
+    if NEVER_FREE_MODE == NEVER_FREE_ALWAYS:
+        return 1
+    // NEVER_FREE_ENV: cached, non-allocating env read
+    if never_free_state == 0:
+        let v = rt_getenv(c"WITH_NEVER_FREE".ptr)
+        if v as i64 != 0 and (unsafe *v) != 0:
+            never_free_state = 2
+        else:
+            never_free_state = 1
+    if never_free_state == 2:
+        return 1
+    0
+
 fn free_small_block(block: i64, idx: i32):
     if alloc_no_reuse_on() != 0:
         unsafe *(block as *mut i64) = -1
@@ -1113,6 +1151,10 @@ fn rt_alloc(size_arg: i64) -> *mut u8:
 
 fn rt_free_unlocked_with_drop_origin(ptr: *mut u8, drop_origin_ptr: i64, drop_origin_len: i64):
     if ptr as i64 == 0:
+        return
+    // BOOTSTRAP UNBLOCK: in never-free mode, reclaim nothing (see never_free_on).
+    // Folds out completely when NEVER_FREE_MODE == disabled.
+    if never_free_on() != 0:
         return
     // #606 debug allocator: detect double-free before the generic ownership
     // panic so the report names the address; poison freed small payloads.
