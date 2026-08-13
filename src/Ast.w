@@ -1169,7 +1169,7 @@ impl AstPool:
         extra_start + 2
 
     fn get_string(idx: i32) -> &str:
-        self.state.strings.get(idx as i64)
+        unsafe { &*(self.state.strings.ptr + (idx as usize)) }
 
     fn get_start(idx: NodeId) -> i32:
         self.state.starts.get((idx as i32) as i64)
