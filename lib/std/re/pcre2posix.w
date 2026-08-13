@@ -2,7 +2,7 @@
 use std.re.defs
 use std.libc
 
-fn pcre2_regcomp(__param_preg: *mut regex_t, __param_pattern: *const i8, __param_cflags: c_int) -> c_int {
+pub fn pcre2_regcomp(__param_preg: *mut regex_t, __param_pattern: *const i8, __param_cflags: c_int) -> c_int {
     var __local_erroffset: c_ulong
 
     var __local_patlen: c_ulong
@@ -100,7 +100,7 @@ fn pcre2_regcomp(__param_preg: *mut regex_t, __param_pattern: *const i8, __param
     ((unsafe *__param_preg).re_erroffset = ((-1 as c_ulong)))
 
     if ((if __param_preg.re_match_data == null: 1 else: 0) != 0) {
-        pcre2_code_free_8(__param_preg.re_pcre2_code)
+        pcre2_code_free_8(__param_preg.re_pcre2_code as *mut pcre2_real_code_8)
 
         ((unsafe *__param_preg).re_pcre2_code = null)
 
@@ -112,7 +112,7 @@ fn pcre2_regcomp(__param_preg: *mut regex_t, __param_pattern: *const i8, __param
 
 }
 
-fn pcre2_regexec(__param_preg: *const regex_t, __param_string: *const i8, __param_nmatch: c_ulong, __param_pmatch: *mut regmatch_t, __param_eflags: c_int) -> c_int {
+pub fn pcre2_regexec(__param_preg: *const regex_t, __param_string: *const i8, __param_nmatch: c_ulong, __param_pmatch: *mut regmatch_t, __param_eflags: c_int) -> c_int {
     var __local_nmatch = __param_nmatch
     var __local_rc: c_int
 
@@ -272,7 +272,7 @@ fn pcre2_regexec(__param_preg: *const regex_t, __param_string: *const i8, __para
 
 }
 
-fn pcre2_regerror(__param_errcode: c_int, __param_preg: *const regex_t, __param_errbuf: *mut i8, __param_errbuf_size: c_ulong) -> c_ulong {
+pub fn pcre2_regerror(__param_errcode: c_int, __param_preg: *const regex_t, __param_errbuf: *mut i8, __param_errbuf_size: c_ulong) -> c_ulong {
     var __local_message: *const c_char
 
     var __local_offset_buf: [23]c_char
@@ -314,7 +314,7 @@ fn pcre2_regerror(__param_errcode: c_int, __param_preg: *const regex_t, __param_
     }
 
     if (__ci_expr_logic_2 != 0) {
-        (__local_snprintf_rc = snprintf((&(unsafe __local_offset_buf[0]) as *mut c_char), (23 * sizeof[c_char]()), " at offset %d", (__param_preg.re_erroffset as c_int)))
+        (__local_snprintf_rc = snprintf((&__local_offset_buf[0] as *mut c_char), (23 * sizeof[c_char]()), (" at offset %d" as *const c_char), (__param_preg.re_erroffset as c_int)))
 
         (__ci_expr_logic_3 = (if (if __local_snprintf_rc > 0: 1 else: 0) != 0: 1 else: 0))
 
@@ -348,7 +348,7 @@ fn pcre2_regerror(__param_errcode: c_int, __param_preg: *const regex_t, __param_
 
 
     if (__local_have_offset != 0) {
-        (__local_message = (&(unsafe __local_offset_buf[0]) as *const c_char))
+        (__local_message = (&__local_offset_buf[0] as *const c_char))
 
         while ((if (unsafe *__local_message) != 0: 1 else: 0) != 0) {
             if ((if ((__local_i as c_ulong) +% (1 as c_ulong)) < __param_errbuf_size: 1 else: 0) != 0) {
@@ -384,10 +384,10 @@ fn pcre2_regerror(__param_errcode: c_int, __param_preg: *const regex_t, __param_
 
 }
 
-fn pcre2_regfree(__param_preg: *mut regex_t) {
-    pcre2_match_data_free_8(__param_preg.re_match_data)
+pub fn pcre2_regfree(__param_preg: *mut regex_t) -> Unit {
+    pcre2_match_data_free_8(__param_preg.re_match_data as *mut pcre2_real_match_data_8)
 
-    pcre2_code_free_8(__param_preg.re_pcre2_code)
+    pcre2_code_free_8(__param_preg.re_pcre2_code as *mut pcre2_real_code_8)
 
 }
 
