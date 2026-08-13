@@ -335,7 +335,7 @@ impl Zcu:
         self.source_dir
 
     fn configure_tracked_input_sema(sema: Sema) -> Sema:
-        sema.set_tracked_input_context(self.tracked_input_root(), self.tracked_input_paths)
+        sema.set_tracked_input_context(self.tracked_input_root(), &self.tracked_input_paths)
         sema
 
     mut fn set_extra_sources(names: Vec[str], texts: Vec[str]):

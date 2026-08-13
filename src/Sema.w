@@ -2313,9 +2313,9 @@ fn Sema.init(pool: InternPool, diags: DiagnosticList, ast: AstPool) -> Sema:
     s
 
 impl Sema:
-    mut fn set_tracked_input_context(root: str, paths: Vec[str]):
+    mut fn set_tracked_input_context(root: str, paths: &Vec[str]):
         self.tracked_input_root = sema_owned_text(root)
-        self.tracked_input_paths = sema_clone_str_vec(&paths)
+        self.tracked_input_paths = sema_clone_str_vec(paths)
 
     mut fn record_tracked_input(path: str):
         var paths = self.tracked_input_paths
