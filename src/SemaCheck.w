@@ -14969,7 +14969,7 @@ impl Sema:
                         if has_unfilled_implicit != 0:
                             self.emit_error("implicit parameter not provided; add a 'with' binding of the matching type", node)
                         else:
-                            let fn_name = self.pool_resolve(fn_sym)
+                            let fn_name: str = with_str_clone_ref(self.pool_resolve(fn_sym))
                             if min_expected == expected:
                                 self.emit_error(f"function '{fn_name}' expects {expected} argument(s), found {actual}", node)
                             else:

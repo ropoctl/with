@@ -5788,7 +5788,7 @@ impl Codegen:
                 direct_types.push(0)
 
         let fn_type = wl_function_type(actual_ret_ty, vec_data_i64(&actual_params), actual_params.len() as i32, 0)
-        let name = self.intern.resolve(mono_sym)
+        let name: str = with_str_clone_ref(self.intern.resolve(mono_sym))
         let function = wl_add_function(self.llmod, name, fn_type)
         if has_sret != 0:
             wl_add_sret_attr(self.context, function, 0, ret_ty)
