@@ -93,6 +93,10 @@ type InterpolatedExprParseAttempt {
     had_errors: i32,
     pool: AstPool,
     intern: InternPool,
+    // The diagnostics travel out with the attempt: in shared mode the caller
+    // must put them back into self.diags (like intern/pool). Leaving them in
+    // the sub-parser double-freed the list on module-parse-error paths.
+    diags: DiagnosticList,
 }
 
 fn Parser.init(tokens: TokenList, source: str, file_id: i32, intern: InternPool, diags: DiagnosticList) -> Parser:
@@ -4281,9 +4285,10 @@ impl Parser:
         self.pool.add_node(NodeKind.NK_FSTRING_SPEC, start, end, flags, width, precision)
 
     mut fn parse_interpolated_expr(expr_text: str, base_start: i32) -> NodeId:
-        let attempt = self.parse_interpolated_expr_attempt(expr_text, 1, base_start)
+        var attempt = self.parse_interpolated_expr_attempt(expr_text, 1, base_start)
         self.intern = attempt.intern
         self.pool = attempt.pool
+        self.diags = move attempt.diags
         attempt.node
 
 fn offset_interpolated_expr_spans(pool: AstPool, first_node: i32, delta: i32):
@@ -4297,26 +4302,26 @@ fn offset_interpolated_expr_spans(pool: AstPool, first_node: i32, delta: i32):
         ni = ni + 1
 
 impl Parser:
-    fn parse_interpolated_expr_attempt(expr_text: str, use_shared_diags: i32, base_start: i32) -> InterpolatedExprParseAttempt:
+    mut fn parse_interpolated_expr_attempt(expr_text: str, use_shared_diags: i32, base_start: i32) -> InterpolatedExprParseAttempt:
         // Re-lex and parse the expression text.
         let source_text = self.interp_normalize_expr_text(expr_text)
         var lexer = Lexer.init(source_text, 0)
         let tokens = lexer.tokenize()
-        let local_diags = DiagnosticList.init()
-        let parse_diags = if use_shared_diags != 0: self.diags else: local_diags
+        let parse_diags = if use_shared_diags != 0: move self.diags else: DiagnosticList.init()
         let first_node = self.pool.node_count()
         var sub_parser = Parser.init_with_pool(move tokens, source_text, 0, self.intern, move parse_diags, self.pool)
         let result = sub_parser.parse_expr()
         sub_parser.skip_newlines()
         offset_interpolated_expr_spans(sub_parser.pool, first_node, base_start)
         let consumed_all = if sub_parser.peek() == TokenKind.TK_EOF: 1 else: 0
-        let had_errors = if use_shared_diags != 0: 0 else if local_diags.has_errors(): 1 else: 0
+        let had_errors = if use_shared_diags != 0: 0 else if sub_parser.diags.has_errors(): 1 else: 0
         InterpolatedExprParseAttempt {
             node: result,
             consumed_all,
             had_errors,
             pool: sub_parser.pool,
             intern: sub_parser.intern,
+            diags: move sub_parser.diags,
         }
 
     mut fn parse_c_string_literal() -> NodeId:
