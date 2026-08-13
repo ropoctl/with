@@ -151,7 +151,7 @@ impl InternPool:
     fn resolve_symbol(sym: Symbol) -> &str:
         if sym <= 0 or sym >= self.state.symbol_texts.len() as i32:
             return ""
-        self.state.symbol_texts.get(sym as i64)
+        unsafe { &*(self.state.symbol_texts.ptr + (sym as usize)) }
 
     fn intern_type(key: TypeKey) -> TypeId:
         let st = self.state
