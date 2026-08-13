@@ -150,7 +150,7 @@ fn add_cross_rt_targets(out0: Build, tag: &str, p: &str, group_name: &str) -> Bu
     cross_fiber_asm = cross_fiber_asm.arg("triple=" ++ triple)
     out = out.add_target(cross_fiber_asm)
 
-    var cross_embedded = target_new(.EmbedObjectFiles, p ++ "embedded-objects-asm", tag).output(dir ++ "/embedded_objects.s")
+    var cross_embedded = target_new(.EmbedObjectFiles, p ++ "embedded-objects-asm", build_owned_text(tag)).output(dir ++ "/embedded_objects.s")
     cross_embedded = cross_embedded.input(dir ++ "/cimport_stubs.o")
     cross_embedded = cross_embedded.arg("cimport_stubs_o")
     cross_embedded = cross_embedded.input(dir ++ "/compat_runtime.o")
