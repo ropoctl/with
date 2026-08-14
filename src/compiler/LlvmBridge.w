@@ -1592,6 +1592,21 @@ pub fn wl_compile_ir_to_object(source_path: &str, output_path: &str) -> i32:
         LLVMSetModuleDataLayout(m, layout)
         LLVMDisposeTargetData(layout)
         LLVMDisposeMessage(default_triple)
+        // `with ir` emits unoptimized IR, so dead module-level bindings survive as
+        // an internal, unreferenced __with_init_const_* -> __fn_thunk_* -> `call
+        // @<extern>` chain (e.g. the migration-cruft fn-ptr aliases coercing an
+        // unused `extern fn pcre2_regcomp` into a fat pointer). Darwin ld64
+        // `-dead_strip` drops such dead atoms; linux `--gc-sections` works at
+        // section granularity and cannot strip one dead function out of a
+        // monolithic `.text`, so the dead `call` reaches the link as an undefined
+        // symbol. globaldce removes the whole dead chain here, portably — matching
+        // darwin — and touches no live code (dead internal globals are unobservable).
+        let gdce_opts = LLVMCreatePassBuilderOptions()
+        let gdce_err = LLVMRunPasses(m, to_cstr("globaldce"), tm, gdce_opts)
+        if gdce_err as i64 != 0:
+            let gmsg = LLVMGetErrorMessage(gdce_err)
+            if gmsg as i64 != 0: LLVMDisposeErrorMessage(gmsg)
+        LLVMDisposePassBuilderOptions(gdce_opts)
         var out_buf: [4096]u8 = [0 as u8; 4096]
         let out_cstr = path_to_cstr(output_path, &out_buf as *mut u8)
         var emit_err: *mut u8 = 0 as *mut u8

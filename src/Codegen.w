@@ -1511,6 +1511,13 @@ impl Codegen:
         self.closure_counter = thunk_id + 1
         let thunk_name = f"__fn_thunk_{thunk_id}"
         let thunk_fn = wl_add_function(self.llmod, thunk_name, thunk_fn_ty)
+        // Anonymous fat-ptr coercion thunk: referenced only by-address at its
+        // creation site (insert_value below), never by name across units. Give
+        // it internal linkage so globaldce can drop it when the coercion is
+        // dead — otherwise a dead thunk keeps its `call @callee` and breaks the
+        // link on targets without default dead-strip (linux gold, no
+        // --gc-sections). This is what lets a dead extern-fn alias DCE cleanly.
+        wl_set_linkage(thunk_fn, wl_internal_linkage())
         // Generate thunk body
         let saved_bb = wl_get_insert_block(self.builder)
         let entry = wl_append_bb(self.context, thunk_fn, "entry")
