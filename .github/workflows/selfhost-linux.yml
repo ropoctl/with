@@ -91,3 +91,27 @@ jobs:
           export PATH="$PWD/.link-shim:$LLVM_PREFIX/bin:$PATH"
           export LD_LIBRARY_PATH="$PWD/.link-shim:${LD_LIBRARY_PATH:-}"
           "$WITH" build :fixpoint
+
+      - name: Fixpoint (linked stage2 == stage3 binary)
+        env:
+          WITH: ${{ github.workspace }}/with-seed
+        run: |
+          set -euo pipefail
+          # Stronger convergence assertion than the object-level :fixpoint: build
+          # the fully-linked stage3 (main.w compiled by stage2, then linked) and
+          # byte-compare it against the linked stage2. Equality here also covers
+          # link determinism and every embedded object, not just main.o.
+          export PATH="$PWD/.link-shim:$LLVM_PREFIX/bin:$PATH"
+          export LD_LIBRARY_PATH="$PWD/.link-shim:${LD_LIBRARY_PATH:-}"
+          "$WITH" build :stage3
+          s2=out/stage/bin/with-stage2
+          s3=out/stage/bin/with-stage3
+          ls -l "$s2" "$s3"
+          sha256sum "$s2" "$s3"
+          if cmp -s "$s2" "$s3"; then
+            echo "BINARY_FIXPOINT_IDENTICAL: stage2 == stage3 (byte-for-byte)"
+          else
+            echo "BINARY_FIXPOINT_DIFFERS: linked binaries are not byte-identical"
+            cmp "$s2" "$s3" || true
+            exit 1
+          fi
