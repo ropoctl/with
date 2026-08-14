@@ -1,0 +1,91 @@
+name: selfhost (linux x86_64)
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  selfhost-linux:
+    name: selfhost (linux x86_64)
+    runs-on: ubuntu-latest
+    env:
+      WITH_OUT_DIR: ${{ github.workspace }}/out
+      LLVM_PREFIX: ${{ github.workspace }}/.deps/llvm-22.1.6-linux-x86_64
+      # Pre-flip (+187-era) seed carrying the globaldce fix from this branch's
+      # first commit. Tip's build.w requires a str=Copy compiler to run, so the
+      # seed cannot be tip's own stage3 — by design tip is never its own seed.
+      WITH_SEED_REPO: ${{ github.repository }}
+      WITH_SEED_ASSET: with-linux-x86_64
+      WITH_SEED_VERSION: seed-linux-tip-368c81bf
+      WITH_SDK_REPO: withlang-dev/with
+      WITH_SDK_VERSION: v0.15.1
+      WITH_SDK_ASSET: with-llvm-sdk-22.1.6-linux-x86_64.tar.zst
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install host packages
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          # zstd: extract the SDK tarball. dev libs: the compiler link line uses
+          # -lz -lzstd -lxml2 (build/compiler.w), which need the .so dev symlinks.
+          sudo apt-get install -y --no-install-recommends zstd zlib1g-dev libzstd-dev libxml2-dev
+
+      - name: Fetch LLVM SDK
+        run: |
+          set -euo pipefail
+          mkdir -p .deps
+          curl -fL -o /tmp/sdk.tar.zst \
+            "https://github.com/$WITH_SDK_REPO/releases/download/$WITH_SDK_VERSION/$WITH_SDK_ASSET"
+          # asset is .tar.zst; `with build :deps` expects .tar.gz, so extract by hand.
+          zstd -d -c /tmp/sdk.tar.zst | tar -x -C .deps
+          test -d "$LLVM_PREFIX/bin" || { echo "unexpected SDK layout"; ls -la .deps; exit 1; }
+          test -x "$LLVM_PREFIX/bin/lld" || { echo "SDK lld missing"; exit 1; }
+
+      - name: Set up linker shim (SDK lld + libxml2.so.16)
+        run: |
+          set -euo pipefail
+          mkdir -p .link-shim
+          # The seed emits -fuse-ld=lld; expose the SDK's lld under the names the
+          # driver looks for. SDK lld has DT_NEEDED libxml2.so.16 while Ubuntu
+          # ships libxml2.so.2 — ABI-safe for linking (ELF link never calls into
+          # libxml2), so alias it.
+          ln -sf "$LLVM_PREFIX/bin/ld.lld" .link-shim/ld.lld
+          ln -sf "$LLVM_PREFIX/bin/ld.lld" .link-shim/ld64.lld
+          ln -sf "$LLVM_PREFIX/bin/lld"    .link-shim/lld
+          xml2="$(ldconfig -p | awk '/libxml2\.so\.2 /{print $NF; exit}')"
+          [ -n "$xml2" ] || xml2="$(ls /lib/x86_64-linux-gnu/libxml2.so.2* 2>/dev/null | head -1)"
+          [ -n "$xml2" ] || { echo "no system libxml2.so.2"; exit 1; }
+          ln -sf "$xml2" .link-shim/libxml2.so.16
+          "$LLVM_PREFIX/bin/ld.lld" --version
+
+      - name: Bootstrap seed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          curl -fL -o with-seed \
+            "https://github.com/$WITH_SEED_REPO/releases/download/$WITH_SEED_VERSION/$WITH_SEED_ASSET"
+          chmod +x with-seed
+          LD_LIBRARY_PATH="$PWD/.link-shim:${LD_LIBRARY_PATH:-}" ./with-seed version
+
+      - name: Build (seed -> stage1 -> stage2 -> final)
+        env:
+          WITH: ${{ github.workspace }}/with-seed
+        run: |
+          set -euo pipefail
+          export PATH="$PWD/.link-shim:$LLVM_PREFIX/bin:$PATH"
+          export LD_LIBRARY_PATH="$PWD/.link-shim:${LD_LIBRARY_PATH:-}"
+          "$WITH" build
+
+      - name: Fixpoint (stage2.emit == stage3.emit)
+        env:
+          WITH: ${{ github.workspace }}/with-seed
+        run: |
+          set -euo pipefail
+          # Drive :fixpoint with the seed, not ./out/bin/with: the freshly built
+          # tip compiler is post-str-flip and would reject this era's build.w.
+          export PATH="$PWD/.link-shim:$LLVM_PREFIX/bin:$PATH"
+          export LD_LIBRARY_PATH="$PWD/.link-shim:${LD_LIBRARY_PATH:-}"
+          "$WITH" build :fixpoint
