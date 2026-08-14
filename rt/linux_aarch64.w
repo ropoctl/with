@@ -570,7 +570,8 @@ fn rt_newline_str() -> str:
     with_str_from_cstr(&newline as *const [2]u8 as *const u8)
 
 fn rt_list_files_append_line(out: str, path: *const u8) -> str:
-    with_str_concat(with_str_concat(out, with_str_from_cstr(path)), rt_newline_str())
+    let path_text = with_str_from_cstr(path)
+    out ++ path_text ++ "\n"
 
 fn rt_list_files_walk(path: *const u8, out: str) -> str:
     var mode: i32 = 0

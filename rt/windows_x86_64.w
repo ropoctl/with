@@ -590,7 +590,8 @@ unsafe fn win_newline_str() -> str:
     with_str_from_cstr(c"\n".ptr)
 
 unsafe fn win_list_append(out: str, path: *const u8) -> str:
-    with_str_concat(with_str_concat(out, with_str_from_cstr(path)), win_newline_str())
+    let path_text = with_str_from_cstr(path)
+    out ++ path_text ++ "\n"
 
 unsafe fn win_list_files_walk(path: *const u8, out: str) -> str:
     if not win_is_dir(path):
