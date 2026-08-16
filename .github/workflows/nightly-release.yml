@@ -210,6 +210,12 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
+      # Fork-only proof: exercise partial publication with Windows absent.
+      - name: Force Windows failure for partial-release proof
+        run: |
+          echo "intentional fork-only Windows failure"
+          exit 1
+
       - name: Verify release version
         run: test "$(tr -d '\r\n' < src/version)" = "$WITH_VERSION"
 
