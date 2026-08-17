@@ -95,10 +95,40 @@ pub fn p7_dirname(path: &str) -> str:
         return "."
     path.slice(0, last as i64)
 
+fn p7_to_backslash(path: &str) -> str:
+    var out = ""
+    for i in 0..path.len() as i32:
+        if path.byte_at(i as i64) == 47:
+            out = out ++ "\\"
+        else:
+            out = out ++ path.slice(i as i64, (i + 1) as i64)
+    out
+
+// DIAGNOSTIC (task #71): pin why the p7 build child runs in the repo root
+// instead of case_dir on native Windows CI. `cmd /c cd` reports the child's
+// real OS cwd. probe_raw uses case_dir verbatim (as p7_run passes it); if it
+// echoes case_dir the cwd IS honored and the bug is in the compiler child's
+// getcwd/build-root discovery; if it echoes the repo root the CreateProcessW
+// cwd handoff is dropping case_dir. probe_bs tests the backslash-normalized
+// spelling as the candidate fix.
+fn p7_probe_cwd(capture_dir: &str, case_dir: &str) -> Unit:
+    if os() != "Windows":
+        return
+    let _c = write_file(p7_join(capture_dir, "casedir.txt"), case_dir)
+    var probe = ""
+    probe = p7_argv_append(probe, "cmd")
+    probe = p7_argv_append(probe, "/c")
+    probe = p7_argv_append(probe, "cd")
+    let _r = unsafe { with_exec_argv_capture_cwd(probe, p7_join(capture_dir, "probe_raw.txt"), p7_join(capture_dir, "probe_raw.err"), 30000, case_dir) }
+    let bs = p7_to_backslash(case_dir)
+    let _b = write_file(p7_join(capture_dir, "casedir_bs.txt"), bs)
+    let _rb = unsafe { with_exec_argv_capture_cwd(probe, p7_join(capture_dir, "probe_bs.txt"), p7_join(capture_dir, "probe_bs.err"), 30000, bs) }
+
 pub fn p7_run(case_dir: &str, label: &str, args_blob: &str) -> P7Run:
     let capture_dir = p7_join(p7_abs("out/tmp/pre-d-p7-capture"), label)
     let _remove = remove_tree(capture_dir)
     assert(mkdir_p(capture_dir) == 0)
+    p7_probe_cwd(capture_dir, case_dir)
     let stdout_path = p7_join(capture_dir, "stdout.txt")
     let stderr_path = p7_join(capture_dir, "stderr.txt")
     var argv = ""
