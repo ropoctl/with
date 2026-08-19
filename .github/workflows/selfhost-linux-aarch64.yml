@@ -223,8 +223,23 @@ jobs:
 
       - name: Test battery
         working-directory: src-tree
+        shell: bash
         run: |
-          set -euo pipefail
+          set +e
           export PATH="$PWD/.link-shim:$LLVM_PREFIX/bin:$PATH"
           export LD_LIBRARY_PATH="$PWD/.link-shim:${LD_LIBRARY_PATH:-}"
           out/release/bin/with build :test
+          rc=$?
+          if [ "$rc" -ne 0 ]; then
+            echo "===== TEST FAILED rc=$rc — dumping per-target capture files ====="
+            # build.w writes each failing target's child stdout/stderr under
+            # out/test-graph/<target>/<file>.{stdout,stderr}; the harness only
+            # echoes stderr when non-empty, so surface every non-empty capture
+            # (this is what tells apart an aarch64 c_import/sysinfo/stdarg gap
+            # from a real regression).
+            find out/test-graph -type f \( -name '*.stderr' -o -name '*.stdout' -o -name 'build.stderr' -o -name 'build.stdout' \) 2>/dev/null \
+              | while read -r f; do
+                  if [ -s "$f" ]; then echo "--- $f ---"; sed -n '1,120p' "$f"; fi
+                done
+            exit "$rc"
+          fi
