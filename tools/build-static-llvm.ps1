@@ -7,6 +7,18 @@ $TARGETS = if ($env:LLVM_TARGETS_TO_BUILD) { $env:LLVM_TARGETS_TO_BUILD } else {
 
 $ROOT = if ($env:ROOT) { $env:ROOT } else { Join-Path (Get-Location) ".deps" }
 $HOST_TAG = if ($env:HOST_TAG) { $env:HOST_TAG } else { "windows-x86_64-msvc" }
+
+# The MSVC dev environment (and thus the CRT import libs on LIB) is set for the
+# host arch, but a stock choco `clang-cl` is an x64 binary that defaults to
+# emitting x64 objects. On an ARM64 host that yields "machine type arm64
+# conflicts with x64" at the CMake compiler check. Pin clang-cl's output arch to
+# the host by target triple. CMake stays a native build (host processor already
+# matches), so no cross-compile tablegen machinery is needed.
+$TARGET_TRIPLE = if ($HOST_TAG -match "aarch64|arm64") {
+  "aarch64-pc-windows-msvc"
+} else {
+  "x86_64-pc-windows-msvc"
+}
 $SRC_DIR = Join-Path $ROOT "src"
 $BUILD_DIR = Join-Path $ROOT "build\llvm-$LLVM_VERSION-$HOST_TAG"
 $INSTALL_PREFIX = if ($env:INSTALL_PREFIX) { $env:INSTALL_PREFIX } else { Join-Path $ROOT "llvm-$LLVM_VERSION-$HOST_TAG" }
@@ -70,6 +82,8 @@ $cmakeArgs = @(
   "-DCMAKE_BUILD_TYPE=Release",
   "-DCMAKE_C_COMPILER=$LLVM_BOOTSTRAP_CLANG_CL",
   "-DCMAKE_CXX_COMPILER=$LLVM_BOOTSTRAP_CLANG_CL",
+  "-DCMAKE_C_COMPILER_TARGET=$TARGET_TRIPLE",
+  "-DCMAKE_CXX_COMPILER_TARGET=$TARGET_TRIPLE",
   "-DCMAKE_ASM_MASM_COMPILER=$LLVM_BOOTSTRAP_LLVM_ML",
   "-DCMAKE_LINKER=$LLVM_BOOTSTRAP_LLD_LINK",
   "-DCMAKE_INSTALL_PREFIX=$INSTALL_PREFIX",
