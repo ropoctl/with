@@ -9,7 +9,8 @@ name: sdk-llvm windows-aarch64
 # x64 mt.exe path, a pre-existing llvm-ml in the prefix). This workflow
 # overrides those to ARM64-discovered tool paths. The toolchain-locate step
 # fails loudly (in minutes) if the runner image is missing clang-cl / lld-link
-# / llvm-ml / mt.exe, rather than discovering it hours into the LLVM build.
+# / llvm-ml, rather than discovering it hours into the LLVM build. (mt.exe is
+# optional — a static-archive build never runs the manifest tool.)
 #
 # The tarball extracts to `.deps/llvm-22.1.6-windows-aarch64-msvc/` (mirroring
 # the existing windows-x86_64-msvc prefix convention in build.w).
@@ -73,7 +74,10 @@ jobs:
           $llvmml  = Find-Tool "llvm-ml.exe"
           $cmake   = Find-Tool "cmake.exe"
           $ninja   = Find-Tool "ninja.exe"
-          # mt.exe comes from the Windows SDK; msvc-dev-cmd puts it on PATH.
+          # mt.exe (Windows SDK manifest tool) is OPTIONAL for a static-archive
+          # SDK build: mt only embeds manifests into .exe/.dll, and we produce
+          # .a/.lib archives. Discover it if present (harmless), but never require
+          # it — the arm64 SDK image may not ship an arm64 mt.exe.
           $mt      = Find-Tool "mt.exe"
           Write-Host "clang-cl: $clangcl"
           Write-Host "lld-link: $lldlink"
@@ -82,7 +86,7 @@ jobs:
           Write-Host "ninja   : $ninja"
           Write-Host "mt      : $mt"
           $missing = @()
-          foreach ($p in @(@("clang-cl",$clangcl),@("lld-link",$lldlink),@("llvm-ml",$llvmml),@("cmake",$cmake),@("ninja",$ninja),@("mt",$mt))) {
+          foreach ($p in @(@("clang-cl",$clangcl),@("lld-link",$lldlink),@("llvm-ml",$llvmml),@("cmake",$cmake),@("ninja",$ninja))) {
             if (-not $p[1]) { $missing += $p[0] }
           }
           if ($missing.Count -gt 0) { throw "missing required tools: $($missing -join ', ')" }
