@@ -1,0 +1,171 @@
+name: selfhost linux-aarch64 (from seed)
+
+# Native aarch64 self-host verification of the cross-built linux-aarch64 seed.
+#
+# The `seed linux-aarch64 (cross)` workflow produces a native aarch64 ELF `with`
+# compiler on an x86_64 runner but CANNOT run or fixpoint-verify it there. This
+# job closes that gap: on a native ARM64 Linux runner (ubuntu-24.04-arm) it
+# fetches that seed, bootstraps seed -> stage1 -> stage2 -> stage3 against the
+# SAME source tip the seed was cross-built from, and asserts the fixpoint
+# (stage2 == stage3) plus the test battery. A green run here is running-code
+# proof the aarch64 seed self-hosts — the prerequisite for opening the
+# withlang-dev stage3-fixpoint PR.
+#
+# On this native aarch64 runner the linux-aarch64 LLVM SDK is the HOST SDK
+# (drives the self-host link), so this job also requires the `sdk-linux-aarch64`
+# asset. It fails loudly if the seed or SDK is not yet published.
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: >-
+          Source tip to self-host (withlang-dev/with). MUST match the tip the
+          seed was cross-built from, or the seed cannot compile it. Full 40-char
+          SHA (actions/checkout treats a short SHA as a branch/tag pattern).
+        required: false
+        default: "1aed64db17d03b7913062823e4ea9a7022f38d15"
+
+concurrency:
+  group: selfhost-linux-aarch64-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  selfhost:
+    name: self-host linux-aarch64 seed (fixpoint + test)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 180
+    env:
+      LLVM_VER: "22.1.6"
+      SOURCE_REPO: withlang-dev/with
+      SOURCE_REF: ${{ github.event.inputs.source_ref || '1aed64db17d03b7913062823e4ea9a7022f38d15' }}
+      # Native aarch64 seed produced by the cross-build workflow.
+      SEED_REPO: ${{ github.repository }}
+      SEED_TAG: seed-linux-aarch64
+      SEED_ASSET: with-linux-aarch64
+      # Native aarch64 LLVM SDK (host SDK on this runner; drives the link).
+      SDK_TAG: sdk-linux-aarch64
+      SDK_ASSET: with-llvm-sdk-22.1.6-linux-aarch64.tar.gz
+      LLVM_PREFIX: ${{ github.workspace }}/src-tree/.deps/llvm-22.1.6-linux-aarch64
+      # The build writes ./out under the checked-out source tree.
+      WITH_OUT_DIR: ${{ github.workspace }}/src-tree/out
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Confirm native arch
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "aarch64" || { echo "runner is not aarch64 (got $(uname -m))"; exit 1; }
+          nproc
+
+      - name: Guard — require seed + SDK assets (fail loudly)
+        run: |
+          set -euo pipefail
+          if ! gh release view "$SEED_TAG" --repo "$SEED_REPO" \
+                --json assets --jq '.assets[].name' 2>/dev/null | grep -qx "$SEED_ASSET"; then
+            echo "error: linux-aarch64 seed asset not published yet." >&2
+            echo "       expected: $SEED_REPO release '$SEED_TAG' asset '$SEED_ASSET'" >&2
+            echo "       run the 'seed linux-aarch64 (cross)' workflow first." >&2
+            exit 1
+          fi
+          if ! gh release view "$SDK_TAG" --repo "$SEED_REPO" \
+                --json assets --jq '.assets[].name' 2>/dev/null | grep -qx "$SDK_ASSET"; then
+            echo "error: linux-aarch64 SDK asset not published yet." >&2
+            echo "       expected: $SEED_REPO release '$SDK_TAG' asset '$SDK_ASSET'" >&2
+            exit 1
+          fi
+          echo "found seed $SEED_ASSET and SDK $SDK_ASSET on $SEED_REPO"
+
+      - name: Checkout source (withlang-dev/with @ ref)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: ${{ env.SOURCE_REF }}
+          path: src-tree
+
+      - name: Install host packages
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          # dev libs: the compiler link line uses -lz -lzstd -lxml2 (build/compiler.w).
+          sudo apt-get install -y --no-install-recommends \
+            zlib1g-dev libzstd-dev libxml2-dev curl ca-certificates
+
+      - name: Fetch native aarch64 LLVM SDK
+        working-directory: src-tree
+        run: |
+          set -euo pipefail
+          mkdir -p .deps
+          curl -fL -o /tmp/sdk.tar.gz \
+            "https://github.com/$SEED_REPO/releases/download/$SDK_TAG/$SDK_ASSET"
+          curl -fL -o /tmp/sdk.tar.gz.sha256 \
+            "https://github.com/$SEED_REPO/releases/download/$SDK_TAG/$SDK_ASSET.sha256" || true
+          if [ -s /tmp/sdk.tar.gz.sha256 ]; then
+            want="$(awk '{print $1}' /tmp/sdk.tar.gz.sha256)"
+            got="$(sha256sum /tmp/sdk.tar.gz | awk '{print $1}')"
+            test "$want" = "$got" || { echo "SDK sha256 mismatch: want=$want got=$got"; exit 1; }
+          fi
+          tar -xzf /tmp/sdk.tar.gz -C .deps
+          test -f "$LLVM_PREFIX/lib/libclang.a" \
+            || { echo "SDK libclang.a missing at $LLVM_PREFIX"; ls -la "$LLVM_PREFIX/lib" 2>/dev/null | head; exit 1; }
+          test -x "$LLVM_PREFIX/bin/ld.lld" || { echo "SDK ld.lld missing"; exit 1; }
+
+      - name: Set up linker shim (SDK lld + libxml2.so.16)
+        working-directory: src-tree
+        run: |
+          set -euo pipefail
+          mkdir -p .link-shim
+          # The seed emits -fuse-ld=lld; expose the SDK lld under the driver's
+          # expected names. SDK lld has DT_NEEDED libxml2.so.16 while Ubuntu
+          # ships libxml2.so.2 — ABI-safe for linking, so alias it.
+          ln -sf "$LLVM_PREFIX/bin/ld.lld" .link-shim/ld.lld
+          ln -sf "$LLVM_PREFIX/bin/lld"    .link-shim/lld
+          xml2="$(ldconfig -p | awk '/libxml2\.so\.2 /{print $NF; exit}')"
+          [ -n "$xml2" ] || xml2="$(ls /lib/aarch64-linux-gnu/libxml2.so.2* 2>/dev/null | head -1)"
+          [ -n "$xml2" ] || { echo "no system libxml2.so.2"; exit 1; }
+          ln -sf "$xml2" .link-shim/libxml2.so.16
+          LD_LIBRARY_PATH="$PWD/.link-shim:${LD_LIBRARY_PATH:-}" "$LLVM_PREFIX/bin/ld.lld" --version
+
+      - name: Fetch aarch64 seed
+        working-directory: src-tree
+        run: |
+          set -euo pipefail
+          curl -fL -o with-seed \
+            "https://github.com/$SEED_REPO/releases/download/$SEED_TAG/$SEED_ASSET"
+          curl -fL -o with-seed.sha256 \
+            "https://github.com/$SEED_REPO/releases/download/$SEED_TAG/$SEED_ASSET.sha256" || true
+          if [ -s with-seed.sha256 ]; then
+            printf '%s  %s\n' "$(awk '{print $1}' with-seed.sha256)" with-seed | sha256sum -c -
+          fi
+          chmod +x with-seed
+          LD_LIBRARY_PATH="$PWD/.link-shim:${LD_LIBRARY_PATH:-}" ./with-seed version
+
+      - name: Build (seed -> stage1 -> stage2 -> final)
+        working-directory: src-tree
+        env:
+          WITH: ${{ github.workspace }}/src-tree/with-seed
+        run: |
+          set -euo pipefail
+          export PATH="$PWD/.link-shim:$LLVM_PREFIX/bin:$PATH"
+          export LD_LIBRARY_PATH="$PWD/.link-shim:${LD_LIBRARY_PATH:-}"
+          "$WITH" build
+          test -x out/release/bin/with || { echo "native release compiler not produced"; exit 1; }
+          out/release/bin/with version
+
+      - name: Fixpoint (stage2 == stage3)
+        working-directory: src-tree
+        run: |
+          set -euo pipefail
+          export PATH="$PWD/.link-shim:$LLVM_PREFIX/bin:$PATH"
+          export LD_LIBRARY_PATH="$PWD/.link-shim:${LD_LIBRARY_PATH:-}"
+          out/release/bin/with build :fixpoint
+
+      - name: Test battery
+        working-directory: src-tree
+        run: |
+          set -euo pipefail
+          export PATH="$PWD/.link-shim:$LLVM_PREFIX/bin:$PATH"
+          export LD_LIBRARY_PATH="$PWD/.link-shim:${LD_LIBRARY_PATH:-}"
+          out/release/bin/with build :test
