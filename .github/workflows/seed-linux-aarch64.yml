@@ -172,12 +172,24 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libc6-dev:arm64 "libgcc-${gccver}-dev:arm64" \
             zlib1g:arm64 libzstd1:arm64 libxml2:arm64
+          # The xml2 resolver (Link.w link_stage_linux_system_lib_path) probes
+          # libxml2.so, then libxml2.so.16, else emits -lxml2 (which needs an
+          # unversioned libxml2.so). Ubuntu's runtime libxml2 ships only
+          # libxml2.so.2 (SONAME libxml2.so.2) — no .so.16, no dev .so — so the
+          # host build works solely because libxml2-dev provides that unversioned
+          # symlink. libxml2-dev is not cleanly co-installable across arches, so
+          # instead create the dev-style symlink ourselves against the arm64
+          # SONAME. -lxml2 then resolves and DT_NEEDED becomes libxml2.so.2,
+          # which exists on the aarch64 target. (libz/libzstd resolve directly
+          # via their .so.1 absolute-path branch, so they need no symlink.)
+          m=/usr/lib/aarch64-linux-gnu
+          test -e "$m/libxml2.so.2" || { echo "arm64 libxml2.so.2 not installed"; exit 1; }
+          sudo ln -sf libxml2.so.2 "$m/libxml2.so"
           # Assert the exact files the link probe requires — turn a would-be
           # expensive link-step failure (~15min into the job) into a cheap,
           # explicit failure here.
           for o in crt1.o crti.o crtn.o; do
-            test -f "/usr/lib/aarch64-linux-gnu/$o" \
-              || { echo "missing arm64 $o under /usr/lib/aarch64-linux-gnu"; exit 1; }
+            test -f "$m/$o" || { echo "missing arm64 $o under $m"; exit 1; }
           done
           test -f "/usr/lib/gcc/aarch64-linux-gnu/${gccver}/crtbegin.o" \
             || { echo "missing arm64 crtbegin.o under /usr/lib/gcc/aarch64-linux-gnu/${gccver}"; exit 1; }
@@ -185,9 +197,9 @@ jobs:
             || { echo "missing arm64 crtend.o"; exit 1; }
           test -e /lib/aarch64-linux-gnu/ld-linux-aarch64.so.1 -o -e /lib/ld-linux-aarch64.so.1 \
             || { echo "missing arm64 dynamic linker ld-linux-aarch64.so.1"; exit 1; }
-          for l in libz.so.1 libzstd.so.1 libxml2.so.16; do
-            test -e "/usr/lib/aarch64-linux-gnu/$l" \
-              || { echo "missing arm64 $l under /usr/lib/aarch64-linux-gnu"; exit 1; }
+          # z/zstd resolve via absolute .so.1; xml2 via the unversioned .so above.
+          for l in libz.so.1 libzstd.so.1 libxml2.so; do
+            test -e "$m/$l" || { echo "missing arm64 $l under $m"; exit 1; }
           done
           echo "arm64 cross sysroot ready (gcc ${gccver})"
 
