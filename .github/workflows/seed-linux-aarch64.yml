@@ -185,6 +185,7 @@ jobs:
           echo "using libgcc-${gccver}-dev:arm64"
           sudo apt-get -o DPkg::Lock::Timeout=300 install -y --no-install-recommends \
             libc6-dev:arm64 "libgcc-${gccver}-dev:arm64" \
+            "libstdc++-${gccver}-dev:arm64" \
             libstdc++6:arm64 zlib1g:arm64 libzstd1:arm64 libxml2:arm64
           # The compiler links against its own required libs (build/compiler.w):
           # stdc++, z, zstd, xml2. In the direct ld.lld cross-link
@@ -196,11 +197,19 @@ jobs:
           # arm64 runtime packages ship only the versioned SONAME (lib<name>.so.N,
           # no .so, no dev symlink), so the search fails. The x86_64 host link only
           # works because the host -dev packages provide those unversioned symlinks.
-          # The -dev packages are not cleanly co-installable across arches, so —
-          # exactly as done for libxml2 — create the dev-style unversioned symlink
-          # ourselves against each installed arm64 SONAME. -l<name> then resolves
-          # via the -L/usr/lib/aarch64-linux-gnu search dir, and DT_NEEDED records
-          # the versioned SONAME (lib<name>.so.N), which exists on the aarch64 target.
+          #
+          # For stdc++ the canonical unversioned lib is provided by the arm64
+          # libstdc++-<ver>-dev package, which places libstdc++.so in the GCC dir
+          # /usr/lib/gcc/aarch64-linux-gnu/<ver>/ — exactly the dir the direct-ld
+          # path pushes as its FIRST -L (Link.w:501). Installing it above mirrors
+          # how the host g++/libstdc++-dev satisfies the host link. z/zstd/xml2 have
+          # no cleanly co-installable arm64 -dev packages, so — as first done for
+          # libxml2 — create the dev-style unversioned symlink ourselves against
+          # each installed arm64 SONAME. -l<name> then resolves via the
+          # -L/usr/lib/aarch64-linux-gnu search dir, and DT_NEEDED records the
+          # versioned SONAME (lib<name>.so.N), which exists on the aarch64 target.
+          # (The libstdc++.so multiarch symlink is kept as a belt-and-suspenders
+          # backup to the gcc-dir dev symlink.)
           m=/usr/lib/aarch64-linux-gnu
           link_so() {  # $1 = unversioned name, $2 = installed SONAME to point at
             test -e "$m/$2" || { echo "arm64 $2 not installed under $m"; exit 1; }
@@ -210,6 +219,18 @@ jobs:
           link_so libz.so      libz.so.1
           link_so libzstd.so   libzstd.so.1
           link_so libxml2.so   libxml2.so.2
+          # Diagnostic: show exactly where each -l<name> target resolves, in both
+          # the GCC dir (first -L) and the multiarch dir. If a future run still
+          # fails "-lstdc++", this dump in the step log names the cause directly
+          # (missing file vs dangling symlink vs wrong dir) — no blind re-iteration.
+          gcc_dir="/usr/lib/gcc/aarch64-linux-gnu/${gccver}"
+          echo "--- arm64 lib resolution (gcc_dir=$gcc_dir) ---"
+          ls -la "$gcc_dir"/libstdc++.so* 2>&1 || true
+          for l in libstdc++ libz libzstd libxml2; do
+            echo "[$l]"; ls -la "$m/$l.so"* 2>&1 || true
+            readlink -f "$m/$l.so" 2>&1 || true
+          done
+          echo "----------------------------------------------"
           # Assert the exact files the link probe requires — turn a would-be
           # expensive link-step failure (~15min into the job) into a cheap,
           # explicit failure here.
