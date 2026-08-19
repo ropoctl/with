@@ -68,7 +68,15 @@ jobs:
       SEED_RELEASE_TAG: seed-linux-aarch64
       SEED_ASSET: with-linux-aarch64
       LLVM_PREFIX: ${{ github.workspace }}/.deps/llvm-22.1.6-linux-x86_64
-      WITH_OUT_DIR: ${{ github.workspace }}/out
+      # The build runs in working-directory: src-tree and writes ./out there, so
+      # the compiler's link stage must resolve its runtime root to that same
+      # tree. Pointing WITH_OUT_DIR at <ws>/out (a different, empty dir) makes
+      # link_stage_resolve_runtime_root fall back to the compiler-relative
+      # out/release/bin/runtime, which has no cross/<tag>/ objects — the native
+      # link survives on its embedded fallback but the cross link fails loudly
+      # ("missing linux_aarch64 runtime object … channel_runtime.o"). Point it at
+      # the real build tree so out/lib/cross/linux_aarch64/*.o is found.
+      WITH_OUT_DIR: ${{ github.workspace }}/src-tree/out
       GH_TOKEN: ${{ github.token }}
     steps:
       - name: Guard — require the linux-aarch64 SDK asset (fail loudly)
