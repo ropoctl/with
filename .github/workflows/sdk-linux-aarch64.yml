@@ -80,7 +80,12 @@ jobs:
           test -f "$prefix/lib/libclang.a" || { echo "missing libclang.a"; exit 1; }
           test -d "$prefix/lib/clang/22/include" || { echo "missing clang builtin headers"; exit 1; }
           file "$prefix/lib/libclang.a" || true
-          "$prefix/bin/llvm-nm" -g "$prefix/lib/libclang.a" | grep -q clang_createIndex \
+          # Materialize the symbol table first: piping nm straight into `grep -q`
+          # makes grep close the pipe on first match, nm dies with SIGPIPE, and
+          # `set -o pipefail` then reports the pipeline as failed even though the
+          # symbol WAS found. Write to a file, then grep the file.
+          "$prefix/bin/llvm-nm" -g "$prefix/lib/libclang.a" > /tmp/libclang.syms
+          grep -q clang_createIndex /tmp/libclang.syms \
             || { echo "libclang.a missing clang_createIndex"; exit 1; }
           du -sh "$prefix"
 

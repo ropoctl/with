@@ -112,8 +112,11 @@ jobs:
         run: |
           $prefix = ".deps/llvm-$($env:LLVM_VER)-$($env:HOST_TAG)"
           if (-not (Test-Path "$prefix/lib/libclang.lib")) { throw "missing libclang.lib" }
-          & "$prefix/bin/llvm-nm.exe" -g "$prefix/lib/libclang.lib" | Select-String "clang_createIndex" | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw "libclang.lib missing clang_createIndex" }
+          # Capture the symbol list, then test with -Quiet: the old
+          # `... | Out-Null; if ($LASTEXITCODE -ne 0)` read nm's exit code, not
+          # whether the symbol matched — a false PASS when the symbol is absent.
+          $syms = & "$prefix/bin/llvm-nm.exe" -g "$prefix/lib/libclang.lib"
+          if (-not ($syms | Select-String -Quiet "clang_createIndex")) { throw "libclang.lib missing clang_createIndex" }
 
       - name: Package asset
         run: |
