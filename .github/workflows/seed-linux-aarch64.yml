@@ -114,10 +114,24 @@ jobs:
       - name: Install host packages
         run: |
           set -euo pipefail
-          sudo apt-get update -qq
+          # Defuse the apt-daily / unattended-upgrades systemd timers that race
+          # the dpkg lock on a fresh runner: a run once sat 2h in this step with
+          # apt-get blocked on a held lock. Stop the timers (persists for the
+          # whole job, so later apt steps are covered too) and wait briefly for
+          # any in-flight lock to clear, then give apt a bounded lock timeout so
+          # it fails loudly instead of hanging forever.
+          sudo systemctl stop apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+          sudo systemctl disable apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+          sudo systemctl kill --kill-who=all apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
+          for _ in $(seq 1 60); do
+            sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || break
+            sleep 2
+          done
+          APT="sudo apt-get -o DPkg::Lock::Timeout=300"
+          $APT update -qq
           # zstd: extract the host SDK. dev libs: the compiler link line uses
           # -lz -lzstd -lxml2 (build/compiler.w).
-          sudo apt-get install -y --no-install-recommends \
+          $APT install -y --no-install-recommends \
             zstd zlib1g-dev libzstd-dev libxml2-dev curl ca-certificates
 
       - name: Install aarch64 cross sysroot (arm64 multiarch)
@@ -162,14 +176,14 @@ jobs:
           Architectures: arm64
           Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
           EOF
-          sudo apt-get update -qq
+          sudo apt-get -o DPkg::Lock::Timeout=300 update -qq
           # Highest available libgcc-<ver>-dev — its arm64 variant ships the
           # crtbegin.o/crtend.o + libgcc under /usr/lib/gcc/aarch64-linux-gnu/<ver>/.
           gccver="$(apt-cache search --names-only '^libgcc-[0-9]+-dev$' \
             | sed -E 's/^libgcc-([0-9]+)-dev.*/\1/' | sort -rn | head -1)"
           test -n "$gccver" || { echo "no libgcc-<ver>-dev package available"; exit 1; }
           echo "using libgcc-${gccver}-dev:arm64"
-          sudo apt-get install -y --no-install-recommends \
+          sudo apt-get -o DPkg::Lock::Timeout=300 install -y --no-install-recommends \
             libc6-dev:arm64 "libgcc-${gccver}-dev:arm64" \
             libstdc++6:arm64 zlib1g:arm64 libzstd1:arm64 libxml2:arm64
           # The compiler links against its own required libs (build/compiler.w):
