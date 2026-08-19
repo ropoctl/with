@@ -120,6 +120,77 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             zstd zlib1g-dev libzstd-dev libxml2-dev curl ca-certificates
 
+      - name: Install aarch64 cross sysroot (arm64 multiarch)
+        run: |
+          set -euo pipefail
+          # The compiler's direct ld.lld cross-link (Link.w
+          # link_stage_make_linux_llvm_link_command) needs the TARGET arch's
+          # crt objects, libc, libgcc, and the -lz/-lzstd/-lxml2 shared libs in
+          # the Debian multiarch layout it probes: /usr/lib/aarch64-linux-gnu/
+          # {crt1,crti,crtn}.o, /usr/lib/gcc/aarch64-linux-gnu/<ver>/crt{begin,
+          # end}.o, /lib/aarch64-linux-gnu/ld-linux-aarch64.so.1. It fails
+          # loudly ("could not locate Linux aarch64 crt/linker files") when
+          # they are absent. Enable arm64 as a foreign apt architecture and pull
+          # the native arm64 packages from ports.ubuntu.com (the amd64 mirror
+          # does not carry arm64), which land in exactly those multiarch paths —
+          # so sysroot stays "" (the real root) and needs no WITH_LINUX_SYSROOT.
+          sudo dpkg --add-architecture arm64
+          codename="$(. /etc/os-release; echo "$VERSION_CODENAME")"
+          # Constrain every existing (amd64) source to amd64 so `apt-get update`
+          # does not try to fetch arm64 indexes from an amd64-only mirror (404 ->
+          # update fails under set -e). deb822 stanzas all begin with `Types:`.
+          for f in /etc/apt/sources.list.d/*.sources; do
+            [ -e "$f" ] || continue
+            grep -q '^Architectures:' "$f" || sudo sed -i '/^Types:/a Architectures: amd64' "$f"
+          done
+          for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do
+            [ -e "$f" ] || continue
+            grep -qE '^[[:space:]]*deb[[:space:]]' "$f" || continue
+            grep -qE '^[[:space:]]*deb[[:space:]]+\[[^]]*arch=' "$f" && continue
+            # Add arch=amd64 into an existing bracket (preserving signed-by etc.),
+            # else add a new bracket. `t` stops after the first match fires.
+            sudo sed -i -E \
+              -e 's|^([[:space:]]*deb[[:space:]]+)\[([^]]*)\]|\1[arch=amd64 \2]|; t' \
+              -e 's|^([[:space:]]*deb[[:space:]]+)|\1[arch=amd64] |' "$f"
+          done
+          # Add the arm64 ports source (native arm64 packages).
+          sudo tee /etc/apt/sources.list.d/arm64-ports.sources >/dev/null <<EOF
+          Types: deb
+          URIs: http://ports.ubuntu.com/ubuntu-ports
+          Suites: ${codename} ${codename}-updates ${codename}-security
+          Components: main universe
+          Architectures: arm64
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+          EOF
+          sudo apt-get update -qq
+          # Highest available libgcc-<ver>-dev — its arm64 variant ships the
+          # crtbegin.o/crtend.o + libgcc under /usr/lib/gcc/aarch64-linux-gnu/<ver>/.
+          gccver="$(apt-cache search --names-only '^libgcc-[0-9]+-dev$' \
+            | sed -E 's/^libgcc-([0-9]+)-dev.*/\1/' | sort -rn | head -1)"
+          test -n "$gccver" || { echo "no libgcc-<ver>-dev package available"; exit 1; }
+          echo "using libgcc-${gccver}-dev:arm64"
+          sudo apt-get install -y --no-install-recommends \
+            libc6-dev:arm64 "libgcc-${gccver}-dev:arm64" \
+            zlib1g:arm64 libzstd1:arm64 libxml2:arm64
+          # Assert the exact files the link probe requires — turn a would-be
+          # expensive link-step failure (~15min into the job) into a cheap,
+          # explicit failure here.
+          for o in crt1.o crti.o crtn.o; do
+            test -f "/usr/lib/aarch64-linux-gnu/$o" \
+              || { echo "missing arm64 $o under /usr/lib/aarch64-linux-gnu"; exit 1; }
+          done
+          test -f "/usr/lib/gcc/aarch64-linux-gnu/${gccver}/crtbegin.o" \
+            || { echo "missing arm64 crtbegin.o under /usr/lib/gcc/aarch64-linux-gnu/${gccver}"; exit 1; }
+          test -f "/usr/lib/gcc/aarch64-linux-gnu/${gccver}/crtend.o" \
+            || { echo "missing arm64 crtend.o"; exit 1; }
+          test -e /lib/aarch64-linux-gnu/ld-linux-aarch64.so.1 -o -e /lib/ld-linux-aarch64.so.1 \
+            || { echo "missing arm64 dynamic linker ld-linux-aarch64.so.1"; exit 1; }
+          for l in libz.so.1 libzstd.so.1 libxml2.so.16; do
+            test -e "/usr/lib/aarch64-linux-gnu/$l" \
+              || { echo "missing arm64 $l under /usr/lib/aarch64-linux-gnu"; exit 1; }
+          done
+          echo "arm64 cross sysroot ready (gcc ${gccver})"
+
       - name: Fetch host x86_64 LLVM SDK
         run: |
           set -euo pipefail
