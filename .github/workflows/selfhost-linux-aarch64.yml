@@ -142,15 +142,65 @@ jobs:
           chmod +x with-seed
           LD_LIBRARY_PATH="$PWD/.link-shim:${LD_LIBRARY_PATH:-}" ./with-seed version
 
+      - name: Seed subprocess-spawn smoke test
+        working-directory: src-tree
+        env:
+          WITH: ${{ github.workspace }}/src-tree/with-seed
+        run: |
+          # DIAGNOSTIC (not a gate): isolate whether the cross-built aarch64 seed
+          # can spawn a subprocess. The full `with build` fails with every
+          # fork-based bootstrap-*-object target exiting 127 (empty stderr) while
+          # in-process targets pass — the signature of execvp failing in the child.
+          # T1 = in-process object emit (no subprocess). T2 = full build (seed
+          # forks the linker via posix_run_argv). Their split pins the layer.
+          # Do NOT `set -e`: we want every result, not an abort on the first rc.
+          set -uo pipefail
+          export PATH="$PWD/.link-shim:$LLVM_PREFIX/bin:$PATH"
+          export LD_LIBRARY_PATH="$PWD/.link-shim:${LD_LIBRARY_PATH:-}"
+          printf 'fn main:\n    print_i32(42)\n' > /tmp/smoke.w
+
+          echo "===== T1: in-process --emit-obj (seed spawns NOTHING) ====="
+          "$WITH" build /tmp/smoke.w --emit-obj --no-prelude -O1 -o /tmp/smoke.o \
+            >/tmp/t1.out 2>/tmp/t1.err; t1=$?
+          echo "T1 rc=$t1"
+          echo "--- t1.out ---"; cat /tmp/t1.out || true
+          echo "--- t1.err ---"; cat /tmp/t1.err || true
+          ls -la /tmp/smoke.o 2>&1 || echo "(no /tmp/smoke.o)"
+
+          echo "===== T2: full build (seed FORKS the linker subprocess) ====="
+          "$WITH" build /tmp/smoke.w -o /tmp/smoke \
+            >/tmp/t2.out 2>/tmp/t2.err; t2=$?
+          echo "T2 rc=$t2"
+          echo "--- t2.out ---"; cat /tmp/t2.out || true
+          echo "--- t2.err ---"; cat /tmp/t2.err || true
+          if [ -x /tmp/smoke ]; then /tmp/smoke; echo "smoke run rc=$?"; else echo "(no /tmp/smoke produced)"; fi
+
+          echo "===== VERDICT ====="
+          echo "T1(emit)=$t1  T2(spawn-linker)=$t2"
+          echo "  T1=0,T2!=0 -> subprocess spawn broken on aarch64 (posix_run_argv/exec)"
+          echo "  T1=0,T2=0  -> spawn OK; bootstrap-127 is narrower (seed-as-argv0 path/env)"
+          echo "  T1!=0      -> object emit itself broken (unexpected; version works)"
+
       - name: Build (seed -> stage1 -> stage2 -> final)
         working-directory: src-tree
         env:
           WITH: ${{ github.workspace }}/src-tree/with-seed
         run: |
-          set -euo pipefail
+          set -uo pipefail
           export PATH="$PWD/.link-shim:$LLVM_PREFIX/bin:$PATH"
           export LD_LIBRARY_PATH="$PWD/.link-shim:${LD_LIBRARY_PATH:-}"
-          "$WITH" build
+          if ! "$WITH" build; then
+            rc=$?
+            echo "===== BUILD FAILED rc=$rc — dumping compiler capture files ====="
+            # comp_run_compiler_capture writes child stdout/stderr next to each
+            # target under out/; surface them (the console echo only fires when
+            # child stderr is non-empty, which it is not for an exec failure).
+            find out -type f \( -name '*.stderr' -o -name '*.stdout' \) 2>/dev/null \
+              | while read -r f; do
+                  if [ -s "$f" ]; then echo "--- $f ---"; cat "$f"; fi
+                done
+            exit "$rc"
+          fi
           test -x out/release/bin/with || { echo "native release compiler not produced"; exit 1; }
           out/release/bin/with version
 
