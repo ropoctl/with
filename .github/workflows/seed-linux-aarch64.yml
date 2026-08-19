@@ -171,20 +171,31 @@ jobs:
           echo "using libgcc-${gccver}-dev:arm64"
           sudo apt-get install -y --no-install-recommends \
             libc6-dev:arm64 "libgcc-${gccver}-dev:arm64" \
-            zlib1g:arm64 libzstd1:arm64 libxml2:arm64
-          # The xml2 resolver (Link.w link_stage_linux_system_lib_path) probes
-          # libxml2.so, then libxml2.so.16, else emits -lxml2 (which needs an
-          # unversioned libxml2.so). Ubuntu's runtime libxml2 ships only
-          # libxml2.so.2 (SONAME libxml2.so.2) — no .so.16, no dev .so — so the
-          # host build works solely because libxml2-dev provides that unversioned
-          # symlink. libxml2-dev is not cleanly co-installable across arches, so
-          # instead create the dev-style symlink ourselves against the arm64
-          # SONAME. -lxml2 then resolves and DT_NEEDED becomes libxml2.so.2,
-          # which exists on the aarch64 target. (libz/libzstd resolve directly
-          # via their .so.1 absolute-path branch, so they need no symlink.)
+            libstdc++6:arm64 zlib1g:arm64 libzstd1:arm64 libxml2:arm64
+          # The compiler links against its own required libs (build/compiler.w):
+          # stdc++, z, zstd, xml2. In the direct ld.lld cross-link
+          # (Link.w link_stage_make_linux_llvm_link_command) these are emitted as
+          # -l<name> search flags: `stdc++` is never special-cased so it is ALWAYS
+          # -lstdc++, and z/zstd/xml2 also fall through to -l<name> here (the run
+          # emitted -lstdc++ -lz -lzstd as bare -l flags and ld.lld could not find
+          # them). ld.lld's -l<name> search wants an UNVERSIONED lib<name>.so; the
+          # arm64 runtime packages ship only the versioned SONAME (lib<name>.so.N,
+          # no .so, no dev symlink), so the search fails. The x86_64 host link only
+          # works because the host -dev packages provide those unversioned symlinks.
+          # The -dev packages are not cleanly co-installable across arches, so —
+          # exactly as done for libxml2 — create the dev-style unversioned symlink
+          # ourselves against each installed arm64 SONAME. -l<name> then resolves
+          # via the -L/usr/lib/aarch64-linux-gnu search dir, and DT_NEEDED records
+          # the versioned SONAME (lib<name>.so.N), which exists on the aarch64 target.
           m=/usr/lib/aarch64-linux-gnu
-          test -e "$m/libxml2.so.2" || { echo "arm64 libxml2.so.2 not installed"; exit 1; }
-          sudo ln -sf libxml2.so.2 "$m/libxml2.so"
+          link_so() {  # $1 = unversioned name, $2 = installed SONAME to point at
+            test -e "$m/$2" || { echo "arm64 $2 not installed under $m"; exit 1; }
+            sudo ln -sf "$2" "$m/$1"
+          }
+          link_so libstdc++.so libstdc++.so.6
+          link_so libz.so      libz.so.1
+          link_so libzstd.so   libzstd.so.1
+          link_so libxml2.so   libxml2.so.2
           # Assert the exact files the link probe requires — turn a would-be
           # expensive link-step failure (~15min into the job) into a cheap,
           # explicit failure here.
@@ -197,8 +208,8 @@ jobs:
             || { echo "missing arm64 crtend.o"; exit 1; }
           test -e /lib/aarch64-linux-gnu/ld-linux-aarch64.so.1 -o -e /lib/ld-linux-aarch64.so.1 \
             || { echo "missing arm64 dynamic linker ld-linux-aarch64.so.1"; exit 1; }
-          # z/zstd resolve via absolute .so.1; xml2 via the unversioned .so above.
-          for l in libz.so.1 libzstd.so.1 libxml2.so; do
+          # All four required libs must now resolve as unversioned -l<name>.
+          for l in libstdc++.so libz.so libzstd.so libxml2.so; do
             test -e "$m/$l" || { echo "missing arm64 $l under $m"; exit 1; }
           done
           echo "arm64 cross sysroot ready (gcc ${gccver})"
