@@ -1,0 +1,237 @@
+name: seed linux-aarch64 (cross)
+
+# Cross-builds a native linux-aarch64 `with` compiler seed on an x86_64 Linux
+# runner and publishes it as a ropoctl prerelease asset `with-linux-aarch64`
+# (tag `seed-linux-aarch64`).
+#
+# How it works: the x86_64 host bootstraps a fresh `with` from a buildable
+# source tip (withlang-dev main, which supports --target=aarch64-unknown-linux-gnu
+# — TargetSpec.target_spec_cross_supported includes kind 2). That fresh compiler
+# then (a) builds the linux-aarch64 runtime/bridge objects (`:cross-rt-arm`) and
+# (b) cross-emits+links the compiler binary itself for aarch64. The aarch64 ELF
+# link statically pulls the TARGET arch's libclang.a/libLLVM*.a from the
+# linux-aarch64 LLVM SDK, so this job REQUIRES the `sdk-linux-aarch64` asset that
+# the `sdk-llvm linux-aarch64` workflow publishes. It fails loudly (below) if
+# that SDK is not yet published.
+#
+# The produced binary is a real native aarch64 ELF; it is NOT run or
+# fixpoint-verified here (no aarch64 runner). It is an intermediate seed for a
+# downstream native aarch64 bootstrap (stage1->stage2->stage3 fixpoint).
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: >-
+          Buildable source tip to cross-build from (withlang-dev/with).
+          Must be green from the pinned seed. Default is the verified green tip.
+        required: false
+        default: "1aed64db"
+  push:
+    branches: [seed-ci-trigger]
+
+concurrency:
+  group: seed-linux-aarch64-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  cross-seed:
+    name: cross-build linux-aarch64 seed
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      LLVM_VER: "22.1.6"
+      # Cross-build source (buildable from the pinned seed below).
+      SOURCE_REPO: withlang-dev/with
+      SOURCE_REF: ${{ github.event.inputs.source_ref || '1aed64db' }}
+      # Native x86_64 host bootstrap seed (matches withlang-dev selfhost-linux CI).
+      WITH_SEED_REPO: withlang-dev/with
+      WITH_SEED_VERSION: v0.15.1.3
+      WITH_SEED_ASSET: with-linux-x86_64
+      WITH_SEED_SHA256: 0556c80c0acc44545c77e1dac77ffb677fe53c4cdbefba4aa7d36eb63b27b595
+      # Native x86_64 host LLVM SDK (drives the host bootstrap link).
+      WITH_SDK_REPO: withlang-dev/with
+      WITH_SDK_VERSION: v0.15.1
+      WITH_SDK_ASSET: with-llvm-sdk-22.1.6-linux-x86_64.tar.zst
+      # linux-aarch64 TARGET LLVM SDK — statically linked into the cross compiler.
+      # Published by the `sdk-llvm linux-aarch64` workflow to ropoctl.
+      CROSS_SDK_TAG: sdk-linux-aarch64
+      CROSS_SDK_ASSET: with-llvm-sdk-22.1.6-linux-aarch64.tar.gz
+      # Cross target.
+      CROSS_TRIPLE: aarch64-unknown-linux-gnu
+      # Published seed asset.
+      SEED_RELEASE_TAG: seed-linux-aarch64
+      SEED_ASSET: with-linux-aarch64
+      LLVM_PREFIX: ${{ github.workspace }}/.deps/llvm-22.1.6-linux-x86_64
+      WITH_OUT_DIR: ${{ github.workspace }}/out
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Guard — require the linux-aarch64 SDK asset (fail loudly)
+        run: |
+          set -euo pipefail
+          # The cross link statically pulls the aarch64 libclang.a/libLLVM*.a from
+          # this SDK. Without it there is nothing to link against — fail now with a
+          # clear message rather than deep in the link with an obscure error.
+          if ! gh release view "$CROSS_SDK_TAG" --repo "$GITHUB_REPOSITORY" \
+                --json assets --jq '.assets[].name' 2>/dev/null | grep -qx "$CROSS_SDK_ASSET"; then
+            echo "error: required linux-aarch64 SDK asset not published yet." >&2
+            echo "       expected: $GITHUB_REPOSITORY release '$CROSS_SDK_TAG' asset '$CROSS_SDK_ASSET'" >&2
+            echo "       run the 'sdk-llvm linux-aarch64' workflow first (it must go green)." >&2
+            exit 1
+          fi
+          echo "found $CROSS_SDK_ASSET on $GITHUB_REPOSITORY:$CROSS_SDK_TAG"
+
+      - name: Checkout buildable source (withlang-dev/with @ ref)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: ${{ env.SOURCE_REF }}
+          path: src-tree
+
+      - name: Confirm host arch and source tip
+        working-directory: src-tree
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "x86_64" || { echo "runner is not x86_64"; exit 1; }
+          git log -1 --oneline
+          # This tip must support the aarch64 cross target (kind 2).
+          grep -q 'kind == 2' src/TargetSpec.w \
+            || { echo "source tip does not enable the aarch64 cross target (kind 2)"; exit 1; }
+
+      - name: Install host packages
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          # zstd: extract the host SDK. dev libs: the compiler link line uses
+          # -lz -lzstd -lxml2 (build/compiler.w).
+          sudo apt-get install -y --no-install-recommends \
+            zstd zlib1g-dev libzstd-dev libxml2-dev curl ca-certificates
+
+      - name: Fetch host x86_64 LLVM SDK
+        run: |
+          set -euo pipefail
+          mkdir -p .deps
+          curl -fL -o /tmp/host-sdk.tar.zst \
+            "https://github.com/$WITH_SDK_REPO/releases/download/$WITH_SDK_VERSION/$WITH_SDK_ASSET"
+          zstd -d -c /tmp/host-sdk.tar.zst | tar -x -C .deps
+          test -x "$LLVM_PREFIX/bin/lld" || { echo "host SDK lld missing"; ls -la .deps; exit 1; }
+          test -f "$LLVM_PREFIX/lib/libclang.a" || { echo "host SDK libclang.a missing"; exit 1; }
+
+      - name: Fetch target linux-aarch64 LLVM SDK
+        run: |
+          set -euo pipefail
+          mkdir -p .deps
+          curl -fL -o /tmp/cross-sdk.tar.gz \
+            "https://github.com/$GITHUB_REPOSITORY/releases/download/$CROSS_SDK_TAG/$CROSS_SDK_ASSET"
+          curl -fL -o /tmp/cross-sdk.tar.gz.sha256 \
+            "https://github.com/$GITHUB_REPOSITORY/releases/download/$CROSS_SDK_TAG/$CROSS_SDK_ASSET.sha256" || true
+          if [ -s /tmp/cross-sdk.tar.gz.sha256 ]; then
+            # The sidecar is "<sha>  <asset-name>"; verify against our local file.
+            want="$(awk '{print $1}' /tmp/cross-sdk.tar.gz.sha256)"
+            got="$(sha256sum /tmp/cross-sdk.tar.gz | awk '{print $1}')"
+            test "$want" = "$got" || { echo "cross SDK sha256 mismatch: want=$want got=$got"; exit 1; }
+          fi
+          tar -xzf /tmp/cross-sdk.tar.gz -C .deps
+          cross_prefix=".deps/llvm-${LLVM_VER}-linux-aarch64"
+          test -f "$cross_prefix/lib/libclang.a" \
+            || { echo "cross SDK libclang.a missing at $cross_prefix"; ls -la "$cross_prefix/lib" 2>/dev/null | head; exit 1; }
+
+      - name: Set up linker shim (SDK lld + libxml2.so.16)
+        run: |
+          set -euo pipefail
+          mkdir -p .link-shim
+          # The seed emits -fuse-ld=lld; expose the host SDK's lld under the names
+          # the driver looks for. lld is target-agnostic, so the same ld.lld links
+          # the aarch64 ELF cross output. SDK lld has DT_NEEDED libxml2.so.16 while
+          # Ubuntu ships libxml2.so.2 — ABI-safe for linking, so alias it.
+          ln -sf "$LLVM_PREFIX/bin/ld.lld" .link-shim/ld.lld
+          ln -sf "$LLVM_PREFIX/bin/ld.lld" .link-shim/ld64.lld
+          ln -sf "$LLVM_PREFIX/bin/lld"    .link-shim/lld
+          xml2="$(ldconfig -p | awk '/libxml2\.so\.2 /{print $NF; exit}')"
+          [ -n "$xml2" ] || xml2="$(ls /lib/x86_64-linux-gnu/libxml2.so.2* 2>/dev/null | head -1)"
+          [ -n "$xml2" ] || { echo "no system libxml2.so.2"; exit 1; }
+          ln -sf "$xml2" .link-shim/libxml2.so.16
+          LD_LIBRARY_PATH="$PWD/.link-shim:${LD_LIBRARY_PATH:-}" "$LLVM_PREFIX/bin/ld.lld" --version
+
+      - name: Bootstrap host seed
+        run: |
+          set -euo pipefail
+          curl -fL -o with-seed \
+            "https://github.com/$WITH_SEED_REPO/releases/download/$WITH_SEED_VERSION/$WITH_SEED_ASSET"
+          printf '%s  %s\n' "$WITH_SEED_SHA256" with-seed | sha256sum -c -
+          chmod +x with-seed
+          LD_LIBRARY_PATH="$PWD/.link-shim:${LD_LIBRARY_PATH:-}" ./with-seed version
+
+      - name: Build native host compiler (seed -> stage1 -> stage2 -> final)
+        working-directory: src-tree
+        env:
+          WITH: ${{ github.workspace }}/with-seed
+        run: |
+          set -euo pipefail
+          export PATH="$GITHUB_WORKSPACE/.link-shim:$LLVM_PREFIX/bin:$PATH"
+          export LD_LIBRARY_PATH="$GITHUB_WORKSPACE/.link-shim:${LD_LIBRARY_PATH:-}"
+          # Symlink the fetched .deps into the source tree so relative .deps paths
+          # (host + cross SDK) resolve from the build CWD.
+          ln -sfn "$GITHUB_WORKSPACE/.deps" .deps
+          "$WITH" build
+          test -x out/release/bin/with || { echo "native release compiler not produced"; exit 1; }
+          out/release/bin/with version
+
+      - name: Build linux-aarch64 cross runtime/bridge objects (:cross-rt-arm)
+        working-directory: src-tree
+        env:
+          WITH: ${{ github.workspace }}/with-seed
+        run: |
+          set -euo pipefail
+          export PATH="$GITHUB_WORKSPACE/.link-shim:$LLVM_PREFIX/bin:$PATH"
+          export LD_LIBRARY_PATH="$GITHUB_WORKSPACE/.link-shim:${LD_LIBRARY_PATH:-}"
+          "$WITH" build :cross-rt-arm
+          d=out/lib/cross/linux_aarch64
+          for f in embedded_objects.o llvm_bridge.o clang_bridge.o llvm_ld.rsp; do
+            test -f "$d/$f" || { echo "missing cross artifact $d/$f"; ls -la "$d" 2>/dev/null; exit 1; }
+          done
+
+      - name: Cross-emit + link the linux-aarch64 compiler binary
+        working-directory: src-tree
+        run: |
+          set -euo pipefail
+          export PATH="$GITHUB_WORKSPACE/.link-shim:$LLVM_PREFIX/bin:$PATH"
+          export LD_LIBRARY_PATH="$GITHUB_WORKSPACE/.link-shim:${LD_LIBRARY_PATH:-}"
+          # out/gen/main.w is the version-stamped CLI entry produced by `with build`;
+          # it `use`s the src/ modules, so the full compiler is compiled in.
+          test -f out/gen/main.w || { echo "out/gen/main.w missing (expected after build)"; exit 1; }
+          out/release/bin/with build --target "$CROSS_TRIPLE" out/gen/main.w -O1 \
+            -o "$GITHUB_WORKSPACE/$SEED_ASSET"
+
+      - name: Verify cross output is a native aarch64 ELF
+        run: |
+          set -euo pipefail
+          test -f "$SEED_ASSET" || { echo "cross seed binary not produced"; exit 1; }
+          file "$SEED_ASSET"
+          file "$SEED_ASSET" | grep -Eq 'ELF 64-bit.*(aarch64|ARM aarch64)' \
+            || { echo "cross output is not an aarch64 ELF"; exit 1; }
+          # Host x86_64 cannot execute an aarch64 binary; do not run it here.
+          ls -la "$SEED_ASSET"
+
+      - name: Package + publish seed to ropoctl prerelease
+        run: |
+          set -euo pipefail
+          sha256sum "$SEED_ASSET" | tee "$SEED_ASSET.sha256"
+          gh release view "$SEED_RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$SEED_RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --prerelease \
+              --title "with linux-aarch64 cross seed" \
+              --notes "CI cross-built native linux-aarch64 \`with\` compiler (from $SOURCE_REPO@$SOURCE_REF). Intermediate seed for a native aarch64 stage1->stage2->stage3 bootstrap; NOT fixpoint-verified here."
+          gh release upload "$SEED_RELEASE_TAG" "$SEED_ASSET" "$SEED_ASSET.sha256" \
+            --repo "$GITHUB_REPOSITORY" --clobber
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: with-linux-aarch64-seed
+          path: |
+            with-linux-aarch64
+            with-linux-aarch64.sha256
+          retention-days: 14
