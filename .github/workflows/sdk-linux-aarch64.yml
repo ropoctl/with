@@ -1,0 +1,114 @@
+name: sdk-llvm linux-aarch64
+
+# Builds the static LLVM/Clang/lld SDK for linux-aarch64 from the pinned
+# LLVM source (tools/build-static-llvm.sh) on a native arm64 Linux runner,
+# then publishes it as a ropoctl prerelease asset
+# `with-llvm-sdk-22.1.6-linux-aarch64.tar.gz`.
+#
+# This asset is the missing prerequisite for cross-building a linux-aarch64
+# `with` stage1 seed: the cross-compiler link statically links the TARGET
+# arch's libclang.a / libLLVM*.a, which only this SDK provides. The tarball
+# extracts to `.deps/llvm-22.1.6-linux-aarch64/`, exactly where
+# `cross_llvm_prefix("linux_aarch64")` (build.w) looks for it.
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: sdk-linux-aarch64-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  build-sdk:
+    name: build static LLVM SDK (linux-aarch64)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 350
+    env:
+      LLVM_VER: 22.1.6
+      HOST_TAG: linux-aarch64
+      RELEASE_TAG: sdk-linux-aarch64
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Confirm native arch
+        run: |
+          set -euo pipefail
+          uname -m
+          test "$(uname -m)" = "aarch64" || { echo "runner is not aarch64"; exit 1; }
+          nproc
+          df -h .
+
+      - name: Install host toolchain
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          # Bootstrap compiler (clang + ld.lld) and build drivers (cmake, ninja).
+          # LLVM zlib/zstd are OFF in the SDK build, so no dev libs are needed.
+          sudo apt-get install -y --no-install-recommends \
+            clang lld cmake ninja-build python3 git curl ca-certificates xz-utils
+          clang --version
+          ld.lld --version
+          cmake --version
+          ninja --version
+
+      - name: Build static LLVM SDK
+        run: |
+          set -euo pipefail
+          export ROOT="$PWD/.deps"
+          export HOST_TAG="$HOST_TAG"
+          export LLVM_VERSION="$LLVM_VER"
+          export LLVM_BOOTSTRAP_CC=clang
+          export LLVM_BOOTSTRAP_CXX=clang++
+          export LLVM_BOOTSTRAP_LD=ld.lld
+          # Use the system cmake/ninja as build drivers (the resulting lib/*.a are
+          # identical regardless of which cmake/ninja drives the clang-bootstrapped
+          # build); this skips the from-source cmake/ninja bootstrap.
+          export SDK_CMAKE="$(command -v cmake)"
+          export SDK_NINJA="$(command -v ninja)"
+          export PARALLEL_JOBS="$(nproc)"
+          time bash tools/build-static-llvm.sh
+
+      - name: Verify SDK
+        run: |
+          set -euo pipefail
+          prefix=".deps/llvm-${LLVM_VER}-${HOST_TAG}"
+          test -f "$prefix/lib/libclang.a" || { echo "missing libclang.a"; exit 1; }
+          test -d "$prefix/lib/clang/22/include" || { echo "missing clang builtin headers"; exit 1; }
+          file "$prefix/lib/libclang.a" || true
+          "$prefix/bin/llvm-nm" -g "$prefix/lib/libclang.a" | grep -q clang_createIndex \
+            || { echo "libclang.a missing clang_createIndex"; exit 1; }
+          du -sh "$prefix"
+
+      - name: Package asset
+        run: |
+          set -euo pipefail
+          prefix="llvm-${LLVM_VER}-${HOST_TAG}"
+          asset="with-llvm-sdk-${LLVM_VER}-${HOST_TAG}.tar.gz"
+          tar -czf "$asset" -C .deps "$prefix"
+          sha256sum "$asset" | tee "$asset.sha256"
+          ls -la "$asset"
+          echo "ASSET=$asset" >> "$GITHUB_ENV"
+
+      - name: Publish to ropoctl prerelease
+        run: |
+          set -euo pipefail
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --prerelease \
+              --title "Static LLVM ${LLVM_VER} SDK (linux-aarch64)" \
+              --notes "CI-built static LLVM/Clang/lld SDK for linux-aarch64. Extracts to .deps/llvm-${LLVM_VER}-linux-aarch64/. Prerequisite for cross-building a linux-aarch64 with stage1 seed."
+          gh release upload "$RELEASE_TAG" "$ASSET" "$ASSET.sha256" \
+            --repo "$GITHUB_REPOSITORY" --clobber
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: with-llvm-sdk-linux-aarch64
+          path: |
+            with-llvm-sdk-${{ env.LLVM_VER }}-${{ env.HOST_TAG }}.tar.gz
+            with-llvm-sdk-${{ env.LLVM_VER }}-${{ env.HOST_TAG }}.tar.gz.sha256
+          retention-days: 14

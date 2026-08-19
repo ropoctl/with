@@ -1,0 +1,141 @@
+name: sdk-llvm windows-aarch64
+
+# Builds the static LLVM/Clang/lld SDK for windows-aarch64 from the pinned
+# LLVM source (tools/build-static-llvm.ps1) on a native ARM64 Windows runner
+# (windows-11-arm, public preview), then publishes it as a ropoctl prerelease
+# asset `with-llvm-sdk-22.1.6-windows-aarch64.tar.gz`.
+#
+# EXPERIMENTAL: the .ps1 was authored for windows-x86_64 (hardcoded llvm-ml64,
+# x64 mt.exe path, a pre-existing llvm-ml in the prefix). This workflow
+# overrides those to ARM64-discovered tool paths. The toolchain-locate step
+# fails loudly (in minutes) if the runner image is missing clang-cl / lld-link
+# / llvm-ml / mt.exe, rather than discovering it hours into the LLVM build.
+#
+# The tarball extracts to `.deps/llvm-22.1.6-windows-aarch64-msvc/` (mirroring
+# the existing windows-x86_64-msvc prefix convention in build.w).
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: sdk-windows-aarch64-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  build-sdk:
+    name: build static LLVM SDK (windows-aarch64)
+    runs-on: windows-11-arm
+    timeout-minutes: 350
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      LLVM_VER: "22.1.6"
+      HOST_TAG: windows-aarch64-msvc
+      ASSET_TAG: windows-aarch64
+      RELEASE_TAG: sdk-windows-aarch64
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Confirm native arch
+        run: |
+          $arch = $env:PROCESSOR_ARCHITECTURE
+          Write-Host "PROCESSOR_ARCHITECTURE=$arch"
+          Write-Host "cpu count = $env:NUMBER_OF_PROCESSORS"
+          if ($arch -ne "ARM64") { throw "runner is not ARM64 (got $arch)" }
+
+      - name: Set up MSVC (arm64)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: arm64
+
+      - name: Install LLVM + ninja
+        run: |
+          choco install --no-progress -y llvm ninja
+          # Refresh PATH so the freshly installed tools are visible.
+          $env:PATH = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+          "PATH=$env:PATH" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Locate toolchain (fail fast if missing)
+        run: |
+          function Find-Tool($name) {
+            $c = Get-Command $name -ErrorAction SilentlyContinue
+            if ($c) { return $c.Source }
+            return $null
+          }
+          $clangcl = Find-Tool "clang-cl.exe"
+          $lldlink = Find-Tool "lld-link.exe"
+          $llvmml  = Find-Tool "llvm-ml.exe"
+          $cmake   = Find-Tool "cmake.exe"
+          $ninja   = Find-Tool "ninja.exe"
+          # mt.exe comes from the Windows SDK; msvc-dev-cmd puts it on PATH.
+          $mt      = Find-Tool "mt.exe"
+          Write-Host "clang-cl: $clangcl"
+          Write-Host "lld-link: $lldlink"
+          Write-Host "llvm-ml : $llvmml"
+          Write-Host "cmake   : $cmake"
+          Write-Host "ninja   : $ninja"
+          Write-Host "mt      : $mt"
+          $missing = @()
+          foreach ($p in @(@("clang-cl",$clangcl),@("lld-link",$lldlink),@("llvm-ml",$llvmml),@("cmake",$cmake),@("ninja",$ninja),@("mt",$mt))) {
+            if (-not $p[1]) { $missing += $p[0] }
+          }
+          if ($missing.Count -gt 0) { throw "missing required tools: $($missing -join ', ')" }
+          "LLVM_BOOTSTRAP_CLANG_CL=$clangcl" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "LLVM_BOOTSTRAP_LLD_LINK=$lldlink" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "LLVM_BOOTSTRAP_LLVM_ML=$llvmml"   | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "LLVM_BOOTSTRAP_MT=$mt"            | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "SDK_CMAKE=$cmake"                 | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "SDK_NINJA=$ninja"                 | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Build static LLVM SDK
+        run: |
+          $env:ROOT = Join-Path (Get-Location) ".deps"
+          $env:LLVM_VERSION = $env:LLVM_VER
+          $env:HOST_TAG = $env:HOST_TAG
+          $env:PARALLEL_JOBS = $env:NUMBER_OF_PROCESSORS
+          # Native ARM64 host: build the AArch64 backend (plus X86 for parity/cross).
+          $env:LLVM_TARGETS_TO_BUILD = "AArch64;X86"
+          & pwsh -File tools/build-static-llvm.ps1
+          if ($LASTEXITCODE -ne 0) { throw "build-static-llvm.ps1 failed ($LASTEXITCODE)" }
+
+      - name: Verify SDK
+        run: |
+          $prefix = ".deps/llvm-$($env:LLVM_VER)-$($env:HOST_TAG)"
+          if (-not (Test-Path "$prefix/lib/libclang.lib")) { throw "missing libclang.lib" }
+          & "$prefix/bin/llvm-nm.exe" -g "$prefix/lib/libclang.lib" | Select-String "clang_createIndex" | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "libclang.lib missing clang_createIndex" }
+
+      - name: Package asset
+        run: |
+          $prefix = "llvm-$($env:LLVM_VER)-$($env:HOST_TAG)"
+          $asset  = "with-llvm-sdk-$($env:LLVM_VER)-$($env:ASSET_TAG).tar.gz"
+          tar.exe -czf $asset -C .deps $prefix
+          $hash = (Get-FileHash $asset -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $asset" | Out-File "$asset.sha256" -Encoding ascii
+          Get-Item $asset
+          "ASSET=$asset" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Publish to ropoctl prerelease
+        run: |
+          gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --prerelease `
+              --title "Static LLVM $($env:LLVM_VER) SDK (windows-aarch64)" `
+              --notes "CI-built static LLVM/Clang/lld SDK for windows-aarch64. Extracts to .deps/llvm-$($env:LLVM_VER)-windows-aarch64-msvc/. Prerequisite for cross-building a windows-aarch64 with stage1 seed."
+          }
+          gh release upload $env:RELEASE_TAG $env:ASSET "$($env:ASSET).sha256" --repo $env:GITHUB_REPOSITORY --clobber
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: with-llvm-sdk-windows-aarch64
+          path: |
+            with-llvm-sdk-${{ env.LLVM_VER }}-${{ env.ASSET_TAG }}.tar.gz
+            with-llvm-sdk-${{ env.LLVM_VER }}-${{ env.ASSET_TAG }}.tar.gz.sha256
+          retention-days: 14
