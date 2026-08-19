@@ -25,8 +25,10 @@ on:
         description: >-
           Buildable source tip to cross-build from (withlang-dev/with).
           Must be green from the pinned seed. Default is the verified green tip.
+          Use a FULL 40-char commit SHA: actions/checkout treats a short SHA as a
+          branch/tag name pattern and its shallow fetch then matches nothing.
         required: false
-        default: "1aed64db"
+        default: "1aed64db17d03b7913062823e4ea9a7022f38d15"
   push:
     branches: [seed-ci-trigger]
 
@@ -46,7 +48,7 @@ jobs:
       LLVM_VER: "22.1.6"
       # Cross-build source (buildable from the pinned seed below).
       SOURCE_REPO: withlang-dev/with
-      SOURCE_REF: ${{ github.event.inputs.source_ref || '1aed64db' }}
+      SOURCE_REF: ${{ github.event.inputs.source_ref || '1aed64db17d03b7913062823e4ea9a7022f38d15' }}
       # Native x86_64 host bootstrap seed (matches withlang-dev selfhost-linux CI).
       WITH_SEED_REPO: withlang-dev/with
       WITH_SEED_VERSION: v0.15.1.3
